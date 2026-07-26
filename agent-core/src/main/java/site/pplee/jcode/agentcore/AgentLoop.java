@@ -167,6 +167,14 @@ final class AgentLoop {
                 hasMoreToolCalls = !toolResults.isEmpty() && !allTerminated(toolResults);
             }
 
+            // cancellation boundary: after the inner loop, before the run ends or
+            // the next (follow-up) turn starts. Catches cancellation that arrived
+            // during the tool batch (boundary 4 broke with empty or all-terminated
+            // results, so the inner loop exited without hitting boundary 1 again).
+            if (cancellation.isCancelled()) {
+                return abortRun(state, config);
+            }
+
             // step 13: drain follow-up
             var followUp = drain(config.followUpMessages());
             if (!followUp.isEmpty()) {
