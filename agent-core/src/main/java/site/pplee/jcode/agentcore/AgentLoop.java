@@ -7,13 +7,21 @@ import site.pplee.jcode.agentcore.model.AgentMessage;
 import site.pplee.jcode.agentcore.model.Content;
 import site.pplee.jcode.agentcore.model.LoopResult;
 import site.pplee.jcode.agentcore.model.StopReason;
+import site.pplee.jcode.agentcore.model.ToolExecutionMode;
+import site.pplee.jcode.agentcore.model.ToolResult;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
+import site.pplee.jcode.agentcore.spi.AgentTool;
 import site.pplee.jcode.agentcore.spi.LlmRequest;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 
@@ -22,9 +30,10 @@ import java.util.concurrent.ExecutorService;
  * (Step 8); this class is constructed by {@code Agent} and its methods are
  * invoked on {@code Agent}'s virtual-thread-per-task executor.
  *
- * Step 5 implements the no-tool skeleton: the full 15-step {@code runLoop}
- * sequence with {@code executeToolCalls} as a fail-fast stub. Step 6 replaces
- * the stub with real tool lookup / argument mapping / parallel execution.
+ * Implements the full 15-step {@code runLoop} sequence: model call, tool-call
+ * extraction, sequential/parallel tool execution with ordered result
+ * write-back, LENGTH truncation protection, steering/follow-up queues, and
+ * cancellation boundaries (before turn, before tool batch, failed future).
  */
 final class AgentLoop {
     private final ExecutorService executor;
@@ -80,6 +89,10 @@ final class AgentLoop {
             var hasMoreToolCalls = true;
 
             while (hasMoreToolCalls || !pendingMessages.isEmpty()) {
+                // cancellation boundary 1: before next turn / before model call
+                if (cancellation.isCancelled()) {
+                    return abortRun(state, config);
+                }
                 if (!firstTurn) {
                     emit(new AgentEvent.TurnStarted(), config);
                 }
@@ -93,34 +106,30 @@ final class AgentLoop {
                     pendingMessages = List.of();
                 }
 
+                // step 5: call model (cancellation boundary 2 handles failed future)
+                var request = new LlmRequest(
+                        config.model(),
+                        state.context().systemPrompt(),
+                        state.context().messages(),
+                        state.context().tools()
+                );
                 AgentMessage.Assistant assistant;
-                if (cancellation.isCancelled()) {
-                    // cancellation boundary 1: before model call
-                    assistant = new AgentMessage.Assistant(
-                            List.of(), StopReason.ABORTED, "cancelled", Instant.now());
-                } else {
-                    var request = new LlmRequest(
-                            config.model(),
-                            state.context().systemPrompt(),
-                            state.context().messages(),
-                            state.context().tools()
-                    );
-                    try {
-                        assistant = config.llmClient()
-                                .generate(request, cancellation, config.llmEventSink())
-                                .toCompletableFuture()
-                                .join();
-                    } catch (CompletionException e) {
-                        // cancellation boundary 2: failed future; boolean distinguishes ABORTED/ERROR
-                        var reason = cancellation.isCancelled() ? StopReason.ABORTED : StopReason.ERROR;
-                        var msg = cancellation.isCancelled() ? "cancelled" : causeMessage(e);
-                        assistant = new AgentMessage.Assistant(List.of(), reason, msg, Instant.now());
-                    }
+                try {
+                    assistant = config.llmClient()
+                            .generate(request, cancellation, config.llmEventSink())
+                            .toCompletableFuture()
+                            .join();
+                } catch (CompletionException e) {
+                    var reason = cancellation.isCancelled() ? StopReason.ABORTED : StopReason.ERROR;
+                    var msg = cancellation.isCancelled() ? "cancelled" : causeMessage(e);
+                    assistant = new AgentMessage.Assistant(List.of(), reason, msg, Instant.now());
                 }
 
+                // step 6: write assistant
                 state.append(assistant);
                 emit(new AgentEvent.MessageCompleted(assistant), config);
 
+                // step 7: terminal failure -> end
                 if (assistant.stopReason().isTerminalFailure()) {
                     emit(new AgentEvent.TurnCompleted(assistant, List.of()), config);
                     var result = state.result();
@@ -128,10 +137,20 @@ final class AgentLoop {
                     return result;
                 }
 
+                // step 8: extract tool calls
                 var toolCalls = extractToolCalls(assistant);
+
+                // cancellation boundary 3: before tool batch
+                if (!toolCalls.isEmpty() && cancellation.isCancelled()) {
+                    return abortRun(state, config);
+                }
+
+                // step 9-10: execute tools (LENGTH -> fail all; otherwise dispatch)
                 List<AgentMessage.ToolResult> toolResults;
                 if (toolCalls.isEmpty()) {
                     toolResults = List.of();
+                } else if (assistant.stopReason() == StopReason.LENGTH) {
+                    toolResults = failTruncatedToolCalls(toolCalls, config);
                 } else {
                     toolResults = executeToolCalls(toolCalls, state, config, cancellation);
                 }
@@ -140,12 +159,15 @@ final class AgentLoop {
                     emit(new AgentEvent.MessageCompleted(tr), config);
                 }
 
+                // step 11: TurnCompleted
                 emit(new AgentEvent.TurnCompleted(assistant, toolResults), config);
 
+                // step 12: drain steering; decide inner loop continuation
                 pendingMessages = drain(config.steeringMessages());
                 hasMoreToolCalls = !toolResults.isEmpty() && !allTerminated(toolResults);
             }
 
+            // step 13: drain follow-up
             var followUp = drain(config.followUpMessages());
             if (!followUp.isEmpty()) {
                 pendingMessages = followUp;
@@ -165,8 +187,158 @@ final class AgentLoop {
             AgentLoopConfig config,
             CancellationToken cancellation
     ) {
-        // Step 5 stub: tool execution is implemented in Step 6.
-        throw new UnsupportedOperationException("tool execution: Step 6");
+        if (toolCalls.isEmpty()) {
+            return List.of();
+        }
+        var toolMap = buildNameToTool(state.context().tools());
+        boolean sequential = config.toolExecution() == ToolExecutionMode.SEQUENTIAL
+                || toolCalls.stream().anyMatch(tc -> {
+                    var t = toolMap.get(tc.name());
+                    return t != null && t.executionMode() == ToolExecutionMode.SEQUENTIAL;
+                });
+        return sequential
+                ? executeSequential(toolCalls, toolMap, config, cancellation)
+                : executeParallel(toolCalls, toolMap, config, cancellation);
+    }
+
+    private List<AgentMessage.ToolResult> executeSequential(
+            List<Content.ToolCall> toolCalls,
+            Map<String, AgentTool<?>> toolMap,
+            AgentLoopConfig config,
+            CancellationToken cancellation
+    ) {
+        var messages = new ArrayList<AgentMessage.ToolResult>();
+        for (var tc : toolCalls) {
+            if (cancellation.isCancelled()) {
+                break;
+            }
+            emit(new AgentEvent.ToolStarted(tc), config);
+            var internal = executeOneToolCallSync(tc, toolMap, config.objectMapper(), cancellation);
+            var msg = toToolResultMessage(tc, internal);
+            emit(new AgentEvent.ToolCompleted(msg), config);
+            messages.add(msg);
+        }
+        return List.copyOf(messages);
+    }
+
+    private List<AgentMessage.ToolResult> executeParallel(
+            List<Content.ToolCall> toolCalls,
+            Map<String, AgentTool<?>> toolMap,
+            AgentLoopConfig config,
+            CancellationToken cancellation
+    ) {
+        var futures = new ArrayList<CompletableFuture<ToolResult>>();
+        var submitted = new ArrayList<Content.ToolCall>();
+        for (var tc : toolCalls) {
+            if (cancellation.isCancelled()) {
+                break;
+            }
+            emit(new AgentEvent.ToolStarted(tc), config);
+            submitted.add(tc);
+            futures.add(CompletableFuture.supplyAsync(
+                    () -> executeOneToolCallSync(tc, toolMap, config.objectMapper(), cancellation),
+                    executor));
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        var messages = new ArrayList<AgentMessage.ToolResult>();
+        for (int i = 0; i < futures.size(); i++) {
+            var internal = futures.get(i).join();
+            var msg = toToolResultMessage(submitted.get(i), internal);
+            emit(new AgentEvent.ToolCompleted(msg), config);
+            messages.add(msg);
+        }
+        return List.copyOf(messages);
+    }
+
+    private ToolResult executeOneToolCallSync(
+            Content.ToolCall toolCall,
+            Map<String, AgentTool<?>> toolMap,
+            ObjectMapper objectMapper,
+            CancellationToken cancellation
+    ) {
+        var tool = toolMap.get(toolCall.name());
+        if (tool == null) {
+            return ToolResult.failure("tool not found: " + toolCall.name());
+        }
+        return executeTyped(tool, toolCall, objectMapper, cancellation);
+    }
+
+    private <A> ToolResult executeTyped(
+            AgentTool<A> tool,
+            Content.ToolCall toolCall,
+            ObjectMapper objectMapper,
+            CancellationToken cancellation
+    ) {
+        A args;
+        try {
+            args = objectMapper.treeToValue(toolCall.arguments(), tool.argumentType());
+        } catch (Exception e) {
+            return ToolResult.failure("argument conversion failed: " + e.getMessage());
+        }
+        try {
+            return tool.execute(toolCall.id(), args, cancellation)
+                    .toCompletableFuture()
+                    .join();
+        } catch (CompletionException e) {
+            return ToolResult.failure("tool execution failed: " + causeMessage(e));
+        } catch (RuntimeException e) {
+            return ToolResult.failure("tool execution failed: " + e.getMessage());
+        }
+    }
+
+    private List<AgentMessage.ToolResult> failTruncatedToolCalls(
+            List<Content.ToolCall> toolCalls,
+            AgentLoopConfig config
+    ) {
+        var messages = new ArrayList<AgentMessage.ToolResult>();
+        for (var tc : toolCalls) {
+            emit(new AgentEvent.ToolStarted(tc), config);
+            var msg = new AgentMessage.ToolResult(
+                    tc.id(),
+                    tc.name(),
+                    List.of(new Content.Text(
+                            "tool call \"" + tc.name() + "\" not executed: "
+                                    + "response hit output token limit, arguments may be truncated")),
+                    true,
+                    false,
+                    Instant.now()
+            );
+            emit(new AgentEvent.ToolCompleted(msg), config);
+            messages.add(msg);
+        }
+        return List.copyOf(messages);
+    }
+
+    private LoopResult abortRun(LoopState state, AgentLoopConfig config) {
+        var aborted = new AgentMessage.Assistant(
+                List.of(), StopReason.ABORTED, "cancelled", Instant.now());
+        state.append(aborted);
+        emit(new AgentEvent.MessageCompleted(aborted), config);
+        emit(new AgentEvent.TurnCompleted(aborted, List.of()), config);
+        var result = state.result();
+        emit(new AgentEvent.AgentCompleted(result), config);
+        return result;
+    }
+
+    private static Map<String, AgentTool<?>> buildNameToTool(List<AgentTool<?>> tools) {
+        var map = new HashMap<String, AgentTool<?>>();
+        for (var t : tools) {
+            map.putIfAbsent(t.name(), t);
+        }
+        return map;
+    }
+
+    private static AgentMessage.ToolResult toToolResultMessage(
+            Content.ToolCall toolCall, ToolResult internal
+    ) {
+        return new AgentMessage.ToolResult(
+                toolCall.id(),
+                toolCall.name(),
+                internal.content(),
+                internal.error(),
+                internal.terminate(),
+                Instant.now()
+        );
     }
 
     private static boolean allTerminated(List<AgentMessage.ToolResult> toolResults) {
