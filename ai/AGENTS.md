@@ -19,6 +19,7 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 ## CONVENTIONS
 
 - `Message.Assistant.errorMessage` 仅允许在 `stopReason.isTerminalFailure()` 时非空（compact constructor 校验）。
+- `Message.ToolResultMessage` 不含 `terminate` 字段；terminate 是运行时概念，仅存在于 `agent-core.ToolExecutionResult`，不进入标准 LLM transcript。
 - `ModelClient` adapter 不得同步抛异常；provider/网络失败编码进 failed `CompletionStage`。
 - `CancellationSignal` 是只读协议，住在 `ai`（最低共享层），因为 Java 无 `AbortSignal` 等价物；model adapter 和工具都读同一个信号。创建/触发取消的 `CancellationSource` 在 `agent-core`。
 - `ToolSpec` 只携带可声明形状（给模型看）；执行能力在 `agent-core.AgentTool`。
