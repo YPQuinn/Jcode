@@ -32,7 +32,7 @@ Agent.prompt
 
 ## Maven 调整
 
-### 根 `pom.xml`
+### 根 `../../../pom.xml`
 
 增加集中版本属性：
 
@@ -40,7 +40,7 @@ Agent.prompt
 - `junit.version`
 - `maven.surefire.version`
 
-### `agent-core/pom.xml`
+### `../../../agent-core/pom.xml`
 
 增加：
 
@@ -515,7 +515,7 @@ void followUpMode(QueueMode mode)
 
 ## 实现顺序
 
-- [ ] 1. 在根 POM 和 `agent-core/pom.xml` 中固定 Jackson、JUnit 5 和 Surefire 版本；运行 `mvn -pl agent-core test`，确认空模块可测试。
+- [ ] 1. 在根 POM 和 `../../../agent-core/pom.xml` 中固定 Jackson、JUnit 5 和 Surefire 版本；运行 `mvn -pl agent-core test`，确认空模块可测试。
 - [ ] 2. 实现 `model` 包全部不可变 record、sealed interface 和 enum；为构造约束增加单元测试。
 - [ ] 3. 实现 cancellation（`CancellationSource` 不直接实现 `CancellationToken`，防 cast-back；`throwIfCancelled()` 抛 `CancellationException`）、pending queue（含 `QueueMode` 的 `ALL`/`ONE_AT_A_TIME` 两种 drain 模式，mode 可运行时改）和 event 类型；测试 drain 快照与顺序、取消幂等、事件顺序与 sink 契约。
 - [ ] 4. 实现 `LlmClient`、`LlmRequest`、`AgentTool` 及两个 sink SPI；确保 SPI 不引用 provider SDK。

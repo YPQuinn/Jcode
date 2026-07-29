@@ -37,8 +37,8 @@ Jcode/
 │       ├── queue/       # PendingMessageQueue/Source + QueueMode (steering/follow-up)
 │       └── tool/        # AgentTool + ToolExecutionResult + ToolExecutionMode + ToolUpdateSink + BeforeToolCall + AfterToolCall
 └── docs/
-    ├── architecture/    # pi-inspired-module-boundaries.md (模块边界权威文档)
-    ├── plans/           # java21-agent-loop-minimal-plan.md (Wave 0-5 实现计划)
+    ├── plans/           # 方案文档
+    │   └── archived/    # 已归档的过往实现计划，可以参考但不可作为当前的实施规范
     └── references/      # pi 参考副本 (.gitignored, 不属本仓库规则)
 ```
 
@@ -127,5 +127,10 @@ mvn verify
 - 无 Maven wrapper（`mvnw`）；用系统 `mvn`。
 - 无 CI 配置（无 `.github/workflows`/`Jenkinsfile`）。
 - jdtls（Java LSP）未安装；codegraph 未索引（`.codegraph/` 存在但未 `codegraph init`）。
-- 未来模块规划（未创建）：`coding-agent`、`ai-provider-openai/anthropic/google`、`server`、`tui`。创建门槛见 `docs/architecture/pi-inspired-module-boundaries.md` §3.6。
+- 未来模块规划（未创建）：`coding-agent`、`ai-provider-openai/anthropic/google`、`server`、`tui`。创建门槛见 `docs/plans/pi-inspired-module-boundaries.md` §3.6。
 - Wave 进度：Wave 0（模块 seam）✓、Wave 2（工具三阶段执行）✓ 已完成；Wave 1（流式协议）、Wave 3（Context 投影）、Wave 4（下一 Turn 控制）、Wave 5（并行双排序）见 `docs/architecture` §5。
+
+## Must Do After Change
+
+- 每次任务完成后必须按照 `docs/rules/git-commit-message.md` 规范提交代码
+- 每次代码提交前必须更新本文档以及各子 AGENTS.md 文档（如果有涉及到相应模块的更新）

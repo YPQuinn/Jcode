@@ -513,5 +513,5 @@ Session、Compaction、Skill、ExecutionEnv 会立即扩大并拖慢 `agent-core
 
 ### Jcode 当前基线
 
-- [`docs/plans/java21-agent-loop-minimal-plan.md`](../plans/java21-agent-loop-minimal-plan.md)
-- `agent-core/src/main/java/site/pplee/jcode/agentcore/`
+- [`archived/java21-agent-loop-minimal-plan.md`](archived/java21-agent-loop-minimal-plan.md)
+- `../../agent-core/src/main/java/site/pplee/jcode/agentcore`
