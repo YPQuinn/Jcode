@@ -2,6 +2,7 @@ package site.pplee.jcode.agentcore.model;
 
 import java.util.Objects;
 
+/** Stable reference to a model: provider name plus model identifier. */
 public record ModelRef(
         String provider,
         String modelId

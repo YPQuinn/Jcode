@@ -4,9 +4,15 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Sealed message type carried in {@link AgentContext}. Messages are appended
+ * in call order: a user prompt, the model's assistant response, and the
+ * tool results produced from that response.
+ */
 public sealed interface AgentMessage
         permits AgentMessage.User, AgentMessage.Assistant, AgentMessage.ToolResult {
 
+    /** A user-authored message (prompt or injected steering/follow-up). */
     record User(
             List<Content> content,
             Instant timestamp
@@ -17,6 +23,7 @@ public sealed interface AgentMessage
         }
     }
 
+    /** A model response; may carry text, thinking, and/or tool calls. */
     record Assistant(
             List<Content> content,
             StopReason stopReason,
@@ -35,6 +42,7 @@ public sealed interface AgentMessage
         }
     }
 
+    /** Outcome of a single tool execution, written back for the model to read. */
     record ToolResult(
             String toolCallId,
             String toolName,

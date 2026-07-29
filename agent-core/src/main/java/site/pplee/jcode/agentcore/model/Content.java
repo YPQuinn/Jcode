@@ -4,21 +4,28 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.Objects;
 
+/**
+ * Sealed content model for a single message part. A message is an ordered
+ * list of these; the core layer never parses tool-call arguments.
+ */
 public sealed interface Content
         permits Content.Text, Content.Thinking, Content.ToolCall {
 
+    /** Plain text. */
     record Text(String text) implements Content {
         public Text {
             Objects.requireNonNull(text, "text must not be null");
         }
     }
 
+    /** Model reasoning / thinking trace. */
     record Thinking(String text) implements Content {
         public Thinking {
             Objects.requireNonNull(text, "text must not be null");
         }
     }
 
+    /** A tool invocation requested by the model; arguments are an opaque {@link JsonNode}. */
     record ToolCall(
             String id,
             String name,

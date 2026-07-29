@@ -57,23 +57,28 @@ public final class Agent implements AutoCloseable {
         this.context = this.config.initialContext();
     }
 
+    /** Start a new run with a user message; fails if a run is already active. */
     public CompletionStage<LoopResult> prompt(AgentMessage.User message) {
         Objects.requireNonNull(message, "message must not be null");
         return submit(message, false);
     }
 
+    /** Resume the loop from the current context; fails if the last message is an assistant. */
     public CompletionStage<LoopResult> continueRun() {
         return submit(null, true);
     }
 
+    /** Enqueue a steering message injected before the next model call of the active run. */
     public void steer(AgentMessage.User message) {
         steeringQueue.enqueue(Objects.requireNonNull(message, "message must not be null"));
     }
 
+    /** Enqueue a follow-up message injected only when the run would otherwise stop. */
     public void followUp(AgentMessage.User message) {
         followUpQueue.enqueue(Objects.requireNonNull(message, "message must not be null"));
     }
 
+    /** Request cancellation of the active run, if any; idempotent. */
     public void abort() {
         var run = activeRun.get();
         if (run != null) {
@@ -81,10 +86,12 @@ public final class Agent implements AutoCloseable {
         }
     }
 
+    /** Current context; replaced atomically after each successful run. */
     public AgentContext context() {
         return context;
     }
 
+    /** True while a run is active. */
     public boolean isRunning() {
         return activeRun.get() != null;
     }

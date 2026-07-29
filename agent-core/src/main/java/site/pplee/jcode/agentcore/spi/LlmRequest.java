@@ -6,6 +6,10 @@ import site.pplee.jcode.agentcore.model.ModelRef;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Stable request boundary from the core loop to a {@link LlmClient}: which
+ * model, the system prompt, the full message history, and available tools.
+ */
 public record LlmRequest(
         ModelRef model,
         String systemPrompt,

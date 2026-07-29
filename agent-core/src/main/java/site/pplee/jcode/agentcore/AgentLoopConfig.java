@@ -13,6 +13,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Per-run configuration assembled by {@link Agent}: model/client bindings,
+ * shared {@link ObjectMapper}, tool execution mode, steering/follow-up
+ * sources, and event sinks. Optional sources/sinks default to empty/noop.
+ */
 record AgentLoopConfig(
         ModelRef model,
         LlmClient llmClient,
