@@ -26,8 +26,8 @@ import java.util.Objects;
 public sealed interface AgentEvent
         permits AgentEvent.AgentStarted, AgentEvent.TurnStarted,
                 AgentEvent.MessageCompleted, AgentEvent.ToolStarted,
-                AgentEvent.ToolCompleted, AgentEvent.TurnCompleted,
-                AgentEvent.AgentCompleted {
+                AgentEvent.ToolUpdate, AgentEvent.ToolCompleted,
+                AgentEvent.TurnCompleted, AgentEvent.AgentCompleted {
 
     /** A run has begun. */
     record AgentStarted() implements AgentEvent {}
@@ -46,6 +46,14 @@ public sealed interface AgentEvent
     record ToolStarted(Content.ToolCall call) implements AgentEvent {
         public ToolStarted {
             Objects.requireNonNull(call, "call must not be null");
+        }
+    }
+
+    /** Real-time progress update from a running tool. */
+    record ToolUpdate(Content.ToolCall call, Content update) implements AgentEvent {
+        public ToolUpdate {
+            Objects.requireNonNull(call, "call must not be null");
+            Objects.requireNonNull(update, "update must not be null");
         }
     }
 

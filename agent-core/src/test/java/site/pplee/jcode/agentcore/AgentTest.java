@@ -50,7 +50,7 @@ class AgentTest {
     private AgentConfig configWith(ModelClient client, AgentEventSink sink) {
         return new AgentConfig(
                 new AgentContext("sys", List.of(), List.of()),
-                MODEL, client, MAPPER, null, sink, null, null);
+                MODEL, client, MAPPER, null, null, null, sink, null, null);
     }
 
     // --- basic run ---
@@ -231,7 +231,7 @@ class AgentTest {
             @Override public String name() { return "echo"; }
             @Override public Class<Object> argumentType() { return Object.class; }
             @Override public java.util.concurrent.CompletionStage<site.pplee.jcode.agentcore.tool.ToolExecutionResult> execute(
-                    String id, Object args, site.pplee.jcode.ai.concurrent.CancellationSignal c) {
+                    String id, Object args, site.pplee.jcode.agentcore.tool.ToolUpdateSink updates, site.pplee.jcode.ai.concurrent.CancellationSignal c) {
                 ref.get().steer(user("steer"));
                 return java.util.concurrent.CompletableFuture.completedFuture(
                         site.pplee.jcode.agentcore.tool.ToolExecutionResult.success(
@@ -245,7 +245,7 @@ class AgentTest {
                 assistantText("final", StopReason.STOP));
         var cfg = new AgentConfig(
                 new AgentContext("sys", List.of(), List.of(steeringTool)),
-                MODEL, client, MAPPER, null, null, QueueMode.ALL, null);
+                MODEL, client, MAPPER, null, null, null, null, QueueMode.ALL, null);
         try (var agent = new Agent(cfg)) {
             ref.set(agent);
             var result = agent.prompt(user("hi")).toCompletableFuture().get(3, TimeUnit.SECONDS);
@@ -285,7 +285,7 @@ class AgentTest {
         var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient();
         var cfg = new AgentConfig(
                 new AgentContext("sys", List.of(), List.of()),
-                MODEL, client, MAPPER, null, null, null, null);
+                MODEL, client, MAPPER, null, null, null, null, null, null);
         try (var agent = new Agent(cfg)) {
             assertEquals(QueueMode.ONE_AT_A_TIME, agent.steeringMode());
             assertEquals(QueueMode.ONE_AT_A_TIME, agent.followUpMode());

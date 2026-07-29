@@ -2,6 +2,8 @@ package site.pplee.jcode.agentcore;
 
 import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.queue.QueueMode;
+import site.pplee.jcode.agentcore.tool.AfterToolCall;
+import site.pplee.jcode.agentcore.tool.BeforeToolCall;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 
 import site.pplee.jcode.ai.client.ModelClient;
@@ -28,6 +30,8 @@ public record AgentConfig(
         ModelClient modelClient,
         ObjectMapper objectMapper,
         ToolExecutionMode toolExecution,
+        BeforeToolCall beforeToolCall,
+        AfterToolCall afterToolCall,
         AgentEventSink eventSink,
         QueueMode steeringMode,
         QueueMode followUpMode
@@ -38,6 +42,8 @@ public record AgentConfig(
         Objects.requireNonNull(modelClient, "modelClient must not be null");
         Objects.requireNonNull(objectMapper, "objectMapper must not be null");
         toolExecution = (toolExecution == null) ? ToolExecutionMode.PARALLEL : toolExecution;
+        beforeToolCall = (beforeToolCall == null) ? BeforeToolCall.noop() : beforeToolCall;
+        afterToolCall = (afterToolCall == null) ? AfterToolCall.noop() : afterToolCall;
         eventSink = (eventSink == null) ? AgentEventSink.noop() : eventSink;
         steeringMode = (steeringMode == null) ? QueueMode.ONE_AT_A_TIME : steeringMode;
         followUpMode = (followUpMode == null) ? QueueMode.ONE_AT_A_TIME : followUpMode;

@@ -96,13 +96,13 @@ class AgentLoopTest {
     }
 
     private AgentLoopConfig config(ModelClient modelClient, AgentEventSink eventSink) {
-        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, eventSink);
+        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, null, null, eventSink);
     }
 
     private AgentLoopConfig configWithSources(
             ModelClient modelClient, AgentEventSink eventSink,
             PendingMessageSource steering, PendingMessageSource followUp) {
-        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, steering, followUp, eventSink);
+        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, steering, followUp, eventSink);
     }
 
     private List<Message> projected(AgentMessage... msgs) {
@@ -360,7 +360,7 @@ class AgentLoopTest {
         var loop = new AgentLoop(executor);
         var source = new CancellationSource();
         var cfg = new AgentLoopConfig(MODEL, client, MAPPER, ToolExecutionMode.SEQUENTIAL,
-                null, null, recorder);
+                null, null, null, null, recorder);
         var fut = CompletableFuture.supplyAsync(() ->
                 loop.runPrompt(List.of(userMsg("hi")), ctx, cfg, source.signal()), executor);
 
@@ -456,7 +456,7 @@ class AgentLoopTest {
             @Override public String name() { return "echo"; }
             @Override public Class<String> argumentType() { return String.class; }
             @Override public java.util.concurrent.CompletionStage<site.pplee.jcode.agentcore.tool.ToolExecutionResult> execute(
-                    String id, String args, site.pplee.jcode.ai.concurrent.CancellationSignal c) {
+                    String id, String args, site.pplee.jcode.agentcore.tool.ToolUpdateSink updates, site.pplee.jcode.ai.concurrent.CancellationSignal c) {
                 steering.enqueue(userMsg("steer"));
                 return java.util.concurrent.CompletableFuture.completedFuture(
                         site.pplee.jcode.agentcore.tool.ToolExecutionResult.success(

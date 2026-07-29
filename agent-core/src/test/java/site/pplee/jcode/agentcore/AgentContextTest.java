@@ -5,6 +5,7 @@ import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.tool.AgentTool;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
+import site.pplee.jcode.agentcore.tool.ToolUpdateSink;
 
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
@@ -44,6 +45,7 @@ class AgentContextTest {
             public CompletionStage<ToolExecutionResult> execute(
                     String toolCallId,
                     Object arguments,
+                    ToolUpdateSink updates,
                     CancellationSignal cancellation
             ) {
                 throw new UnsupportedOperationException();

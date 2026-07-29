@@ -14,6 +14,14 @@ import java.util.concurrent.CompletionStage;
  * sees and what lives in {@code ai} — with execution and update capability,
  * which is an agent-runtime concern.
  *
+ * <p>The three-phase pipeline (prepare / execute / finalize) uses:
+ * <ul>
+ *   <li>{@link #prepareArguments} to preprocess raw arguments before validation;
+ *   <li>{@link #parametersSchema} to validate the prepared arguments;
+ *   <li>{@link #execute} to run the tool, reporting progress via
+ *       {@link ToolUpdateSink}.
+ * </ul>
+ *
  * <p>{@link #spec()} defaults to a minimal spec built from {@link #name()},
  * an empty description, and a null schema; concrete tools override
  * {@link #description()} and/or {@link #parametersSchema()} to declare a real
@@ -23,7 +31,7 @@ import java.util.concurrent.CompletionStage;
  *
  * <p>The core layer converts the model's raw {@link JsonNode} arguments to
  * {@code A} via the shared {@link com.fasterxml.jackson.databind.ObjectMapper};
- * any conversion or execution failure becomes an error
+ * any conversion, validation, or execution failure becomes an error
  * {@link ToolExecutionResult} and is never thrown into the loop.
  */
 public interface AgentTool<A> {
@@ -38,9 +46,18 @@ public interface AgentTool<A> {
         return "";
     }
 
-    /** JSON Schema describing the arguments; a null node by default. */
+    /** JSON Schema describing the arguments; a null node by default (no validation). */
     default JsonNode parametersSchema() {
         return NullNode.getInstance();
+    }
+
+    /**
+     * Preprocess raw arguments before schema validation and type conversion.
+     * Default returns the arguments unchanged. Override to inject defaults,
+     * normalize field names, or coerce types.
+     */
+    default JsonNode prepareArguments(JsonNode arguments) {
+        return arguments;
     }
 
     /** The declarable {@link ToolSpec} handed to the model. */
@@ -53,10 +70,15 @@ public interface AgentTool<A> {
         return ToolExecutionMode.PARALLEL;
     }
 
-    /** Run the tool; report success or failure via the returned {@link ToolExecutionResult}. */
+    /**
+     * Run the tool; report progress via {@code updates} and return the final
+     * outcome. Any exception is caught by the loop and converted to an error
+     * {@link ToolExecutionResult}.
+     */
     CompletionStage<ToolExecutionResult> execute(
             String toolCallId,
             A arguments,
+            ToolUpdateSink updates,
             CancellationSignal cancellation
     );
 }

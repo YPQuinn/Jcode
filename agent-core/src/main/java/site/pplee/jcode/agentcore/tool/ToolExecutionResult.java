@@ -13,8 +13,7 @@ import java.util.Objects;
  * execution result to a transcript message.
  *
  * <p>{@code terminate} stays here on the runtime result and does not enter the
- * standard LLM transcript (Wave 2 enforces this once the three-stage pipeline
- * lands; for now behavioral continuity keeps it on the transcript message too).
+ * standard LLM transcript; the loop uses it for flow control only.
  */
 public record ToolExecutionResult(
         List<Content> content,

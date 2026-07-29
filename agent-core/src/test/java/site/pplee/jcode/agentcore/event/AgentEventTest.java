@@ -33,7 +33,7 @@ class AgentEventTest {
     }
 
     private static Message.ToolResultMessage toolResult(String id) {
-        return new Message.ToolResultMessage(id, "echo", List.of(new Content.Text("r")), false, false, T1);
+        return new Message.ToolResultMessage(id, "echo", List.of(new Content.Text("r")), false, T1);
     }
 
     private static Content.ToolCall toolCall(String id) {
@@ -86,12 +86,13 @@ class AgentEventTest {
 
     @Test
     void sealedHierarchyCoversAllEventTypes() {
-        // Exhaustive switch without default: proves the sealed interface permits exactly these 7.
+        // Exhaustive switch without default: proves the sealed interface permits exactly these 8.
         java.util.function.Function<AgentEvent, String> label = event -> switch (event) {
             case AgentEvent.AgentStarted ignored -> "agent_started";
             case AgentEvent.TurnStarted ignored -> "turn_started";
             case AgentEvent.MessageCompleted m -> "message_completed";
             case AgentEvent.ToolStarted t -> "tool_started";
+            case AgentEvent.ToolUpdate t -> "tool_update";
             case AgentEvent.ToolCompleted t -> "tool_completed";
             case AgentEvent.TurnCompleted t -> "turn_completed";
             case AgentEvent.AgentCompleted a -> "agent_completed";
@@ -103,6 +104,7 @@ class AgentEventTest {
         assertEquals("message_completed", label.apply(
                 new AgentEvent.MessageCompleted(StandardAgentMessage.of(user("a")))));
         assertEquals("tool_started", label.apply(new AgentEvent.ToolStarted(toolCall("c1"))));
+        assertEquals("tool_update", label.apply(new AgentEvent.ToolUpdate(toolCall("c1"), new Content.Text("partial"))));
         assertEquals("tool_completed", label.apply(new AgentEvent.ToolCompleted(toolResult("c1"))));
         assertEquals("turn_completed", label.apply(new AgentEvent.TurnCompleted(assistant(), List.of())));
         assertEquals("agent_completed", label.apply(new AgentEvent.AgentCompleted(

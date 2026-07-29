@@ -6,7 +6,7 @@
 
 ## OVERVIEW
 
-Java 21 多模块 Maven monorepo，基于 pi（earendil-works/pi 0.82.1）设计思想实现最小 agent loop。`ai` 是 provider-neutral 模型调用协议层（零内部依赖），`agent-core` 是通用 Agent Runtime（仅依赖 `ai`）。库模块，无 main/Spring Boot 启动类。
+Java 21 多模块 Maven monorepo。`ai` 是 provider-neutral 模型调用协议层（零内部依赖），`agent-core` 是通用 Agent Runtime（仅依赖 `ai`）。库模块，无 main/Spring Boot 启动类。
 
 ## STRUCTURE
 
@@ -45,7 +45,6 @@ Jcode/
 
 | 任务 | 位置 | 说明 |
 |------|------|------|
-| 理解模块边界与依赖方向 | `docs/architecture/pi-inspired-module-boundaries.md` | §1 决策摘要、§5 Wave 0-5、§7 明确拒绝项 |
 | 理解 agent loop 15 步序列 | `agent-core/src/main/java/site/pplee/jcode/agentcore/AgentLoop.java` | runLoop() 私有方法，注释标注 step 1-15 |
 | 添加新工具 | 实现 `agentcore.tool.AgentTool<A>` | spec()/execute()，参数边界 JsonNode |
 | 接入新 model provider | 实现 `ai.client.ModelClient` | 返回 CompletionStage，不得同步抛 |
@@ -94,6 +93,8 @@ Jcode/
 - 测试纯 JUnit 5，无 Mockito；自定义测试双放 `support/` 包；`smoke/` 验证环境可运行；`AiModuleTest` 验证 `ai` 可独立编译且不依赖 `agent-core`。
 - 类命名后缀：`*Config`/`*Loop`/`*State`/`*Result`/`*Source`/`*Sink`/`*Mode`/`*Request`/`*Client`/`*Spec`/`*Signal`。
 - 注释规范：关键类、接口、方法必须使用精炼准确的注释，符合 Javadoc 规范且必须用英文书写。
+- 开始新功能时必须先参考 `docs/references/pi` 的源码和 `docs/references/pi-book` 的解读，参考但不照搬 pi 的设计意图与实现，确保符合项目整体架构和 java 项目设计原则。
+- 如果 `docs/references/pi` 或者 `docs/references/pi-book` 不存在，先用 `git clone https://github.com/earendil-works/pi.git` 或 `https://github.com/ZhangHanDong/pi-book.git` 将仓库克隆到 `docs/references` 下。
 
 ## ANTI-PATTERNS (THIS PROJECT)
 

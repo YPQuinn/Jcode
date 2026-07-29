@@ -1,14 +1,15 @@
 package site.pplee.jcode.agentcore;
 
-import site.pplee.jcode.agentcore.concurrent.CancellationSource;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
 import site.pplee.jcode.agentcore.tool.AgentTool;
+import site.pplee.jcode.agentcore.tool.BeforeToolCall;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
+import site.pplee.jcode.agentcore.tool.ToolUpdateSink;
 
 import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.client.ModelRequest;
@@ -18,6 +19,7 @@ import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
@@ -28,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -36,9 +39,21 @@ import java.util.concurrent.ExecutorService;
  * invoked on {@code Agent}'s virtual-thread-per-task executor.
  *
  * Implements the full 15-step {@code runLoop} sequence: model call, tool-call
- * extraction, sequential/parallel tool execution with ordered result
- * write-back, LENGTH truncation protection, steering/follow-up queues, and
- * cancellation boundaries (before turn, before tool batch, failed future).
+ * extraction, three-phase tool execution (prepare / execute / finalize) with
+ * sequential/parallel dispatch, ordered result write-back, LENGTH truncation
+ * protection, steering/follow-up queues, and cancellation boundaries.
+ *
+ * <p>Tool pipeline (Wave 2):
+ * <ul>
+ *   <li><b>prepare</b>: find tool → prepareArguments → schema validate → beforeToolCall
+ *   <li><b>execute</b>: tool.execute with ToolUpdateSink; exceptions → error result;
+ *       sink settled after execute completes, ignoring late updates
+ *   <li><b>finalize</b>: afterToolCall field-level patch → generate transcript message
+ * </ul>
+ *
+ * <p>{@code terminate} is tracked on the runtime {@link ToolExecutionResult} only;
+ * the standard {@link Message.ToolResultMessage} transcript carries no
+ * terminate flag.
  *
  * <p>Model-call seam (Wave 0): before each call the loop projects the open
  * {@link AgentMessage} transcript to {@link Message standard ai messages}
@@ -159,26 +174,29 @@ final class AgentLoop {
                 }
 
                 // step 9-10: execute tools (LENGTH -> fail all; otherwise dispatch)
-                List<Message.ToolResultMessage> toolResultMessages;
+                List<ToolOutcome> outcomes;
                 if (toolCalls.isEmpty()) {
-                    toolResultMessages = List.of();
+                    outcomes = List.of();
                 } else if (assistantMessage.stopReason() == StopReason.LENGTH) {
-                    toolResultMessages = failTruncatedToolCalls(toolCalls, config);
+                    outcomes = failTruncatedToolCalls(toolCalls, config);
                 } else {
-                    toolResultMessages = executeToolCalls(toolCalls, state, config, cancellation);
+                    outcomes = executeToolCalls(toolCalls, state, config, cancellation);
                 }
-                for (var trm : toolResultMessages) {
-                    var wrapped = StandardAgentMessage.of(trm);
+                for (var outcome : outcomes) {
+                    var wrapped = StandardAgentMessage.of(outcome.message());
                     state.append(wrapped);
                     emit(new AgentEvent.MessageCompleted(wrapped), config);
                 }
 
                 // step 11: TurnCompleted
+                var toolResultMessages = outcomes.stream()
+                        .map(ToolOutcome::message)
+                        .toList();
                 emit(new AgentEvent.TurnCompleted(assistantMessage, toolResultMessages), config);
 
                 // step 12: drain steering; decide inner loop continuation
                 pendingMessages = drain(config.steeringMessages());
-                hasMoreToolCalls = !toolResultMessages.isEmpty() && !allTerminated(toolResultMessages);
+                hasMoreToolCalls = !outcomes.isEmpty() && !allTerminated(outcomes);
             }
 
             // cancellation boundary: after the inner loop, before the run ends or
@@ -203,7 +221,9 @@ final class AgentLoop {
         return result;
     }
 
-    private List<Message.ToolResultMessage> executeToolCalls(
+    // --- three-phase tool execution ---
+
+    private List<ToolOutcome> executeToolCalls(
             List<Content.ToolCall> toolCalls,
             LoopState state,
             AgentLoopConfig config,
@@ -219,37 +239,38 @@ final class AgentLoop {
                     return t != null && t.executionMode() == ToolExecutionMode.SEQUENTIAL;
                 });
         return sequential
-                ? executeSequential(toolCalls, toolMap, config, cancellation)
-                : executeParallel(toolCalls, toolMap, config, cancellation);
+                ? executeSequential(toolCalls, toolMap, state, config, cancellation)
+                : executeParallel(toolCalls, toolMap, state, config, cancellation);
     }
 
-    private List<Message.ToolResultMessage> executeSequential(
+    private List<ToolOutcome> executeSequential(
             List<Content.ToolCall> toolCalls,
             Map<String, AgentTool<?>> toolMap,
+            LoopState state,
             AgentLoopConfig config,
             CancellationSignal cancellation
     ) {
-        var messages = new ArrayList<Message.ToolResultMessage>();
+        var outcomes = new ArrayList<ToolOutcome>();
         for (var tc : toolCalls) {
             if (cancellation.isCancelled()) {
                 break;
             }
             emit(new AgentEvent.ToolStarted(tc), config);
-            var internal = executeOneToolCallSync(tc, toolMap, config.objectMapper(), cancellation);
-            var msg = toToolResultMessage(tc, internal);
-            emit(new AgentEvent.ToolCompleted(msg), config);
-            messages.add(msg);
+            var outcome = executeOneToolCall(tc, toolMap, state, config, cancellation);
+            emit(new AgentEvent.ToolCompleted(outcome.message()), config);
+            outcomes.add(outcome);
         }
-        return List.copyOf(messages);
+        return List.copyOf(outcomes);
     }
 
-    private List<Message.ToolResultMessage> executeParallel(
+    private List<ToolOutcome> executeParallel(
             List<Content.ToolCall> toolCalls,
             Map<String, AgentTool<?>> toolMap,
+            LoopState state,
             AgentLoopConfig config,
             CancellationSignal cancellation
     ) {
-        var futures = new ArrayList<CompletableFuture<ToolExecutionResult>>();
+        var futures = new ArrayList<CompletableFuture<ToolOutcome>>();
         var submitted = new ArrayList<Content.ToolCall>();
         for (var tc : toolCalls) {
             if (cancellation.isCancelled()) {
@@ -258,77 +279,123 @@ final class AgentLoop {
             emit(new AgentEvent.ToolStarted(tc), config);
             submitted.add(tc);
             futures.add(CompletableFuture.supplyAsync(
-                    () -> executeOneToolCallSync(tc, toolMap, config.objectMapper(), cancellation),
+                    () -> executeOneToolCall(tc, toolMap, state, config, cancellation),
                     executor));
         }
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        var messages = new ArrayList<Message.ToolResultMessage>();
+        var outcomes = new ArrayList<ToolOutcome>();
         for (int i = 0; i < futures.size(); i++) {
-            var internal = futures.get(i).join();
-            var msg = toToolResultMessage(submitted.get(i), internal);
-            emit(new AgentEvent.ToolCompleted(msg), config);
-            messages.add(msg);
+            var outcome = futures.get(i).join();
+            emit(new AgentEvent.ToolCompleted(outcome.message()), config);
+            outcomes.add(outcome);
         }
-        return List.copyOf(messages);
+        return List.copyOf(outcomes);
     }
 
-    private ToolExecutionResult executeOneToolCallSync(
+    private ToolOutcome executeOneToolCall(
             Content.ToolCall toolCall,
             Map<String, AgentTool<?>> toolMap,
-            ObjectMapper objectMapper,
+            LoopState state,
+            AgentLoopConfig config,
             CancellationSignal cancellation
     ) {
         var tool = toolMap.get(toolCall.name());
         if (tool == null) {
-            return ToolExecutionResult.failure("tool not found: " + toolCall.name());
+            var internal = ToolExecutionResult.failure("tool not found: " + toolCall.name());
+            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
         }
-        return executeTyped(tool, toolCall, objectMapper, cancellation);
+        return executeOneToolCallTyped(tool, toolCall, state, config, cancellation);
     }
 
-    private <A> ToolExecutionResult executeTyped(
+    private <A> ToolOutcome executeOneToolCallTyped(
             AgentTool<A> tool,
             Content.ToolCall toolCall,
-            ObjectMapper objectMapper,
+            LoopState state,
+            AgentLoopConfig config,
             CancellationSignal cancellation
     ) {
-        A args;
+        // --- prepare ---
+        JsonNode preparedArgs;
         try {
-            args = objectMapper.treeToValue(toolCall.arguments(), tool.argumentType());
-        } catch (Exception e) {
-            return ToolExecutionResult.failure("argument conversion failed: " + e.getMessage());
+            preparedArgs = tool.prepareArguments(toolCall.arguments());
+        } catch (RuntimeException e) {
+            var internal = ToolExecutionResult.failure("argument preparation failed: " + e.getMessage());
+            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
         }
+
+        var schemaResult = ToolSchemaValidator.validate(preparedArgs, tool.parametersSchema());
+        if (!schemaResult.valid()) {
+            var internal = ToolExecutionResult.failure("schema validation failed: " + schemaResult.error());
+            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
+        }
+
+        var context = state.context();
+        BeforeToolCall.Decision beforeDecision;
         try {
-            return tool.execute(toolCall.id(), args, cancellation)
+            beforeDecision = config.beforeToolCall()
+                    .beforeToolCall(toolCall, tool, preparedArgs, context, cancellation)
                     .toCompletableFuture()
                     .join();
         } catch (CompletionException e) {
-            return ToolExecutionResult.failure("tool execution failed: " + causeMessage(e));
-        } catch (RuntimeException e) {
-            return ToolExecutionResult.failure("tool execution failed: " + e.getMessage());
+            var internal = ToolExecutionResult.failure("before hook failed: " + causeMessage(e));
+            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
         }
+        if (beforeDecision instanceof BeforeToolCall.Decision.Block block) {
+            var internal = ToolExecutionResult.failure("blocked by before hook: " + block.reason());
+            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
+        }
+
+        A args;
+        try {
+            args = config.objectMapper().treeToValue(preparedArgs, tool.argumentType());
+        } catch (Exception e) {
+            var internal = ToolExecutionResult.failure("argument conversion failed: " + e.getMessage());
+            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
+        }
+
+        // --- execute ---
+        var updateSink = new LoopToolUpdateSink(toolCall, config);
+        ToolExecutionResult internal;
+        try {
+            internal = tool.execute(toolCall.id(), args, updateSink, cancellation)
+                    .toCompletableFuture()
+                    .join();
+        } catch (CompletionException e) {
+            internal = ToolExecutionResult.failure("tool execution failed: " + causeMessage(e));
+        } catch (RuntimeException e) {
+            internal = ToolExecutionResult.failure("tool execution failed: " + e.getMessage());
+        }
+        updateSink.settle();
+
+        // --- finalize ---
+        try {
+            var patched = config.afterToolCall()
+                    .afterToolCall(toolCall, tool, internal, context, cancellation)
+                    .toCompletableFuture()
+                    .join();
+            internal = patched;
+        } catch (CompletionException e) {
+            // after hook failure: keep the original result
+        }
+
+        return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
     }
 
-    private List<Message.ToolResultMessage> failTruncatedToolCalls(
+    private List<ToolOutcome> failTruncatedToolCalls(
             List<Content.ToolCall> toolCalls,
             AgentLoopConfig config
     ) {
-        var messages = new ArrayList<Message.ToolResultMessage>();
+        var outcomes = new ArrayList<ToolOutcome>();
         for (var tc : toolCalls) {
             emit(new AgentEvent.ToolStarted(tc), config);
-            var msg = new Message.ToolResultMessage(
-                    tc.id(),
-                    tc.name(),
-                    List.of(new Content.Text(
-                            "tool call \"" + tc.name() + "\" not executed: "
-                                    + "response hit output token limit, arguments may be truncated")),
-                    true,
-                    false,
-                    Instant.now()
-            );
+            var internal = ToolExecutionResult.failure(
+                    "tool call \"" + tc.name() + "\" not executed: "
+                            + "response hit output token limit, arguments may be truncated");
+            var msg = toToolResultMessage(tc, internal);
             emit(new AgentEvent.ToolCompleted(msg), config);
-            messages.add(msg);
+            outcomes.add(new ToolOutcome(internal, msg));
         }
-        return List.copyOf(messages);
+        return List.copyOf(outcomes);
     }
 
     private LoopResult abortRun(LoopState state, AgentLoopConfig config) {
@@ -359,13 +426,12 @@ final class AgentLoop {
                 toolCall.name(),
                 internal.content(),
                 internal.error(),
-                internal.terminate(),
                 Instant.now()
         );
     }
 
-    private static boolean allTerminated(List<Message.ToolResultMessage> toolResults) {
-        return toolResults.stream().allMatch(Message.ToolResultMessage::terminate);
+    private static boolean allTerminated(List<ToolOutcome> outcomes) {
+        return outcomes.stream().allMatch(o -> o.internal().terminate());
     }
 
     private static List<Content.ToolCall> extractToolCalls(Message.Assistant assistant) {
@@ -416,5 +482,39 @@ final class AgentLoop {
 
     private static void emit(AgentEvent event, AgentLoopConfig config) {
         config.eventSink().emit(event).toCompletableFuture().join();
+    }
+
+    /** Internal outcome: runtime result (with terminate) + transcript message (without). */
+    private record ToolOutcome(ToolExecutionResult internal, Message.ToolResultMessage message) {}
+
+    /**
+     * Settle-aware update sink. Emits {@link AgentEvent.ToolUpdate} events
+     * through the event sink; after {@link #settle()} all further updates are
+     * silently dropped.
+     */
+    private static final class LoopToolUpdateSink implements ToolUpdateSink {
+        private final Content.ToolCall call;
+        private final AgentLoopConfig config;
+        private volatile boolean settled;
+
+        LoopToolUpdateSink(Content.ToolCall call, AgentLoopConfig config) {
+            this.call = call;
+            this.config = config;
+        }
+
+        @Override
+        public CompletionStage<Void> update(Content update) {
+            if (settled) {
+                return CompletableFuture.completedStage(null);
+            }
+            config.eventSink().emit(new AgentEvent.ToolUpdate(call, update))
+                    .toCompletableFuture()
+                    .join();
+            return CompletableFuture.completedStage(null);
+        }
+
+        void settle() {
+            settled = true;
+        }
     }
 }

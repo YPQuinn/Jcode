@@ -55,7 +55,7 @@ class AiModuleTest {
     void sealedMessageHierarchyCoversThreeRoles() {
         var u = new Message.User(List.of(new Content.Text("hi")), T1);
         var a = Message.Assistant.of(List.of(new Content.Text("hi")), StopReason.STOP, T1);
-        var t = new Message.ToolResultMessage("c1", "echo", List.of(new Content.Text("ok")), false, false, T1);
+        var t = new Message.ToolResultMessage("c1", "echo", List.of(new Content.Text("ok")), false, T1);
 
         var label = switch ((Message) u) {
             case Message.User ignored -> "user";

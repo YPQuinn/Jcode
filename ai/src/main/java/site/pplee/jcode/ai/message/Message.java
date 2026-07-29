@@ -56,16 +56,15 @@ public sealed interface Message
 
     /**
      * Outcome of a single tool execution, written back for the model to read.
-     * {@code error} marks a failure the model can react to; {@code terminate}
-     * requests stopping the tool chain (removed from the standard transcript in
-     * Wave 2; kept here for behavioral continuity until then).
+     * {@code error} marks a failure the model can react to. The runtime-only
+     * {@code terminate} flag (requesting chain stop) is not part of the
+     * standard LLM transcript; it lives on the agent-runtime execution result.
      */
     record ToolResultMessage(
             String toolCallId,
             String toolName,
             List<Content> content,
             boolean error,
-            boolean terminate,
             Instant timestamp
     ) implements Message {
         public ToolResultMessage {

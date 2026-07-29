@@ -4,6 +4,7 @@ import site.pplee.jcode.agentcore.concurrent.CancellationSource;
 import site.pplee.jcode.agentcore.tool.AgentTool;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
+import site.pplee.jcode.agentcore.tool.ToolUpdateSink;
 
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
@@ -36,7 +37,7 @@ public final class TestTools {
 
             @Override
             public CompletionStage<ToolExecutionResult> execute(
-                    String toolCallId, String arguments, CancellationSignal cancellation) {
+                    String toolCallId, String arguments, ToolUpdateSink updates, CancellationSignal cancellation) {
                 return CompletableFuture.completedFuture(
                         ToolExecutionResult.success(List.of(new Content.Text(arguments))));
             }
@@ -58,7 +59,7 @@ public final class TestTools {
 
             @Override
             public CompletionStage<ToolExecutionResult> execute(
-                    String toolCallId, Object arguments, CancellationSignal cancellation) {
+                    String toolCallId, Object arguments, ToolUpdateSink updates, CancellationSignal cancellation) {
                 return CompletableFuture.failedFuture(new RuntimeException("boom"));
             }
         };
@@ -79,7 +80,7 @@ public final class TestTools {
 
             @Override
             public CompletionStage<ToolExecutionResult> execute(
-                    String toolCallId, Object arguments, CancellationSignal cancellation) {
+                    String toolCallId, Object arguments, ToolUpdateSink updates, CancellationSignal cancellation) {
                 return CompletableFuture.completedFuture(
                         ToolExecutionResult.success(List.of(new Content.Text("done")), true));
             }
@@ -113,7 +114,7 @@ public final class TestTools {
 
             @Override
             public CompletionStage<ToolExecutionResult> execute(
-                    String toolCallId, Object arguments, CancellationSignal cancellation) {
+                    String toolCallId, Object arguments, ToolUpdateSink updates, CancellationSignal cancellation) {
                 started.countDown();
                 try {
                     release.await();
@@ -147,7 +148,7 @@ public final class TestTools {
 
             @Override
             public CompletionStage<ToolExecutionResult> execute(
-                    String toolCallId, Object arguments, CancellationSignal cancellation) {
+                    String toolCallId, Object arguments, ToolUpdateSink updates, CancellationSignal cancellation) {
                 started.countDown();
                 try {
                     release.await();
@@ -177,7 +178,7 @@ public final class TestTools {
 
             @Override
             public CompletionStage<ToolExecutionResult> execute(
-                    String toolCallId, Object arguments, CancellationSignal cancellation) {
+                    String toolCallId, Object arguments, ToolUpdateSink updates, CancellationSignal cancellation) {
                 action.run();
                 return CompletableFuture.completedFuture(
                         ToolExecutionResult.success(List.of(new Content.Text("ok"))));
@@ -211,7 +212,7 @@ public final class TestTools {
 
             @Override
             public CompletionStage<ToolExecutionResult> execute(
-                    String toolCallId, Object arguments, CancellationSignal cancellation) {
+                    String toolCallId, Object arguments, ToolUpdateSink updates, CancellationSignal cancellation) {
                 source.cancel();
                 return CompletableFuture.completedFuture(
                         ToolExecutionResult.success(List.of(new Content.Text("cancelled")), true));

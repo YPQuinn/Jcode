@@ -3,6 +3,8 @@ package site.pplee.jcode.agentcore;
 import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
+import site.pplee.jcode.agentcore.tool.AfterToolCall;
+import site.pplee.jcode.agentcore.tool.BeforeToolCall;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 
 import site.pplee.jcode.ai.client.ModelClient;
@@ -27,6 +29,8 @@ record AgentLoopConfig(
         ModelClient modelClient,
         ObjectMapper objectMapper,
         ToolExecutionMode toolExecution,
+        BeforeToolCall beforeToolCall,
+        AfterToolCall afterToolCall,
         PendingMessageSource steeringMessages,
         PendingMessageSource followUpMessages,
         AgentEventSink eventSink
@@ -36,6 +40,8 @@ record AgentLoopConfig(
         Objects.requireNonNull(modelClient, "modelClient must not be null");
         Objects.requireNonNull(objectMapper, "objectMapper must not be null");
         toolExecution = (toolExecution == null) ? ToolExecutionMode.PARALLEL : toolExecution;
+        beforeToolCall = (beforeToolCall == null) ? BeforeToolCall.noop() : beforeToolCall;
+        afterToolCall = (afterToolCall == null) ? AfterToolCall.noop() : afterToolCall;
         steeringMessages = (steeringMessages == null) ? () -> List.<AgentMessage>of() : steeringMessages;
         followUpMessages = (followUpMessages == null) ? () -> List.<AgentMessage>of() : followUpMessages;
         eventSink = (eventSink == null) ? AgentEventSink.noop() : eventSink;
