@@ -1,11 +1,13 @@
 package site.pplee.jcode.agentcore;
 
 import site.pplee.jcode.agentcore.concurrent.CancellationSource;
-import site.pplee.jcode.agentcore.model.AgentContext;
-import site.pplee.jcode.agentcore.model.AgentMessage;
-import site.pplee.jcode.agentcore.model.LoopResult;
+import site.pplee.jcode.agentcore.message.AgentMessage;
+import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageQueue;
 import site.pplee.jcode.agentcore.queue.QueueMode;
+
+import site.pplee.jcode.ai.concurrent.CancellationSignal;
+import site.pplee.jcode.ai.message.Message;
 
 import java.util.List;
 import java.util.Objects;
@@ -34,7 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * exceptionally completed stage (no synchronous throw).
  *
  * <p>{@link #close()} cooperatively aborts an active run and drains the
- * executor. If a provider ignores the {@link CancellationSource} and blocks
+ * executor. If a provider ignores the {@link CancellationSignal} and blocks
  * uninterruptibly, close() may wait up to roughly seven seconds before forcing
  * shutdown.
  */
@@ -58,7 +60,7 @@ public final class Agent implements AutoCloseable {
     }
 
     /** Start a new run with a user message; fails if a run is already active. */
-    public CompletionStage<LoopResult> prompt(AgentMessage.User message) {
+    public CompletionStage<LoopResult> prompt(Message.User message) {
         Objects.requireNonNull(message, "message must not be null");
         return submit(message, false);
     }
@@ -69,13 +71,13 @@ public final class Agent implements AutoCloseable {
     }
 
     /** Enqueue a steering message injected before the next model call of the active run. */
-    public void steer(AgentMessage.User message) {
-        steeringQueue.enqueue(Objects.requireNonNull(message, "message must not be null"));
+    public void steer(Message.User message) {
+        steeringQueue.enqueue(StandardAgentMessage.of(message));
     }
 
     /** Enqueue a follow-up message injected only when the run would otherwise stop. */
-    public void followUp(AgentMessage.User message) {
-        followUpQueue.enqueue(Objects.requireNonNull(message, "message must not be null"));
+    public void followUp(Message.User message) {
+        followUpQueue.enqueue(StandardAgentMessage.of(message));
     }
 
     /** Request cancellation of the active run, if any; idempotent. */
@@ -133,7 +135,7 @@ public final class Agent implements AutoCloseable {
         }
     }
 
-    private CompletableFuture<LoopResult> submit(AgentMessage.User message, boolean isContinue) {
+    private CompletableFuture<LoopResult> submit(Message.User message, boolean isContinue) {
         if (closed.get()) {
             return CompletableFuture.failedFuture(new IllegalStateException("Agent is closed"));
         }
@@ -154,21 +156,19 @@ public final class Agent implements AutoCloseable {
                 return future;
             }
             var last = snapshot.messages().get(snapshot.messages().size() - 1);
-            if (last instanceof AgentMessage.Assistant) {
+            if (isStandardAssistant(last)) {
                 activeRun.compareAndSet(run, null);
                 future.completeExceptionally(new IllegalStateException("last message is assistant; use prompt() instead"));
                 return future;
             }
-        }
-        var loopConfig = new AgentLoopConfig(
+        }        var loopConfig = new AgentLoopConfig(
                 config.model(),
-                config.llmClient(),
+                config.modelClient(),
                 config.objectMapper(),
                 config.toolExecution(),
                 steeringQueue,
                 followUpQueue,
-                config.eventSink(),
-                config.llmEventSink()
+                config.eventSink()
         );
         try {
             executor.execute(() -> {
@@ -176,8 +176,8 @@ public final class Agent implements AutoCloseable {
                 Throwable failure = null;
                 try {
                     result = isContinue
-                            ? loop.continueRun(snapshot, loopConfig, source.token())
-                            : loop.runPrompt(List.of(message), snapshot, loopConfig, source.token());
+                            ? loop.continueRun(snapshot, loopConfig, source.signal())
+                            : loop.runPrompt(List.of(StandardAgentMessage.of(message)), snapshot, loopConfig, source.signal());
                     // Oracle F order: assign context (success only) before clearing ref,
                     // so a new run that CASes in after our clear sees the updated context.
                     context = result.context();
@@ -201,6 +201,16 @@ public final class Agent implements AutoCloseable {
             future.completeExceptionally(new IllegalStateException("Agent is closed", rej));
         }
         return future;
+    }
+
+    /**
+     * A "last message is assistant" check at the open-transcript level: a
+     * {@link site.pplee.jcode.agentcore.message.StandardAgentMessage} wrapping
+     * an {@code ai.Message.Assistant}.
+     */
+    private static boolean isStandardAssistant(AgentMessage message) {
+        return message instanceof StandardAgentMessage sam
+                && sam.message() instanceof site.pplee.jcode.ai.message.Message.Assistant;
     }
 
     private record ActiveRun(CancellationSource source, CompletableFuture<LoopResult> future) {}

@@ -1,11 +1,12 @@
 package site.pplee.jcode.agentcore.support;
 
 import site.pplee.jcode.agentcore.concurrent.CancellationSource;
-import site.pplee.jcode.agentcore.concurrent.CancellationToken;
-import site.pplee.jcode.agentcore.model.Content;
-import site.pplee.jcode.agentcore.model.ToolExecutionMode;
-import site.pplee.jcode.agentcore.model.ToolResult;
-import site.pplee.jcode.agentcore.spi.AgentTool;
+import site.pplee.jcode.agentcore.tool.AgentTool;
+import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
+import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
+
+import site.pplee.jcode.ai.concurrent.CancellationSignal;
+import site.pplee.jcode.ai.message.Content;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -14,7 +15,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Test-only {@link AgentTool} implementations for {@code AgentLoopTest}.
+ * Test-only {@link AgentTool} implementations for {@code AgentLoopTest} and
+ * {@code AgentTest}.
  */
 public final class TestTools {
     private TestTools() {}
@@ -33,10 +35,10 @@ public final class TestTools {
             }
 
             @Override
-            public CompletionStage<ToolResult> execute(
-                    String toolCallId, String arguments, CancellationToken cancellation) {
+            public CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId, String arguments, CancellationSignal cancellation) {
                 return CompletableFuture.completedFuture(
-                        ToolResult.success(List.of(new Content.Text(arguments))));
+                        ToolExecutionResult.success(List.of(new Content.Text(arguments))));
             }
         };
     }
@@ -55,8 +57,8 @@ public final class TestTools {
             }
 
             @Override
-            public CompletionStage<ToolResult> execute(
-                    String toolCallId, Object arguments, CancellationToken cancellation) {
+            public CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId, Object arguments, CancellationSignal cancellation) {
                 return CompletableFuture.failedFuture(new RuntimeException("boom"));
             }
         };
@@ -76,10 +78,10 @@ public final class TestTools {
             }
 
             @Override
-            public CompletionStage<ToolResult> execute(
-                    String toolCallId, Object arguments, CancellationToken cancellation) {
+            public CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId, Object arguments, CancellationSignal cancellation) {
                 return CompletableFuture.completedFuture(
-                        ToolResult.success(List.of(new Content.Text("done")), true));
+                        ToolExecutionResult.success(List.of(new Content.Text("done")), true));
             }
         };
     }
@@ -110,8 +112,8 @@ public final class TestTools {
             }
 
             @Override
-            public CompletionStage<ToolResult> execute(
-                    String toolCallId, Object arguments, CancellationToken cancellation) {
+            public CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId, Object arguments, CancellationSignal cancellation) {
                 started.countDown();
                 try {
                     release.await();
@@ -120,7 +122,7 @@ public final class TestTools {
                     return CompletableFuture.failedFuture(e);
                 }
                 return CompletableFuture.completedFuture(
-                        ToolResult.success(List.of(new Content.Text("ok"))));
+                        ToolExecutionResult.success(List.of(new Content.Text("ok"))));
             }
         };
     }
@@ -128,7 +130,7 @@ public final class TestTools {
     /**
      * A blocking tool that records whether its cancellation token was cancelled
      * at the moment it completes (after {@code release} is counted down). For
-     * testing that {@code abort()} propagates to the tool's token.
+     * testing that {@code abort()} propagates to the tool's signal.
      */
     public static AgentTool<Object> recordingBlocking(
             String name, CountDownLatch started, CountDownLatch release, AtomicBoolean recorder) {
@@ -144,8 +146,8 @@ public final class TestTools {
             }
 
             @Override
-            public CompletionStage<ToolResult> execute(
-                    String toolCallId, Object arguments, CancellationToken cancellation) {
+            public CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId, Object arguments, CancellationSignal cancellation) {
                 started.countDown();
                 try {
                     release.await();
@@ -155,7 +157,7 @@ public final class TestTools {
                 }
                 recorder.set(cancellation.isCancelled());
                 return CompletableFuture.completedFuture(
-                        ToolResult.success(List.of(new Content.Text("ok"))));
+                        ToolExecutionResult.success(List.of(new Content.Text("ok"))));
             }
         };
     }
@@ -174,11 +176,11 @@ public final class TestTools {
             }
 
             @Override
-            public CompletionStage<ToolResult> execute(
-                    String toolCallId, Object arguments, CancellationToken cancellation) {
+            public CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId, Object arguments, CancellationSignal cancellation) {
                 action.run();
                 return CompletableFuture.completedFuture(
-                        ToolResult.success(List.of(new Content.Text("ok"))));
+                        ToolExecutionResult.success(List.of(new Content.Text("ok"))));
             }
         };
     }
@@ -188,7 +190,7 @@ public final class TestTools {
      * terminating success result. Forcing SEQUENTIAL makes the whole batch
      * sequential, so a later tool in the batch is skipped by boundary 4 once
      * the source is cancelled — exercising the post-inner-loop cancellation
-     * check (all-terminated results -&gt; inner exits -&gt; check -&gt; ABORTED).
+     * check (all-terminated results -> inner exits -> check -> ABORTED).
      */
     public static AgentTool<Object> cancelAndTerminate(String name, CancellationSource source) {
         return new AgentTool<Object>() {
@@ -208,11 +210,11 @@ public final class TestTools {
             }
 
             @Override
-            public CompletionStage<ToolResult> execute(
-                    String toolCallId, Object arguments, CancellationToken cancellation) {
+            public CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId, Object arguments, CancellationSignal cancellation) {
                 source.cancel();
                 return CompletableFuture.completedFuture(
-                        ToolResult.success(List.of(new Content.Text("cancelled")), true));
+                        ToolExecutionResult.success(List.of(new Content.Text("cancelled")), true));
             }
         };
     }

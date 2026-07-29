@@ -9,6 +9,7 @@
     <version>1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
     <modules>
+        <module>ai</module>
         <module>agent-core</module>
     </modules>
 
@@ -20,10 +21,26 @@
         <jackson.version>2.18.2</jackson.version>
         <junit.version>5.11.4</junit.version>
         <maven.surefire.version>3.5.2</maven.surefire.version>
+        <maven.enforcer.version>3.5.0</maven.enforcer.version>
+        <!-- Jcode-internal artifacts (versioned from the reactor) -->
+        <jcode.ai.version>${project.version}</jcode.ai.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!--
+              Jcode-internal modules. Declared here so child modules reference
+              them by groupId:artifactId without repeating the version. The
+              reactor build order (ai -> agent-core) is fixed in <modules>;
+              the dependency graph itself (ai knows nothing of agent-core;
+              agent-core depends only on ai) is enforced by maven-enforcer
+              bannedDependencies below.
+            -->
+            <dependency>
+                <groupId>site.pplee</groupId>
+                <artifactId>ai</artifactId>
+                <version>${jcode.ai.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.projectlombok</groupId>
                 <artifactId>lombok</artifactId>
@@ -59,8 +76,55 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${maven.surefire.version}</version>
                 </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>${maven.enforcer.version}</version>
+                </plugin>
             </plugins>
         </pluginManagement>
+
+        <!--
+          Module-boundary guard (Wave 0 requirement #5). The Jcode dependency
+          graph must be acyclic and point only from product layer to core layer:
+            ai           has NO Jcode-internal dependency
+            agent-core   depends ONLY on ai
+          Future modules (coding-agent, provider-*) will be added to the
+          excludes as they are created. For now this also forbids agent-core
+          from depending on any not-yet-created coding-agent / ai-provider-*.
+        -->
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-module-boundaries</id>
+                        <goals><goal>enforce</goal></goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <excludes>
+                                        <!-- ai must not depend on agent-core (or any other Jcode module) -->
+                                        <exclude>site.pplee:agent-core</exclude>
+                                        <!-- agent-core must not depend on coding-agent / provider adapters / server / tui (forward guard; none exist yet) -->
+                                        <exclude>site.pplee:coding-agent</exclude>
+                                        <exclude>site.pplee:ai-provider-openai</exclude>
+                                        <exclude>site.pplee:ai-provider-anthropic</exclude>
+                                        <exclude>site.pplee:ai-provider-google</exclude>
+                                        <exclude>site.pplee:server</exclude>
+                                        <exclude>site.pplee:tui</exclude>
+                                    </excludes>
+                                    <message>
+                                        Jcode module-boundary violation: this module must not depend on the excluded artifact.
+                                    </message>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
 
 </project>

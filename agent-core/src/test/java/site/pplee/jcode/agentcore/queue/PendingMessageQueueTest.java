@@ -1,8 +1,11 @@
 package site.pplee.jcode.agentcore.queue;
 
 import org.junit.jupiter.api.Test;
-import site.pplee.jcode.agentcore.model.AgentMessage;
-import site.pplee.jcode.agentcore.model.Content;
+import site.pplee.jcode.agentcore.message.AgentMessage;
+import site.pplee.jcode.agentcore.message.StandardAgentMessage;
+
+import site.pplee.jcode.ai.message.Content;
+import site.pplee.jcode.ai.message.Message;
 
 import java.time.Instant;
 import java.util.List;
@@ -15,8 +18,8 @@ class PendingMessageQueueTest {
     private static final Instant T1 = Instant.parse("2026-01-01T00:00:00Z");
     private static final Instant T2 = Instant.parse("2026-01-02T00:00:00Z");
 
-    private static AgentMessage.User user(String text, Instant t) {
-        return new AgentMessage.User(List.of(new Content.Text(text)), t);
+    private static AgentMessage user(String text, Instant t) {
+        return StandardAgentMessage.of(new Message.User(List.of(new Content.Text(text)), t));
     }
 
     @Test

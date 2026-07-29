@@ -1,6 +1,6 @@
 package site.pplee.jcode.agentcore.queue;
 
-import site.pplee.jcode.agentcore.model.AgentMessage;
+import site.pplee.jcode.agentcore.message.AgentMessage;
 
 import java.util.List;
 

@@ -1,6 +1,7 @@
 package site.pplee.jcode.agentcore.concurrent;
 
 import org.junit.jupiter.api.Test;
+import site.pplee.jcode.ai.concurrent.CancellationSignal;
 
 import java.util.concurrent.CancellationException;
 
@@ -14,7 +15,7 @@ class CancellationSourceTest {
     void isNotCancelledInitially() {
         var source = new CancellationSource();
         assertFalse(source.isCancelled());
-        assertFalse(source.token().isCancelled());
+        assertFalse(source.signal().isCancelled());
     }
 
     @Test
@@ -22,7 +23,7 @@ class CancellationSourceTest {
         var source = new CancellationSource();
         source.cancel();
         assertTrue(source.isCancelled());
-        assertTrue(source.token().isCancelled());
+        assertTrue(source.signal().isCancelled());
     }
 
     @Test
@@ -38,7 +39,7 @@ class CancellationSourceTest {
     void throwIfCancelledNoopWhenNotCancelled() {
         var source = new CancellationSource();
         source.throwIfCancelled();
-        source.token().throwIfCancelled();
+        source.signal().throwIfCancelled();
     }
 
     @Test
@@ -47,33 +48,33 @@ class CancellationSourceTest {
         source.cancel();
 
         assertThrows(CancellationException.class, source::throwIfCancelled);
-        assertThrows(CancellationException.class, () -> source.token().throwIfCancelled());
+        assertThrows(CancellationException.class, () -> source.signal().throwIfCancelled());
     }
 
     @Test
-    void tokenIsStableReference() {
+    void signalIsStableReference() {
         var source = new CancellationSource();
-        var first = source.token();
-        var second = source.token();
+        var first = source.signal();
+        var second = source.signal();
         assertSame(first, second);
     }
 
     @Test
-    void tokenReflectsCancellation() {
+    void signalReflectsCancellation() {
         var source = new CancellationSource();
-        var token = source.token();
-        assertFalse(token.isCancelled());
+        var signal = source.signal();
+        assertFalse(signal.isCancelled());
         source.cancel();
-        assertTrue(token.isCancelled());
+        assertTrue(signal.isCancelled());
     }
 
     @Test
-    void tokenIsNotACancellationSource() {
-        var token = new CancellationSource().token();
-        // The token is a private TokenView. Static types are inconvertible
-        // (so `token instanceof CancellationSource` won't even compile), and
-        // at runtime the token object is not a CancellationSource instance.
-        assertFalse(CancellationSource.class.isInstance(token));
-        assertFalse(CancellationSource.class.isAssignableFrom(token.getClass()));
+    void signalIsNotACancellationSource() {
+        CancellationSignal signal = new CancellationSource().signal();
+        // The signal is a private SignalView. Static types are inconvertible
+        // (so `signal instanceof CancellationSource` won't even compile), and
+        // at runtime the signal object is not a CancellationSource instance.
+        assertFalse(CancellationSource.class.isInstance(signal));
+        assertFalse(CancellationSource.class.isAssignableFrom(signal.getClass()));
     }
 }

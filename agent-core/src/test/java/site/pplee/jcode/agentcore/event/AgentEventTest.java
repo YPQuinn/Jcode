@@ -1,11 +1,14 @@
 package site.pplee.jcode.agentcore.event;
 
 import org.junit.jupiter.api.Test;
-import site.pplee.jcode.agentcore.model.AgentContext;
-import site.pplee.jcode.agentcore.model.AgentMessage;
-import site.pplee.jcode.agentcore.model.Content;
-import site.pplee.jcode.agentcore.model.LoopResult;
-import site.pplee.jcode.agentcore.model.StopReason;
+import site.pplee.jcode.agentcore.AgentContext;
+import site.pplee.jcode.agentcore.LoopResult;
+import site.pplee.jcode.agentcore.message.StandardAgentMessage;
+
+import site.pplee.jcode.ai.message.Content;
+import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.StopReason;
+
 import com.fasterxml.jackson.databind.node.NullNode;
 
 import java.time.Instant;
@@ -21,16 +24,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AgentEventTest {
     private static final Instant T1 = Instant.parse("2026-01-01T00:00:00Z");
 
-    private static AgentMessage.User user(String text) {
-        return new AgentMessage.User(List.of(new Content.Text(text)), T1);
+    private static Message.User user(String text) {
+        return new Message.User(List.of(new Content.Text(text)), T1);
     }
 
-    private static AgentMessage.Assistant assistant() {
-        return new AgentMessage.Assistant(List.of(new Content.Text("hi")), StopReason.STOP, null, T1);
+    private static Message.Assistant assistant() {
+        return Message.Assistant.of(List.of(new Content.Text("hi")), StopReason.STOP, T1);
     }
 
-    private static AgentMessage.ToolResult toolResult(String id) {
-        return new AgentMessage.ToolResult(id, "echo", List.of(new Content.Text("r")), false, false, T1);
+    private static Message.ToolResultMessage toolResult(String id) {
+        return new Message.ToolResultMessage(id, "echo", List.of(new Content.Text("r")), false, false, T1);
     }
 
     private static Content.ToolCall toolCall(String id) {
@@ -39,7 +42,8 @@ class AgentEventTest {
 
     @Test
     void messageCompletedRejectsNull() {
-        assertThrows(NullPointerException.class, () -> new AgentEvent.MessageCompleted(null));
+        assertThrows(NullPointerException.class,
+                () -> new AgentEvent.MessageCompleted(null));
     }
 
     @Test
@@ -64,7 +68,7 @@ class AgentEventTest {
 
     @Test
     void turnCompletedCopiesAndFreezesToolResults() {
-        var original = new ArrayList<AgentMessage.ToolResult>();
+        var original = new ArrayList<Message.ToolResultMessage>();
         original.add(toolResult("c1"));
 
         var event = new AgentEvent.TurnCompleted(assistant(), original);
@@ -96,7 +100,8 @@ class AgentEventTest {
         var context = new AgentContext("sys", List.of(), List.of());
         assertEquals("agent_started", label.apply(new AgentEvent.AgentStarted()));
         assertEquals("turn_started", label.apply(new AgentEvent.TurnStarted()));
-        assertEquals("message_completed", label.apply(new AgentEvent.MessageCompleted(user("a"))));
+        assertEquals("message_completed", label.apply(
+                new AgentEvent.MessageCompleted(StandardAgentMessage.of(user("a")))));
         assertEquals("tool_started", label.apply(new AgentEvent.ToolStarted(toolCall("c1"))));
         assertEquals("tool_completed", label.apply(new AgentEvent.ToolCompleted(toolResult("c1"))));
         assertEquals("turn_completed", label.apply(new AgentEvent.TurnCompleted(assistant(), List.of())));

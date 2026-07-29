@@ -9,17 +9,23 @@
         <version>1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>agent-core</artifactId>
+    <artifactId>ai</artifactId>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
+
+    <description>
+        Unified model-calling protocol and runtime: model identity, standard LLM
+        messages and content blocks, usage/stop-reason/result metadata, the
+        declarable ToolSpec, the provider-neutral ModelClient/ModelRequest seam,
+        and the read-only CancellationSignal shared by model adapters and tools.
+
+        Zero Jcode-internal dependencies. No provider SDK, no Agent, no Session,
+        no coding tools, no UI.
+    </description>
+
     <dependencies>
-        <!-- The ONLY Jcode-internal dependency of agent-core (architecture §1, §2.1). -->
-        <dependency>
-            <groupId>site.pplee</groupId>
-            <artifactId>ai</artifactId>
-        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

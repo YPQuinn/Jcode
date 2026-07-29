@@ -1,8 +1,6 @@
 package site.pplee.jcode.agentcore;
 
-import site.pplee.jcode.agentcore.model.AgentContext;
-import site.pplee.jcode.agentcore.model.AgentMessage;
-import site.pplee.jcode.agentcore.model.LoopResult;
+import site.pplee.jcode.agentcore.message.AgentMessage;
 
 import java.util.ArrayList;
 import java.util.List;

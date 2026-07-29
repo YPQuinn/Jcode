@@ -1,8 +1,11 @@
 package site.pplee.jcode.agentcore.event;
 
-import site.pplee.jcode.agentcore.model.AgentMessage;
-import site.pplee.jcode.agentcore.model.Content;
-import site.pplee.jcode.agentcore.model.LoopResult;
+import site.pplee.jcode.agentcore.LoopResult;
+import site.pplee.jcode.agentcore.message.AgentMessage;
+import site.pplee.jcode.agentcore.message.StandardAgentMessage;
+
+import site.pplee.jcode.ai.message.Content;
+import site.pplee.jcode.ai.message.Message;
 
 import java.util.List;
 import java.util.Objects;
@@ -10,7 +13,15 @@ import java.util.Objects;
 /**
  * Sealed lifecycle event emitted through {@link AgentEventSink}. The loop
  * waits for each emit to complete, so observers see a deterministic order.
- * Model deltas are not part of these events (see {@link LlmEventSink}).
+ * Model deltas are not part of these events (Wave 1 adds streaming via
+ * {@code AssistantMessageStream}).
+ *
+ * <p>{@link MessageCompleted} carries the open {@link AgentMessage} (standard
+ * messages arrive as {@link StandardAgentMessage} wrapping an {@code ai.Message}).
+ * {@link ToolStarted} carries the standard {@link Content.ToolCall}.
+ * {@link TurnCompleted} carries the standard {@link Message.Assistant} and the
+ * {@link Message.ToolResultMessage} list written back to the model — these are
+ * the standard {@code ai} transcript types, not the open {@code AgentMessage}.
  */
 public sealed interface AgentEvent
         permits AgentEvent.AgentStarted, AgentEvent.TurnStarted,
@@ -39,7 +50,7 @@ public sealed interface AgentEvent
     }
 
     /** A tool finished and its result was appended. */
-    record ToolCompleted(AgentMessage.ToolResult result) implements AgentEvent {
+    record ToolCompleted(Message.ToolResultMessage result) implements AgentEvent {
         public ToolCompleted {
             Objects.requireNonNull(result, "result must not be null");
         }
@@ -47,8 +58,8 @@ public sealed interface AgentEvent
 
     /** A model turn finished, with its tool results (empty if none). */
     record TurnCompleted(
-            AgentMessage.Assistant assistant,
-            List<AgentMessage.ToolResult> toolResults
+            Message.Assistant assistant,
+            List<Message.ToolResultMessage> toolResults
     ) implements AgentEvent {
         public TurnCompleted {
             Objects.requireNonNull(assistant, "assistant must not be null");

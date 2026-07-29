@@ -6,21 +6,22 @@ import org.junit.jupiter.api.Test;
 import site.pplee.jcode.agentcore.concurrent.CancellationSource;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.event.AgentEventSink;
-import site.pplee.jcode.agentcore.model.AgentContext;
-import site.pplee.jcode.agentcore.model.AgentMessage;
-import site.pplee.jcode.agentcore.model.Content;
-import site.pplee.jcode.agentcore.model.LoopResult;
-import site.pplee.jcode.agentcore.model.ModelRef;
-import site.pplee.jcode.agentcore.model.StopReason;
-import site.pplee.jcode.agentcore.model.ToolExecutionMode;
+import site.pplee.jcode.agentcore.message.AgentMessage;
+import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageQueue;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
 import site.pplee.jcode.agentcore.queue.QueueMode;
-import site.pplee.jcode.agentcore.spi.AgentTool;
-import site.pplee.jcode.agentcore.spi.LlmClient;
 import site.pplee.jcode.agentcore.support.RecordingEventSink;
-import site.pplee.jcode.agentcore.support.ScriptedLlmClient;
 import site.pplee.jcode.agentcore.support.TestTools;
+import site.pplee.jcode.agentcore.tool.AgentTool;
+import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
+
+import site.pplee.jcode.ai.client.ModelClient;
+import site.pplee.jcode.ai.client.ModelRequest;
+import site.pplee.jcode.ai.message.Content;
+import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.model.ModelRef;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,12 +29,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -44,7 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentLoopTest {
     private static final Instant T1 = Instant.parse("2026-01-01T00:00:00Z");
-    private static final ModelRef MODEL = new ModelRef("test", "test-model");
+    private static final ModelRef MODEL = new ModelRef("test", "test-api", "test-model");
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private ExecutorService executor;
@@ -61,16 +63,28 @@ class AgentLoopTest {
 
     // --- helpers ---
 
-    private static AgentMessage.User user(String text) {
-        return new AgentMessage.User(List.of(new Content.Text(text)), T1);
+    private static Message.User user(String text) {
+        return new Message.User(List.of(new Content.Text(text)), T1);
     }
 
-    private static AgentMessage.Assistant assistant(List<Content> content, StopReason reason) {
-        return new AgentMessage.Assistant(content, reason, null, T1);
+    private static AgentMessage userMsg(String text) {
+        return StandardAgentMessage.of(user(text));
+    }
+
+    private static Message.Assistant assistant(List<Content> content, StopReason reason) {
+        return Message.Assistant.of(content, reason, T1);
+    }
+
+    private static Message.Assistant assistantText(String text, StopReason reason) {
+        return assistant(List.of(new Content.Text(text)), reason);
     }
 
     private static Content.ToolCall toolCall(String id, String name, JsonNode args) {
         return new Content.ToolCall(id, name, args);
+    }
+
+    private static Content.ToolCall toolCall(String id, String name) {
+        return toolCall(id, name, MAPPER.getNodeFactory().textNode("hello"));
     }
 
     private static AgentContext contextWithTools(AgentTool<?>... tools) {
@@ -81,418 +95,478 @@ class AgentLoopTest {
         return new AgentContext("sys", List.of(), List.copyOf(list));
     }
 
-    private AgentLoopConfig config(LlmClient llmClient, AgentEventSink eventSink) {
-        return new AgentLoopConfig(MODEL, llmClient, MAPPER, null, null, null, eventSink, null);
+    private AgentLoopConfig config(ModelClient modelClient, AgentEventSink eventSink) {
+        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, eventSink);
     }
 
     private AgentLoopConfig configWithSources(
-            LlmClient llmClient, AgentEventSink eventSink,
+            ModelClient modelClient, AgentEventSink eventSink,
             PendingMessageSource steering, PendingMessageSource followUp) {
-        return new AgentLoopConfig(MODEL, llmClient, MAPPER, null, steering, followUp, eventSink, null);
+        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, steering, followUp, eventSink);
     }
 
-    private static List<AgentMessage.ToolResult> toolResultsIn(LoopResult result) {
-        return result.context().messages().stream()
-                .filter(m -> m instanceof AgentMessage.ToolResult)
-                .map(m -> (AgentMessage.ToolResult) m)
-                .toList();
+    private List<Message> projected(AgentMessage... msgs) {
+        var out = new ArrayList<Message>();
+        for (var m : msgs) {
+            if (m instanceof StandardAgentMessage sam) {
+                out.add(sam.message());
+            }
+        }
+        return List.copyOf(out);
     }
 
-    // --- case 1: single model answer ends loop ---
+    private LoopResult runPrompt(ModelClient client, AgentContext ctx, AgentEventSink sink) {
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        return loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, sink), source.signal());
+    }
+
+    private LoopResult runPrompt(ModelClient client, AgentContext ctx, AgentEventSink sink, CancellationSource source) {
+        var loop = new AgentLoop(executor);
+        return loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, sink), source.signal());
+    }
+
+    private LoopResult continueRun(ModelClient client, AgentContext ctx, AgentEventSink sink) {
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        return loop.continueRun(ctx, config(client, sink), source.signal());
+    }
+
+    // --- basic flow ---
 
     @Test
-    void singleModelAnswerEndsLoop() {
-        var assistant = assistant(List.of(new Content.Text("hello")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant);
-        var eventSink = new RecordingEventSink();
-        var config = config(llmClient, eventSink);
-        var context = new AgentContext("sys", List.of(), List.of());
-        var prompt = user("hi");
-        var loop = new AgentLoop(executor);
+    void promptRunsSingleTurnWhenModelStopsImmediately() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("hello", StopReason.STOP));
+        var ctx = contextWithTools();
+        var result = runPrompt(client, ctx, recorder);
 
-        LoopResult result = loop.runPrompt(List.of(prompt), context, config, new CancellationSource().token());
-
-        assertEquals(1, llmClient.receivedRequests().size());
-        var messages = result.context().messages();
-        assertEquals(2, messages.size());
-        assertSame(prompt, messages.get(0));
-        assertSame(assistant, messages.get(1));
+        // messages: prompt + assistant
+        assertEquals(2, result.context().messages().size());
+        assertEquals(userMsg("hi"), result.context().messages().get(0));
+        assertEquals(StandardAgentMessage.of(assistantText("hello", StopReason.STOP)),
+                result.context().messages().get(1));
         assertEquals(2, result.newMessages().size());
 
-        var events = eventSink.events();
-        assertEquals(6, events.size());
+        // single model call; request carried projected prompt + system + empty tools
+        assertEquals(1, client.receivedRequests().size());
+        var req = client.receivedRequests().get(0);
+        assertEquals(MODEL, req.model());
+        assertEquals("sys", req.systemPrompt());
+        assertEquals(projected(userMsg("hi")), req.messages());
+        assertTrue(req.tools().isEmpty());
+
+        // event sequence: AgentStarted, TurnStarted, MessageCompleted(prompt),
+        // MessageCompleted(assistant), TurnCompleted, AgentCompleted
+        var events = recorder.events();
         assertInstanceOf(AgentEvent.AgentStarted.class, events.get(0));
         assertInstanceOf(AgentEvent.TurnStarted.class, events.get(1));
-        assertSame(prompt, ((AgentEvent.MessageCompleted) events.get(2)).message());
-        assertSame(assistant, ((AgentEvent.MessageCompleted) events.get(3)).message());
-        var tc = (AgentEvent.TurnCompleted) events.get(4);
-        assertSame(assistant, tc.assistant());
-        assertEquals(List.of(), tc.toolResults());
-        assertSame(result, ((AgentEvent.AgentCompleted) events.get(5)).result());
+        assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(2));
+        assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(3));
+        assertInstanceOf(AgentEvent.TurnCompleted.class, events.get(4));
+        assertInstanceOf(AgentEvent.AgentCompleted.class, events.get(5));
+        assertEquals(6, events.size());
     }
 
-    // --- case 2: single tool call executes and re-calls model ---
-
     @Test
-    void singleToolCallExecutesAndReCallsModel() {
-        var echo = TestTools.echo();
-        var assistant1 = assistant(
-                List.of(toolCall("c1", "echo", MAPPER.valueToTree("echo this"))),
-                StopReason.TOOL_CALL);
-        var assistant2 = assistant(List.of(new Content.Text("done")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var eventSink = new RecordingEventSink();
-        var config = config(llmClient, eventSink);
-        var context = contextWithTools(echo);
-        var loop = new AgentLoop(executor);
+    void promptExecutesSingleToolCallThenStops() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "echo")), StopReason.TOOL_CALL),
+                assistantText("after", StopReason.STOP));
+        var ctx = contextWithTools(TestTools.echo());
+        var result = runPrompt(client, ctx, recorder);
 
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
+        // prompt + assistant(toolcall) + toolresult + assistant(stop)
+        assertEquals(4, result.context().messages().size());
+        assertEquals(2, client.receivedRequests().size());
+        // 2nd request carried the echo tool spec
+        var secondReq = client.receivedRequests().get(1);
+        assertEquals(1, secondReq.tools().size());
+        assertEquals("echo", secondReq.tools().get(0).name());
 
-        assertEquals(2, llmClient.receivedRequests().size());
-        var messages = result.context().messages();
-        assertEquals(4, messages.size());
-        var tr = (AgentMessage.ToolResult) messages.get(2);
-        assertEquals("echo", tr.toolName());
-        assertFalse(tr.error());
-        assertEquals("echo this", ((Content.Text) tr.content().get(0)).text());
-        assertTrue(eventSink.events().stream().anyMatch(e -> e instanceof AgentEvent.ToolStarted));
-        assertTrue(eventSink.events().stream().anyMatch(e -> e instanceof AgentEvent.ToolCompleted));
+        var events = recorder.events();
+        // AgentStarted, TurnStarted, Msg(prompt), Msg(assistant),
+        // ToolStarted, ToolCompleted, Msg(toolresult), TurnCompleted,
+        // TurnStarted, Msg(assistant), TurnCompleted, AgentCompleted
+        assertInstanceOf(AgentEvent.ToolStarted.class, events.get(4));
+        assertInstanceOf(AgentEvent.ToolCompleted.class, events.get(5));
+        assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(6));
+        assertInstanceOf(AgentEvent.TurnCompleted.class, events.get(7));
+        assertInstanceOf(AgentEvent.TurnStarted.class, events.get(8));
     }
 
-    // --- case 3: parallel tools start concurrently, write back in source order ---
+    @Test
+    void continueRunResumesFromExistingContext() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("resumed", StopReason.STOP));
+        var existing = new AgentContext("sys",
+                List.of(userMsg("a"), StandardAgentMessage.of(assistantText("prev", StopReason.STOP))),
+                List.of());
+        var result = continueRun(client, existing, recorder);
+
+        // existing 2 + assistant = 3
+        assertEquals(3, result.context().messages().size());
+        assertEquals(StandardAgentMessage.of(assistantText("resumed", StopReason.STOP)),
+                result.context().messages().get(2));
+        // request projected the 2 existing messages (prompt user only)
+        assertEquals(projected(userMsg("a"),
+                StandardAgentMessage.of(assistantText("prev", StopReason.STOP))),
+                client.receivedRequests().get(0).messages());
+    }
+
+    // --- terminal failures ---
 
     @Test
-    void parallelToolsStartConcurrentlyAndWriteBackInSourceOrder() throws Exception {
+    void errorStopReasonEndsRunImmediately() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                new Message.Assistant(List.of(new Content.Text("err")),
+                        StopReason.ERROR, "boom", T1));
+        var ctx = contextWithTools();
+        var result = runPrompt(client, ctx, recorder);
+
+        assertEquals(2, result.context().messages().size());
+        assertEquals(1, client.receivedRequests().size());
+        // No follow-up: single TurnCompleted then AgentCompleted
+        var turnCompleteds = recorder.events().stream()
+                .filter(e -> e instanceof AgentEvent.TurnCompleted).count();
+        assertEquals(1, turnCompleteds);
+    }
+
+    @Test
+    void modelFailureProducesErrorAssistantWhenNotCancelled() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(); // empty queue
+        var ctx = contextWithTools();
+        var result = runPrompt(client, ctx, recorder);
+
+        // prompt + error assistant
+        assertEquals(2, result.context().messages().size());
+        var last = ((StandardAgentMessage) result.context().messages().get(1)).message();
+        assertInstanceOf(Message.Assistant.class, last);
+        assertEquals(StopReason.ERROR, ((Message.Assistant) last).stopReason());
+    }
+
+    // --- LENGTH ---
+
+    @Test
+    void lengthFailsAllToolCallsWithoutExecuting() {
+        var recorder = new RecordingEventSink();
+        var execCount = new AtomicInteger();
+        var countingEcho = TestTools.sideEffect("echo", execCount::incrementAndGet);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "echo"), toolCall("c2", "echo")),
+                        StopReason.LENGTH),
+                // after the LENGTH failures the loop continues (results are
+                // non-terminating) and the model stops cleanly
+                assistantText("done", StopReason.STOP));
+        var ctx = contextWithTools(countingEcho);
+        var result = runPrompt(client, ctx, recorder);
+
+        // tools NOT executed
+        assertEquals(0, execCount.get());
+        // prompt + assistant(LENGTH) + 2 failed tool results + assistant(STOP)
+        assertEquals(5, result.context().messages().size());
+        // both tool results are errors
+        var toolResults = recorder.events().stream()
+                .filter(e -> e instanceof AgentEvent.ToolCompleted tc)
+                .map(e -> ((AgentEvent.ToolCompleted) e).result())
+                .toList();
+        assertEquals(2, toolResults.size());
+        assertTrue(toolResults.get(0).error());
+        assertTrue(toolResults.get(1).error());
+    }
+
+    // --- sequential vs parallel ---
+
+    @Test
+    void parallelExecutionRunsToolCallsConcurrently() throws Exception {
+        var recorder = new RecordingEventSink();
         var started = new CountDownLatch(2);
         var release = new CountDownLatch(1);
         var b1 = TestTools.blocking("b1", started, release, ToolExecutionMode.PARALLEL);
         var b2 = TestTools.blocking("b2", started, release, ToolExecutionMode.PARALLEL);
-        var assistant1 = assistant(List.of(
-                toolCall("c1", "b1", MAPPER.createObjectNode()),
-                toolCall("c2", "b2", MAPPER.createObjectNode())), StopReason.TOOL_CALL);
-        var assistant2 = assistant(List.of(new Content.Text("done")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var config = config(llmClient, new RecordingEventSink());
-        var context = contextWithTools(b1, b2);
-        var loop = new AgentLoop(executor);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "b1"), toolCall("c2", "b2")), StopReason.TOOL_CALL),
+                assistantText("done", StopReason.STOP));
+        var ctx = contextWithTools(b1, b2);
 
-        var future = CompletableFuture.supplyAsync(
-                () -> loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token()),
+        // run in a separate thread so we can release after both started
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        var fut = CompletableFuture.supplyAsync(() ->
+                loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, recorder), source.signal()),
+                executor);
+        // both started -> parallel
+        assertTrue(started.await(2, TimeUnit.SECONDS), "both tools should start concurrently");
+        release.countDown();
+        var result = fut.join();
+
+        // prompt + assistant(toolcall) + tr1 + tr2 + assistant(stop)
+        assertEquals(5, result.context().messages().size());
+    }
+
+    @Test
+    void sequentialExecutionRunsToolCallsNonOverlapping() throws Exception {
+        var recorder = new RecordingEventSink();
+        var firstStarted = new CountDownLatch(1);
+        var firstRelease = new CountDownLatch(1);
+        var secondStarted = new CountDownLatch(1);
+        var secondRelease = new CountDownLatch(1);
+        // first tool blocks; second tool's "started" latch should NOT count down
+        // until the first is released -> proves non-overlap.
+        var b1 = TestTools.blocking("b1", firstStarted, firstRelease, ToolExecutionMode.SEQUENTIAL);
+        var b2 = TestTools.blocking("b2", secondStarted, secondRelease, ToolExecutionMode.SEQUENTIAL);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "b1"), toolCall("c2", "b2")), StopReason.TOOL_CALL),
+                assistantText("done", StopReason.STOP));
+        var ctx = contextWithTools(b1, b2);
+
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        var fut = CompletableFuture.supplyAsync(() ->
+                loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, recorder), source.signal()),
+                executor);
+
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+        assertFalse(secondStarted.await(200, TimeUnit.MILLISECONDS),
+                "second tool must not start before first finishes");
+        firstRelease.countDown();
+        assertTrue(secondStarted.await(2, TimeUnit.SECONDS));
+        secondRelease.countDown();
+        var result = fut.join();
+
+        // prompt + assistant(toolcall) + tr1 + tr2 + assistant(stop)
+        assertEquals(5, result.context().messages().size());
+    }
+
+    @Test
+    void sequentialModeForcesBatchSequentialEvenIfToolsAreParallel() throws Exception {
+        var recorder = new RecordingEventSink();
+        var firstStarted = new CountDownLatch(1);
+        var firstRelease = new CountDownLatch(1);
+        var secondStarted = new CountDownLatch(1);
+        var secondRelease = new CountDownLatch(1);
+        var b1 = TestTools.blocking("b1", firstStarted, firstRelease, ToolExecutionMode.PARALLEL);
+        var b2 = TestTools.blocking("b2", secondStarted, secondRelease, ToolExecutionMode.PARALLEL);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "b1"), toolCall("c2", "b2")), StopReason.TOOL_CALL),
+                assistantText("done", StopReason.STOP));
+        var ctx = contextWithTools(b1, b2);
+
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        var cfg = new AgentLoopConfig(MODEL, client, MAPPER, ToolExecutionMode.SEQUENTIAL,
+                null, null, recorder);
+        var fut = CompletableFuture.supplyAsync(() ->
+                loop.runPrompt(List.of(userMsg("hi")), ctx, cfg, source.signal()), executor);
+
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+        assertFalse(secondStarted.await(200, TimeUnit.MILLISECONDS));
+        firstRelease.countDown();
+        assertTrue(secondStarted.await(2, TimeUnit.SECONDS));
+        secondRelease.countDown();
+        fut.join();
+    }
+
+    // --- cancellation ---
+
+    @Test
+    void cancellationBeforeModelCallProducesAbortedAssistant() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("never", StopReason.STOP));
+        var ctx = contextWithTools();
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        source.cancel(); // pre-cancel
+        var result = loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, recorder), source.signal());
+
+        // prompt + aborted assistant
+        assertEquals(2, result.context().messages().size());
+        var last = ((StandardAgentMessage) result.context().messages().get(1)).message();
+        assertEquals(StopReason.ABORTED, ((Message.Assistant) last).stopReason());
+        // model never called
+        assertEquals(0, client.receivedRequests().size());
+    }
+
+    @Test
+    void cancellationBeforeToolBatchProducesAbortedAssistant() {
+        var recorder = new RecordingEventSink();
+        var execCount = new AtomicInteger();
+        var cancelSource = new CancellationSource();
+        // a tool that cancels on execute and terminates
+        var cancelTool = TestTools.cancelAndTerminate("canceller", cancelSource);
+        var echo = TestTools.sideEffect("echo", execCount::incrementAndGet);
+        // batch: [canceller(sequential, cancels+terminates), echo]
+        // first tool runs, cancels, terminates -> allTerminated true -> inner exits
+        // post-inner-loop cancellation check fires -> ABORTED
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "canceller"), toolCall("c2", "echo")),
+                        StopReason.TOOL_CALL),
+                assistantText("never", StopReason.STOP));
+        var ctx = contextWithTools(cancelTool, echo);
+        var loop = new AgentLoop(executor);
+        var result = loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, recorder), cancelSource.signal());
+
+        // echo NOT executed (batch sequential, cancelled after first)
+        assertEquals(0, execCount.get());
+        // final message is ABORTED
+        var last = ((StandardAgentMessage) result.context().messages().get(result.context().messages().size() - 1)).message();
+        assertEquals(StopReason.ABORTED, ((Message.Assistant) last).stopReason());
+    }
+
+    @Test
+    void cancellationPropagatesToRunningToolSignal() throws Exception {
+        var recorder = new RecordingEventSink();
+        var started = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var recorderFlag = new AtomicBoolean(false);
+        var blocking = TestTools.recordingBlocking("block", started, release, recorderFlag);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "block")), StopReason.TOOL_CALL),
+                assistantText("done", StopReason.STOP));
+        var ctx = contextWithTools(blocking);
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        var fut = CompletableFuture.supplyAsync(() ->
+                loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, recorder), source.signal()),
                 executor);
         assertTrue(started.await(2, TimeUnit.SECONDS));
+        source.cancel();
         release.countDown();
-        var result = future.get(5, TimeUnit.SECONDS);
+        var result = fut.join();
 
-        assertEquals(2, llmClient.receivedRequests().size());
-        var trs = toolResultsIn(result);
-        assertEquals(2, trs.size());
-        assertEquals("b1", trs.get(0).toolName());
-        assertEquals("b2", trs.get(1).toolName());
+        assertTrue(recorderFlag.get(), "tool should observe cancelled signal");
     }
 
-    // --- case 4: a sequential tool forces the whole batch to run one at a time ---
+    // --- steering & follow-up ---
 
     @Test
-    void sequentialBatchRunsToolsOneAtATime() throws Exception {
-        var started1 = new CountDownLatch(1);
-        var release1 = new CountDownLatch(1);
-        var started2 = new CountDownLatch(1);
-        var release2 = new CountDownLatch(1);
-        var b1 = TestTools.blocking("b1", started1, release1, ToolExecutionMode.SEQUENTIAL);
-        var b2 = TestTools.blocking("b2", started2, release2, ToolExecutionMode.PARALLEL);
-        var assistant1 = assistant(List.of(
-                toolCall("c1", "b1", MAPPER.createObjectNode()),
-                toolCall("c2", "b2", MAPPER.createObjectNode())), StopReason.TOOL_CALL);
-        var assistant2 = assistant(List.of(new Content.Text("done")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var config = config(llmClient, new RecordingEventSink());
-        var context = contextWithTools(b1, b2);
-        var loop = new AgentLoop(executor);
-
-        var future = CompletableFuture.supplyAsync(
-                () -> loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token()),
-                executor);
-        assertTrue(started1.await(2, TimeUnit.SECONDS));
-        assertEquals(1, started2.getCount());
-        release1.countDown();
-        assertTrue(started2.await(2, TimeUnit.SECONDS));
-        release2.countDown();
-        var result = future.get(5, TimeUnit.SECONDS);
-
-        var trs = toolResultsIn(result);
-        assertEquals(2, trs.size());
-        assertEquals("b1", trs.get(0).toolName());
-        assertEquals("b2", trs.get(1).toolName());
-    }
-
-    // --- case 5: tool errors produce error results and the loop continues ---
-
-    @Test
-    void toolErrorsProduceErrorResultsAndLoopContinues() {
-        var echo = TestTools.echo();
-        var failing = TestTools.failing();
-        var assistant1 = assistant(List.of(
-                toolCall("c1", "unknown", MAPPER.createObjectNode()),
-                toolCall("c2", "echo", MAPPER.valueToTree(Map.of("x", 1))),
-                toolCall("c3", "failing", MAPPER.createObjectNode())), StopReason.TOOL_CALL);
-        var assistant2 = assistant(List.of(new Content.Text("recovered")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var config = config(llmClient, new RecordingEventSink());
-        var context = contextWithTools(echo, failing);
-        var loop = new AgentLoop(executor);
-
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
-
-        assertEquals(2, llmClient.receivedRequests().size());
-        var trs = toolResultsIn(result);
-        assertEquals(3, trs.size());
-        for (var tr : trs) {
-            assertTrue(tr.error());
-        }
-        assertEquals("unknown", trs.get(0).toolName());
-        assertEquals("echo", trs.get(1).toolName());
-        assertEquals("failing", trs.get(2).toolName());
-    }
-
-    // --- case 6: LENGTH stop reason fails tool calls without executing ---
-
-    @Test
-    void lengthStopReasonFailsToolCallsWithoutExecution() {
-        var echo = TestTools.echo();
-        var assistant1 = assistant(
-                List.of(toolCall("c1", "echo", MAPPER.valueToTree("hello"))),
-                StopReason.LENGTH);
-        var assistant2 = assistant(List.of(new Content.Text("recovered")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var config = config(llmClient, new RecordingEventSink());
-        var context = contextWithTools(echo);
-        var loop = new AgentLoop(executor);
-
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
-
-        assertEquals(2, llmClient.receivedRequests().size());
-        var trs = toolResultsIn(result);
-        assertEquals(1, trs.size());
-        assertTrue(trs.get(0).error());
-        var text = (Content.Text) trs.get(0).content().get(0);
-        assertTrue(text.text().contains("truncated"));
-    }
-
-    // --- case 7: steering injected after current turn, before next model call ---
-
-    @Test
-    void steeringInjectedAfterCurrentTurnBeforeNextModelCall() {
-        var steeringQueue = new PendingMessageQueue(QueueMode.ALL);
-        var steeringMsg = user("stop, do this instead");
-        var enqueueTool = TestTools.sideEffect("enqueue", () -> steeringQueue.enqueue(steeringMsg));
-        var assistant1 = assistant(
-                List.of(toolCall("c1", "enqueue", MAPPER.createObjectNode())), StopReason.TOOL_CALL);
-        var assistant2 = assistant(List.of(new Content.Text("done")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var eventSink = new RecordingEventSink();
-        var config = configWithSources(llmClient, eventSink, steeringQueue, null);
-        var context = contextWithTools(enqueueTool);
-        var loop = new AgentLoop(executor);
-
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
-
-        assertEquals(2, llmClient.receivedRequests().size());
-        var messages = result.context().messages();
-        assertEquals(5, messages.size()); // [user, assistant1, toolResult, steeringMsg, assistant2]
-        assertSame(steeringMsg, messages.get(3));
-        // Strengthened: the 2nd model request carried the steering message.
-        assertTrue(llmClient.receivedRequests().get(1).messages().contains(steeringMsg));
-    }
-
-    // --- case 8: follow-up triggers next model call when idle ---
-
-    @Test
-    void followUpTriggersNextModelCallWhenIdle() {
-        var followUpQueue = new PendingMessageQueue(QueueMode.ALL);
-        var followUpMsg = user("also summarize");
-        followUpQueue.enqueue(followUpMsg);
-        var assistant1 = assistant(List.of(new Content.Text("first")), StopReason.STOP);
-        var assistant2 = assistant(List.of(new Content.Text("second")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var eventSink = new RecordingEventSink();
-        var config = configWithSources(llmClient, eventSink, null, followUpQueue);
-        var context = new AgentContext("sys", List.of(), List.of());
-        var loop = new AgentLoop(executor);
-
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
-
-        assertEquals(2, llmClient.receivedRequests().size());
-        var messages = result.context().messages();
-        assertEquals(4, messages.size()); // [user, assistant1, followUpMsg, assistant2]
-        assertSame(followUpMsg, messages.get(2));
-        assertTrue(llmClient.receivedRequests().get(1).messages().contains(followUpMsg));
-    }
-
-    // --- case 8b: follow-up deferred behind tool work ---
-
-    @Test
-    void followUpDeferredBehindToolWork() {
-        var followUpQueue = new PendingMessageQueue(QueueMode.ALL);
-        var followUpMsg = user("also summarize");
-        followUpQueue.enqueue(followUpMsg);
-        var echo = TestTools.echo();
-        var assistant1 = assistant(
-                List.of(toolCall("c1", "echo", MAPPER.valueToTree("hi"))), StopReason.TOOL_CALL);
-        var assistant2 = assistant(List.of(new Content.Text("done")), StopReason.STOP);
-        var assistant3 = assistant(List.of(new Content.Text("final")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2, assistant3);
-        var eventSink = new RecordingEventSink();
-        var config = configWithSources(llmClient, eventSink, null, followUpQueue);
-        var context = contextWithTools(echo);
-        var loop = new AgentLoop(executor);
-
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
-
-        assertEquals(3, llmClient.receivedRequests().size());
-        // Request 2 (after the tool turn) does NOT carry follow-up: still queued.
-        assertFalse(llmClient.receivedRequests().get(1).messages().contains(followUpMsg));
-        // Request 3 (after STOP, follow-up drained) carries follow-up.
-        assertTrue(llmClient.receivedRequests().get(2).messages().contains(followUpMsg));
-    }
-
-    // --- case 9: no follow-up emits AgentCompleted exactly once ---
-
-    @Test
-    void noFollowUpEmitsAgentCompletedOnce() {
-        var followUpQueue = new PendingMessageQueue(QueueMode.ALL); // empty
-        var assistant1 = assistant(List.of(new Content.Text("done")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1);
-        var eventSink = new RecordingEventSink();
-        var config = configWithSources(llmClient, eventSink, null, followUpQueue);
-        var context = new AgentContext("sys", List.of(), List.of());
-        var loop = new AgentLoop(executor);
-
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
-
-        assertEquals(1, llmClient.receivedRequests().size());
-        assertEquals(2, result.context().messages().size()); // [user, assistant1]
-        var completed = eventSink.events().stream()
-                .filter(e -> e instanceof AgentEvent.AgentCompleted)
-                .toList();
-        assertEquals(1, completed.size());
-        // Strengthened: sole AgentCompleted references the returned result and is the last event.
-        assertSame(result, ((AgentEvent.AgentCompleted) completed.get(0)).result());
-        assertSame(completed.get(0), eventSink.events().get(eventSink.events().size() - 1));
-    }
-
-    // --- case 10: cancellation before tool batch produces ABORTED, no tools ---
-
-    @Test
-    void cancellationBeforeToolBatchProducesAbortedAndNoTools() {
-        var source = new CancellationSource();
-        var echo = TestTools.echo();
-        var assistant1 = assistant(List.of(
-                toolCall("c1", "echo", MAPPER.valueToTree("a")),
-                toolCall("c2", "echo", MAPPER.valueToTree("b"))), StopReason.TOOL_CALL);
-        var generateCount = new AtomicInteger(0);
-        LlmClient cancellingClient = (request, cancellation, events) -> {
-            generateCount.incrementAndGet();
-            source.cancel();
-            return CompletableFuture.completedFuture(assistant1);
+    void steeringMessageInjectedBeforeNextModelCall() throws Exception {
+        var recorder = new RecordingEventSink();
+        var steering = new PendingMessageQueue(QueueMode.ALL);
+        // A tool that enqueues the steering message during execute, so it lands
+        // after the 1st model call but before the steering drain at the top of
+        // the next iteration (before the 2nd model call).
+        var echoSteering = new AgentTool<String>() {
+            @Override public String name() { return "echo"; }
+            @Override public Class<String> argumentType() { return String.class; }
+            @Override public java.util.concurrent.CompletionStage<site.pplee.jcode.agentcore.tool.ToolExecutionResult> execute(
+                    String id, String args, site.pplee.jcode.ai.concurrent.CancellationSignal c) {
+                steering.enqueue(userMsg("steer"));
+                return java.util.concurrent.CompletableFuture.completedFuture(
+                        site.pplee.jcode.agentcore.tool.ToolExecutionResult.success(
+                                List.of(new Content.Text(args))));
+            }
         };
-        var eventSink = new RecordingEventSink();
-        var config = config(cancellingClient, eventSink);
-        var context = contextWithTools(echo);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "echo")), StopReason.TOOL_CALL),
+                assistantText("final", StopReason.STOP));
+        var ctx = contextWithTools(echoSteering);
         var loop = new AgentLoop(executor);
-
-        var result = loop.runPrompt(List.of(user("hi")), context, config, source.token());
-
-        assertEquals(1, generateCount.get());
-        var messages = result.context().messages();
-        assertEquals(3, messages.size()); // [user, assistant1, aborted]
-        var aborted = (AgentMessage.Assistant) messages.get(2);
-        assertEquals(StopReason.ABORTED, aborted.stopReason());
-        // Strengthened: no tools started, completed, or resulted.
-        assertTrue(messages.stream().noneMatch(m -> m instanceof AgentMessage.ToolResult));
-        var events = eventSink.events();
-        assertTrue(events.stream().noneMatch(e -> e instanceof AgentEvent.ToolStarted));
-        assertTrue(events.stream().noneMatch(e -> e instanceof AgentEvent.ToolCompleted));
-    }
-
-    // --- case 10b: mid-batch cancellation produces ABORTED (post-inner-loop check) ---
-
-    @Test
-    void cancellationMidBatchProducesAborted() {
         var source = new CancellationSource();
-        var cancelTool = TestTools.cancelAndTerminate("cancel", source);
-        var echo = TestTools.echo(); // must NOT run
-        var assistant1 = assistant(List.of(
-                toolCall("c1", "cancel", MAPPER.createObjectNode()),
-                toolCall("c2", "echo", MAPPER.valueToTree("x"))), StopReason.TOOL_CALL);
-        var llmClient = new ScriptedLlmClient(assistant1);
-        var eventSink = new RecordingEventSink();
-        var config = config(llmClient, eventSink);
-        var context = contextWithTools(cancelTool, echo);
-        var loop = new AgentLoop(executor);
+        var cfg = configWithSources(client, recorder, steering, null);
+        var result = loop.runPrompt(List.of(userMsg("hi")), ctx, cfg, source.signal());
 
-        var result = loop.runPrompt(List.of(user("hi")), context, config, source.token());
-
-        assertEquals(1, llmClient.receivedRequests().size()); // aborted, no model 2
-        var messages = result.context().messages();
-        assertEquals(4, messages.size()); // [user, assistant1, cancelResult, aborted]
-        var aborted = (AgentMessage.Assistant) messages.get(3);
-        assertEquals(StopReason.ABORTED, aborted.stopReason());
-        // echo did NOT run: only the cancel tool produced a result.
-        var trs = toolResultsIn(result);
-        assertEquals(1, trs.size());
-        assertEquals("cancel", trs.get(0).toolName());
-        // Only ToolStarted for the cancel tool, not for echo (boundary 4 skipped it).
-        var starts = eventSink.events().stream()
-                .filter(e -> e instanceof AgentEvent.ToolStarted)
-                .toList();
-        assertEquals(1, starts.size());
+        // 2nd model call should have projected: prompt, assistant(toolcall),
+        // toolresult, steer
+        var secondReq = client.receivedRequests().get(1);
+        assertEquals(projected(
+                userMsg("hi"),
+                StandardAgentMessage.of(assistant(List.of(toolCall("c1", "echo")), StopReason.TOOL_CALL))),
+                secondReq.messages().subList(0, 2));
+        // 3rd message is the tool result; 4th is the steer
+        assertEquals(4, secondReq.messages().size());
+        assertInstanceOf(Message.User.class, secondReq.messages().get(3));
+        assertEquals("steer", ((Content.Text) ((Message.User) secondReq.messages().get(3)).content().get(0)).text());
     }
 
-    // --- case T1: all-terminating results stop without a second model call ---
-
     @Test
-    void allTerminatingResultsStopWithoutSecondModelCall() {
-        var terminating = TestTools.terminating();
-        var assistant1 = assistant(
-                List.of(toolCall("c1", "terminating", MAPPER.createObjectNode())), StopReason.TOOL_CALL);
-        var llmClient = new ScriptedLlmClient(assistant1);
-        var eventSink = new RecordingEventSink();
-        var config = config(llmClient, eventSink);
-        var context = contextWithTools(terminating);
+    void followUpMessageKeepsRunGoingWhenModelWouldStop() {
+        var recorder = new RecordingEventSink();
+        var followUp = new PendingMessageQueue(QueueMode.ALL);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("first", StopReason.STOP),
+                assistantText("second", StopReason.STOP));
+        var ctx = contextWithTools();
         var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        followUp.enqueue(userMsg("again"));
+        var cfg = configWithSources(client, recorder, null, followUp);
+        var result = loop.runPrompt(List.of(userMsg("hi")), ctx, cfg, source.signal());
 
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
-
-        assertEquals(1, llmClient.receivedRequests().size());
-        var trs = toolResultsIn(result);
-        assertEquals(1, trs.size());
-        assertTrue(trs.get(0).terminate());
+        // prompt + assistant1 + followup + assistant2
+        assertEquals(4, result.context().messages().size());
+        assertEquals(StandardAgentMessage.of(assistantText("second", StopReason.STOP)),
+                result.context().messages().get(3));
+        assertEquals(2, client.receivedRequests().size());
     }
 
-    // --- case T2: mixed terminating results continue to a second model call ---
+    @Test
+    void terminatingToolStopsTheRun() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "terminating")), StopReason.TOOL_CALL),
+                assistantText("never", StopReason.STOP));
+        var ctx = contextWithTools(TestTools.terminating());
+        var result = runPrompt(client, ctx, recorder);
+
+        // prompt + assistant + terminating toolresult; NO 2nd model call
+        assertEquals(3, result.context().messages().size());
+        assertEquals(1, client.receivedRequests().size());
+    }
 
     @Test
-    void mixedTerminatingResultsContinueToSecondModelCall() {
-        var terminating = TestTools.terminating();
-        var echo = TestTools.echo();
-        var assistant1 = assistant(List.of(
-                toolCall("c1", "terminating", MAPPER.createObjectNode()),
-                toolCall("c2", "echo", MAPPER.valueToTree("hi"))), StopReason.TOOL_CALL);
-        var assistant2 = assistant(List.of(new Content.Text("done")), StopReason.STOP);
-        var llmClient = new ScriptedLlmClient(assistant1, assistant2);
-        var eventSink = new RecordingEventSink();
-        var config = config(llmClient, eventSink);
-        var context = contextWithTools(terminating, echo);
-        var loop = new AgentLoop(executor);
+    void toolFailureProducesErrorToolResultButRunContinues() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "failing")), StopReason.TOOL_CALL),
+                assistantText("after", StopReason.STOP));
+        var ctx = contextWithTools(TestTools.failing());
+        var result = runPrompt(client, ctx, recorder);
 
-        var result = loop.runPrompt(List.of(user("hi")), context, config, new CancellationSource().token());
+        // tool result is an error
+        var toolResult = recorder.events().stream()
+                .filter(e -> e instanceof AgentEvent.ToolCompleted)
+                .map(e -> ((AgentEvent.ToolCompleted) e).result())
+                .findFirst().orElseThrow();
+        assertTrue(toolResult.error());
+        // run continued to a 2nd model call
+        assertEquals(2, client.receivedRequests().size());
+    }
 
-        assertEquals(2, llmClient.receivedRequests().size());
-        var trs = toolResultsIn(result);
-        assertEquals(2, trs.size());
-        assertEquals("terminating", trs.get(0).toolName());
-        assertTrue(trs.get(0).terminate());
-        assertEquals("echo", trs.get(1).toolName());
-        assertFalse(trs.get(1).terminate());
+    @Test
+    void unknownToolNameProducesErrorToolResult() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "ghost")), StopReason.TOOL_CALL),
+                assistantText("after", StopReason.STOP));
+        var ctx = contextWithTools(); // no tools
+        var result = runPrompt(client, ctx, recorder);
+
+        var toolResult = recorder.events().stream()
+                .filter(e -> e instanceof AgentEvent.ToolCompleted)
+                .map(e -> ((AgentEvent.ToolCompleted) e).result())
+                .findFirst().orElseThrow();
+        assertTrue(toolResult.error());
+        assertEquals(2, client.receivedRequests().size());
+    }
+
+    @Test
+    void contextRetainsPriorMessagesAcrossTurns() {
+        var recorder = new RecordingEventSink();
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistant(List.of(toolCall("c1", "echo")), StopReason.TOOL_CALL),
+                assistantText("done", StopReason.STOP));
+        var ctx = contextWithTools(TestTools.echo());
+        var result = runPrompt(client, ctx, recorder);
+
+        // 2nd request projected prompt + assistant(toolcall) + toolresult
+        var secondReq = client.receivedRequests().get(1);
+        assertEquals(3, secondReq.messages().size());
     }
 }
