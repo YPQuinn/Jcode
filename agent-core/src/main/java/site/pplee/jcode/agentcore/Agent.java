@@ -188,7 +188,7 @@ public final class Agent implements AutoCloseable {
                 config.afterToolCall(),
                 steeringQueue,
                 followUpQueue,
-                reducerSink
+                new RunEventEmitter(reducerSink)
         );
         try {
             executor.execute(() -> {

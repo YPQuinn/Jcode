@@ -33,6 +33,7 @@ Jcode/
 │       ├── LoopState.java        # package-private 唯一可变状态
 │       ├── LoopResult.java       # 一次 run 的结果
 │       ├── ToolSchemaValidator.java  # package-private 最小 JSON Schema 校验器
+│       ├── RunEventEmitter.java   # package-private per-run 同步事件投递 adapter (等待 sink stage)
 │       ├── concurrent/  # CancellationSource (取消所有权)
 │       ├── event/       # AgentEvent sealed (10 variants) + AgentEventSink
 │       ├── message/     # AgentMessage 开放接口 + StandardAgentMessage 桥接
@@ -84,7 +85,7 @@ Jcode/
 - `CancellationSignal` 只读；不得 cast 回 `CancellationSource` 调 `cancel()`。
 - `cancel()` 幂等。
 - 不阻塞轮询、不用 `Thread.sleep()`、不用长期共享无界平台线程池。
-- `AgentEventSink.emit()` 返回的 stage 必须被等待；慢 sink 阻塞 run。
+- `AgentEventSink.emit()` 返回的 stage 必须被等待；慢 sink 阻塞 run。`RunEventEmitter` 是唯一等待点——loop 和 `LoopToolUpdateSink` 均通过它投递事件。
 
 **工具三阶段管道：**
 - 工具失败/参数转换失败/schema 失败/未知工具 → 转 error `ToolExecutionResult`，不抛进 loop。
@@ -148,3 +149,4 @@ mdbook serve docs/architecture --open
 
 - 每次任务完成后要询问用户是否需要提交代码，如果提交代码**必须**按照 `docs/rules/git-commit-message.md` 规范提交代码
 - 每次代码提交前**必须**更新本文档以及各子 AGENTS.md 文档（如果有涉及到相应模块的更新）
+- `docs/plans` 根目录下的计划文档已经实现后要挪入 `docs/plans/archived` 文件夹

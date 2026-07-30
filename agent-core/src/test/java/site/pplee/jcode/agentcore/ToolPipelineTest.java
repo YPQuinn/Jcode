@@ -29,8 +29,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -90,13 +93,13 @@ class ToolPipelineTest {
     }
 
     private AgentLoopConfig config(ModelClient client, AgentEventSink sink) {
-        return new AgentLoopConfig(MODEL, client, MAPPER, null, null, null, null, null, sink);
+        return new AgentLoopConfig(MODEL, client, MAPPER, null, null, null, null, null, new RunEventEmitter(sink));
     }
 
     private AgentLoopConfig configWithHooks(
             ModelClient client, AgentEventSink sink,
             BeforeToolCall before, AfterToolCall after) {
-        return new AgentLoopConfig(MODEL, client, MAPPER, null, before, after, null, null, sink);
+        return new AgentLoopConfig(MODEL, client, MAPPER, null, before, after, null, null, new RunEventEmitter(sink));
     }
 
     private LoopResult runPrompt(ModelClient client, AgentContext ctx, AgentEventSink sink) {
@@ -320,7 +323,76 @@ class ToolPipelineTest {
         assertEquals("partial-2", ((Content.Text) updates.get(1)).text());
     }
 
-    // --- 5. After settle, increments are ignored ---
+    // --- 5. ToolUpdate blocks until the sink stage completes ---
+
+    @Test
+    void toolUpdateBlocksUntilSinkStageCompletes() throws InterruptedException {
+        var updateStage = new CompletableFuture<Void>();
+        var updateReached = new CountDownLatch(1);
+        var toolProceeded = new CountDownLatch(1);
+        var recorded = new CopyOnWriteArrayList<AgentEvent>();
+        var sink = new AgentEventSink() {
+            @Override
+            public CompletionStage<Void> emit(AgentEvent event) {
+                recorded.add(event);
+                if (event instanceof AgentEvent.ToolUpdate) {
+                    updateReached.countDown();
+                    return updateStage;
+                }
+                return CompletableFuture.completedStage(null);
+            }
+        };
+        var tool = new AgentTool<Object>() {
+            @Override public String name() { return "blocking_update"; }
+            @Override public Class<Object> argumentType() { return Object.class; }
+            @Override
+            public CompletionStage<ToolExecutionResult> execute(
+                    String id, Object args, ToolUpdateSink updates, CancellationSignal c) {
+                updates.update(new Content.Text("partial")).toCompletableFuture().join();
+                toolProceeded.countDown();
+                return CompletableFuture.completedFuture(
+                        ToolExecutionResult.success(List.of(new Content.Text("done"))));
+            }
+        };
+        var ctx = contextWithTools(tool);
+        var client = new ScriptedModelClient(
+                Message.Assistant.of(List.of(
+                        toolCall("c1", "blocking_update", MAPPER.getNodeFactory().textNode("hi"))),
+                        StopReason.TOOL_CALL, T1),
+                assistantText("done", StopReason.STOP));
+
+        var loop = new AgentLoop(executor);
+        var source = new CancellationSource();
+        var fut = CompletableFuture.supplyAsync(() ->
+                loop.runPrompt(List.of(userMsg("hi")), ctx, config(client, sink), source.signal()),
+                executor);
+
+        // ToolUpdate emit blocks on the incomplete sink stage: tool must not
+        // proceed and ToolCompleted must not have been emitted.
+        assertTrue(updateReached.await(2, TimeUnit.SECONDS),
+                "ToolUpdate must reach the sink");
+        assertFalse(toolProceeded.await(200, TimeUnit.MILLISECONDS),
+                "tool must not proceed while ToolUpdate sink stage is incomplete");
+        assertFalse(recorded.stream().anyMatch(e -> e instanceof AgentEvent.ToolCompleted),
+                "ToolCompleted must not be emitted while ToolUpdate is blocking");
+
+        // complete the sink stage → tool proceeds → run ends normally
+        updateStage.complete(null);
+        fut.join();
+
+        // verify ordering: ToolStarted → ToolUpdate → ToolCompleted
+        var toolStartedIdx = indexOf(recorded, e -> e instanceof AgentEvent.ToolStarted);
+        var toolUpdateIdx = indexOf(recorded, e -> e instanceof AgentEvent.ToolUpdate);
+        var toolCompletedIdx = indexOf(recorded, e -> e instanceof AgentEvent.ToolCompleted);
+        assertTrue(toolStartedIdx >= 0 && toolUpdateIdx >= 0 && toolCompletedIdx >= 0,
+                "all three tool events must be present");
+        assertTrue(toolStartedIdx < toolUpdateIdx,
+                "ToolStarted must precede ToolUpdate");
+        assertTrue(toolUpdateIdx < toolCompletedIdx,
+                "ToolUpdate must precede ToolCompleted");
+    }
+
+    // --- 6. After settle, increments are ignored ---
 
     @Test
     void settleIgnoresLateUpdates() {
@@ -359,7 +431,7 @@ class ToolPipelineTest {
         assertEquals(1, updatesAfter, "late update after settle must be ignored");
     }
 
-    // --- 6. prepareArguments is called before schema validation ---
+    // --- 7. prepareArguments is called before schema validation ---
 
     @Test
     void prepareArgumentsInjectsDefaultsBeforeSchemaValidation() {

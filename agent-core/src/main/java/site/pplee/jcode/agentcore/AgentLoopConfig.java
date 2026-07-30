@@ -1,7 +1,6 @@
 package site.pplee.jcode.agentcore;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
 import site.pplee.jcode.agentcore.tool.AfterToolCall;
 import site.pplee.jcode.agentcore.tool.BeforeToolCall;
@@ -15,7 +14,8 @@ import java.util.Objects;
 /**
  * Per-run configuration assembled by {@link Agent}: model/client bindings,
  * shared {@link ObjectMapper}, tool execution mode, steering/follow-up
- * sources, and the event sink. Optional sources/sink default to empty/noop.
+ * sources, and the {@link RunEventEmitter} event delivery adapter. Optional
+ * sources/emitter default to empty/noop.
  *
  * <p>Carries only {@code ai} model-identity types ({@link ModelRef}) and the
  * {@link ModelClient} seam — no provider SDK. Streaming deltas flow through
@@ -30,7 +30,7 @@ record AgentLoopConfig(
         AfterToolCall afterToolCall,
         PendingMessageSource steeringMessages,
         PendingMessageSource followUpMessages,
-        AgentEventSink eventSink
+        RunEventEmitter events
 ) {
     AgentLoopConfig {
         Objects.requireNonNull(model, "model must not be null");
@@ -41,6 +41,6 @@ record AgentLoopConfig(
         afterToolCall = (afterToolCall == null) ? AfterToolCall.noop() : afterToolCall;
         steeringMessages = (steeringMessages == null) ? List::of : steeringMessages;
         followUpMessages = (followUpMessages == null) ? List::of : followUpMessages;
-        eventSink = (eventSink == null) ? AgentEventSink.noop() : eventSink;
+        events = (events == null) ? RunEventEmitter.noop() : events;
     }
 }

@@ -78,12 +78,13 @@ final class AgentLoop {
         }
 
         var state = new LoopState(context);
-        emit(new AgentEvent.AgentStarted(), config);
-        emit(new AgentEvent.TurnStarted(), config);
+        var events = config.events();
+        events.emit(new AgentEvent.AgentStarted());
+        events.emit(new AgentEvent.TurnStarted());
         for (var p : prompts) {
-            emit(new AgentEvent.MessageStarted(p), config);
+            events.emit(new AgentEvent.MessageStarted(p));
             state.append(p);
-            emit(new AgentEvent.MessageCompleted(p), config);
+            events.emit(new AgentEvent.MessageCompleted(p));
         }
         return runLoop(state, config, cancellation);
     }
@@ -98,14 +99,16 @@ final class AgentLoop {
         Objects.requireNonNull(cancellation, "cancellation must not be null");
 
         var state = new LoopState(context);
-        emit(new AgentEvent.AgentStarted(), config);
-        emit(new AgentEvent.TurnStarted(), config);
+        var events = config.events();
+        events.emit(new AgentEvent.AgentStarted());
+        events.emit(new AgentEvent.TurnStarted());
         return runLoop(state, config, cancellation);
     }
 
     private LoopResult runLoop(LoopState state, AgentLoopConfig config, CancellationSignal cancellation) {
         boolean firstTurn = true;
         var pendingMessages = drain(config.steeringMessages());
+        var events = config.events();
 
         while (true) {
             var hasMoreToolCalls = true;
@@ -113,18 +116,18 @@ final class AgentLoop {
             while (hasMoreToolCalls || !pendingMessages.isEmpty()) {
                 // cancellation boundary 1: before next turn / before model call
                 if (cancellation.isCancelled()) {
-                    return abortRun(state, config);
+                    return abortRun(state, events);
                 }
                 if (!firstTurn) {
-                    emit(new AgentEvent.TurnStarted(), config);
+                    events.emit(new AgentEvent.TurnStarted());
                 }
                 firstTurn = false;
 
                 if (!pendingMessages.isEmpty()) {
                     for (var m : pendingMessages) {
-                        emit(new AgentEvent.MessageStarted(m), config);
+                        events.emit(new AgentEvent.MessageStarted(m));
                         state.append(m);
-                        emit(new AgentEvent.MessageCompleted(m), config);
+                        events.emit(new AgentEvent.MessageCompleted(m));
                     }
                     pendingMessages = List.of();
                 }
@@ -139,7 +142,7 @@ final class AgentLoop {
                 Message.Assistant assistantMessage;
                 try {
                     var stream = config.modelClient().stream(request, cancellation);
-                    assistantMessage = consumeStream(stream, config);
+                    assistantMessage = consumeStream(stream, events);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     var reason = cancellation.isCancelled() ? StopReason.ABORTED : StopReason.ERROR;
@@ -155,13 +158,13 @@ final class AgentLoop {
 
                 // step 6: write assistant
                 state.append(assistant);
-                emit(new AgentEvent.MessageCompleted(assistant), config);
+                events.emit(new AgentEvent.MessageCompleted(assistant));
 
                 // step 7: terminal failure -> end
                 if (assistantMessage.stopReason().isTerminalFailure()) {
-                    emit(new AgentEvent.TurnCompleted(assistantMessage, List.of()), config);
+                    events.emit(new AgentEvent.TurnCompleted(assistantMessage, List.of()));
                     var result = state.result();
-                    emit(new AgentEvent.AgentCompleted(result), config);
+                    events.emit(new AgentEvent.AgentCompleted(result));
                     return result;
                 }
 
@@ -170,7 +173,7 @@ final class AgentLoop {
 
                 // cancellation boundary 3: before tool batch
                 if (!toolCalls.isEmpty() && cancellation.isCancelled()) {
-                    return abortRun(state, config);
+                    return abortRun(state, events);
                 }
 
                 // step 9-10: execute tools (LENGTH -> fail all; otherwise dispatch)
@@ -178,22 +181,22 @@ final class AgentLoop {
                 if (toolCalls.isEmpty()) {
                     outcomes = List.of();
                 } else if (assistantMessage.stopReason() == StopReason.LENGTH) {
-                    outcomes = failTruncatedToolCalls(toolCalls, config);
+                    outcomes = failTruncatedToolCalls(toolCalls, events);
                 } else {
                     outcomes = executeToolCalls(toolCalls, state, config, cancellation);
                 }
                 for (var outcome : outcomes) {
                     var wrapped = StandardAgentMessage.of(outcome.message());
-                    emit(new AgentEvent.MessageStarted(wrapped), config);
+                    events.emit(new AgentEvent.MessageStarted(wrapped));
                     state.append(wrapped);
-                    emit(new AgentEvent.MessageCompleted(wrapped), config);
+                    events.emit(new AgentEvent.MessageCompleted(wrapped));
                 }
 
                 // step 11: TurnCompleted
                 var toolResultMessages = outcomes.stream()
                         .map(ToolOutcome::message)
                         .toList();
-                emit(new AgentEvent.TurnCompleted(assistantMessage, toolResultMessages), config);
+                events.emit(new AgentEvent.TurnCompleted(assistantMessage, toolResultMessages));
 
                 // step 12: drain steering; decide inner loop continuation
                 pendingMessages = drain(config.steeringMessages());
@@ -205,7 +208,7 @@ final class AgentLoop {
             // during the tool batch (boundary 4 broke with empty or all-terminated
             // results, so the inner loop exited without hitting boundary 1 again).
             if (cancellation.isCancelled()) {
-                return abortRun(state, config);
+                return abortRun(state, events);
             }
 
             // step 13: drain follow-up
@@ -218,7 +221,7 @@ final class AgentLoop {
         }
 
         var result = state.result();
-        emit(new AgentEvent.AgentCompleted(result), config);
+        events.emit(new AgentEvent.AgentCompleted(result));
         return result;
     }
 
@@ -251,14 +254,15 @@ final class AgentLoop {
             AgentLoopConfig config,
             CancellationSignal cancellation
     ) {
+        var events = config.events();
         var outcomes = new ArrayList<ToolOutcome>();
         for (var tc : toolCalls) {
             if (cancellation.isCancelled()) {
                 break;
             }
-            emit(new AgentEvent.ToolStarted(tc), config);
+            events.emit(new AgentEvent.ToolStarted(tc));
             var outcome = executeOneToolCall(tc, toolMap, state, config, cancellation);
-            emit(new AgentEvent.ToolCompleted(outcome.message()), config);
+            events.emit(new AgentEvent.ToolCompleted(outcome.message()));
             outcomes.add(outcome);
         }
         return List.copyOf(outcomes);
@@ -271,13 +275,14 @@ final class AgentLoop {
             AgentLoopConfig config,
             CancellationSignal cancellation
     ) {
+        var events = config.events();
         var futures = new ArrayList<CompletableFuture<ToolOutcome>>();
         var submitted = new ArrayList<Content.ToolCall>();
         for (var tc : toolCalls) {
             if (cancellation.isCancelled()) {
                 break;
             }
-            emit(new AgentEvent.ToolStarted(tc), config);
+            events.emit(new AgentEvent.ToolStarted(tc));
             submitted.add(tc);
             futures.add(CompletableFuture.supplyAsync(
                     () -> executeOneToolCall(tc, toolMap, state, config, cancellation),
@@ -287,7 +292,7 @@ final class AgentLoop {
         var outcomes = new ArrayList<ToolOutcome>();
         for (CompletableFuture<ToolOutcome> future : futures) {
             var outcome = future.join();
-            emit(new AgentEvent.ToolCompleted(outcome.message()), config);
+            events.emit(new AgentEvent.ToolCompleted(outcome.message()));
             outcomes.add(outcome);
         }
         return List.copyOf(outcomes);
@@ -355,7 +360,7 @@ final class AgentLoop {
         }
 
         // --- execute ---
-        var updateSink = new LoopToolUpdateSink(toolCall, config);
+        var updateSink = new LoopToolUpdateSink(toolCall, config.events());
         ToolExecutionResult internal;
         try {
             internal = tool.execute(toolCall.id(), args, updateSink, cancellation)
@@ -383,31 +388,31 @@ final class AgentLoop {
 
     private List<ToolOutcome> failTruncatedToolCalls(
             List<Content.ToolCall> toolCalls,
-            AgentLoopConfig config
+            RunEventEmitter events
     ) {
         var outcomes = new ArrayList<ToolOutcome>();
         for (var tc : toolCalls) {
-            emit(new AgentEvent.ToolStarted(tc), config);
+            events.emit(new AgentEvent.ToolStarted(tc));
             var internal = ToolExecutionResult.failure(
                     "tool call \"" + tc.name() + "\" not executed: "
                             + "response hit output token limit, arguments may be truncated");
             var msg = toToolResultMessage(tc, internal);
-            emit(new AgentEvent.ToolCompleted(msg), config);
+            events.emit(new AgentEvent.ToolCompleted(msg));
             outcomes.add(new ToolOutcome(internal, msg));
         }
         return List.copyOf(outcomes);
     }
 
-    private LoopResult abortRun(LoopState state, AgentLoopConfig config) {
+    private LoopResult abortRun(LoopState state, RunEventEmitter events) {
         var aborted = new Message.Assistant(
                 List.of(), StopReason.ABORTED, "cancelled", Usage.zero(), Instant.now());
         var wrapped = StandardAgentMessage.of(aborted);
-        emit(new AgentEvent.MessageStarted(wrapped), config);
+        events.emit(new AgentEvent.MessageStarted(wrapped));
         state.append(wrapped);
-        emit(new AgentEvent.MessageCompleted(wrapped), config);
-        emit(new AgentEvent.TurnCompleted(aborted, List.of()), config);
+        events.emit(new AgentEvent.MessageCompleted(wrapped));
+        events.emit(new AgentEvent.TurnCompleted(aborted, List.of()));
         var result = state.result();
-        emit(new AgentEvent.AgentCompleted(result), config);
+        events.emit(new AgentEvent.AgentCompleted(result));
         return result;
     }
 
@@ -463,7 +468,7 @@ final class AgentLoop {
      * final assistant message from the terminal Done or Error event.
      */
     private static Message.Assistant consumeStream(
-            AssistantMessageStream stream, AgentLoopConfig config
+            AssistantMessageStream stream, RunEventEmitter events
     ) throws InterruptedException {
         while (true) {
             var event = stream.take();
@@ -472,16 +477,16 @@ final class AgentLoop {
                     return new Message.Assistant(List.of(), StopReason.ERROR,
                             "stream ended without terminal event", Usage.zero(), Instant.now());
                 }
-                case AssistantMessageEvent.Start(Message.Assistant partial) -> emit(new AgentEvent.MessageStarted(
-                        StandardAgentMessage.of(partial)), config);
+                case AssistantMessageEvent.Start(Message.Assistant partial) -> events.emit(new AgentEvent.MessageStarted(
+                        StandardAgentMessage.of(partial)));
                 case AssistantMessageEvent.Done d -> {
                     return d.message();
                 }
                 case AssistantMessageEvent.Error e -> {
                     return e.error();
                 }
-                default -> emit(new AgentEvent.MessageUpdated(
-                        StandardAgentMessage.of(event.partial()), event), config);
+                default -> events.emit(new AgentEvent.MessageUpdated(
+                        StandardAgentMessage.of(event.partial()), event));
             }
         }
     }
@@ -510,26 +515,22 @@ final class AgentLoop {
         return List.copyOf(out);
     }
 
-    private static void emit(AgentEvent event, AgentLoopConfig config) {
-        config.eventSink().emit(event).toCompletableFuture().join();
-    }
-
     /** Internal outcome: runtime result (with terminate) + transcript message (without). */
     private record ToolOutcome(ToolExecutionResult internal, Message.ToolResultMessage message) {}
 
     /**
      * Settle-aware update sink. Emits {@link AgentEvent.ToolUpdate} events
-     * through the event sink; after {@link #settle()} all further updates are
-     * silently dropped.
+     * through the {@link RunEventEmitter}; after {@link #settle()} all further
+     * updates are silently dropped.
      */
     private static final class LoopToolUpdateSink implements ToolUpdateSink {
         private final Content.ToolCall call;
-        private final AgentLoopConfig config;
+        private final RunEventEmitter events;
         private volatile boolean settled;
 
-        LoopToolUpdateSink(Content.ToolCall call, AgentLoopConfig config) {
+        LoopToolUpdateSink(Content.ToolCall call, RunEventEmitter events) {
             this.call = call;
-            this.config = config;
+            this.events = events;
         }
 
         @Override
@@ -537,9 +538,7 @@ final class AgentLoop {
             if (settled) {
                 return CompletableFuture.completedStage(null);
             }
-            config.eventSink().emit(new AgentEvent.ToolUpdate(call, update))
-                    .toCompletableFuture()
-                    .join();
+            events.emit(new AgentEvent.ToolUpdate(call, update));
             return CompletableFuture.completedStage(null);
         }
 
