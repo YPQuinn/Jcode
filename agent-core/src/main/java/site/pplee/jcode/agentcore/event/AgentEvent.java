@@ -6,6 +6,7 @@ import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 
 import java.util.List;
 import java.util.Objects;
@@ -13,8 +14,10 @@ import java.util.Objects;
 /**
  * Sealed lifecycle event emitted through {@link AgentEventSink}. The loop
  * waits for each emit to complete, so observers see a deterministic order.
- * Model deltas are not part of these events (Wave 1 adds streaming via
- * {@code AssistantMessageStream}).
+ * <p>Streaming deltas are delivered through {@link MessageUpdated} events,
+ * which carry the low-level {@link AssistantMessageEvent} from the model
+ * stream. The full sequence for an assistant message is
+ * {@link MessageStarted} → {@link MessageUpdated}… → {@link MessageCompleted}.
  *
  * <p>{@link MessageCompleted} carries the open {@link AgentMessage} (standard
  * messages arrive as {@link StandardAgentMessage} wrapping an {@code ai.Message}).
@@ -25,8 +28,9 @@ import java.util.Objects;
  */
 public sealed interface AgentEvent
         permits AgentEvent.AgentStarted, AgentEvent.TurnStarted,
-                AgentEvent.MessageCompleted, AgentEvent.ToolStarted,
-                AgentEvent.ToolUpdate, AgentEvent.ToolCompleted,
+                AgentEvent.MessageStarted, AgentEvent.MessageUpdated,
+                AgentEvent.MessageCompleted,
+                AgentEvent.ToolStarted, AgentEvent.ToolUpdate, AgentEvent.ToolCompleted,
                 AgentEvent.TurnCompleted, AgentEvent.AgentCompleted {
 
     /** A run has begun. */
@@ -34,6 +38,21 @@ public sealed interface AgentEvent
 
     /** A new model turn has begun. */
     record TurnStarted() implements AgentEvent {}
+
+    /** A message has begun streaming into the transcript (user, assistant partial, or tool result). */
+    record MessageStarted(AgentMessage message) implements AgentEvent {
+        public MessageStarted {
+            Objects.requireNonNull(message, "message must not be null");
+        }
+    }
+
+    /** A streaming delta for an assistant message; carries the low-level stream event. */
+    record MessageUpdated(AgentMessage message, AssistantMessageEvent delta) implements AgentEvent {
+        public MessageUpdated {
+            Objects.requireNonNull(message, "message must not be null");
+            Objects.requireNonNull(delta, "delta must not be null");
+        }
+    }
 
     /** A message was appended to the context. */
     record MessageCompleted(AgentMessage message) implements AgentEvent {

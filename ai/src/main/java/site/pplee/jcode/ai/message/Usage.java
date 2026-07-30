@@ -5,9 +5,9 @@ package site.pplee.jcode.ai.message;
  * model-result metadata owned by {@code ai} (provider/api/model identity,
  * usage, stop reason, error message).
  *
- * <p>Wired into {@link Message.Assistant} in a later wave once streaming and
- * per-provider usage reporting land (Wave 1). Until then it is the canonical
- * value type for usage so adapters have a single source of truth.
+ * <p>Wired into {@link Message.Assistant#usage()} as the canonical value type
+ * for token-usage metadata. Adapters provide real usage in the final
+ * {@code Done}/{@code Error} event; partial messages use {@link #zero()}.
  */
 public record Usage(
         long input,

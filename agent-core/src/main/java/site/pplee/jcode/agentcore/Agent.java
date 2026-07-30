@@ -1,6 +1,8 @@
 package site.pplee.jcode.agentcore;
 
 import site.pplee.jcode.agentcore.concurrent.CancellationSource;
+import site.pplee.jcode.agentcore.event.AgentEvent;
+import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageQueue;
@@ -9,8 +11,10 @@ import site.pplee.jcode.agentcore.queue.QueueMode;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Message;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
@@ -49,6 +53,7 @@ public final class Agent implements AutoCloseable {
     private final AtomicReference<ActiveRun> activeRun = new AtomicReference<>(null);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private volatile AgentContext context;
+    private volatile AgentState state;
 
     public Agent(AgentConfig config) {
         this.config = Objects.requireNonNull(config, "config must not be null");
@@ -57,6 +62,7 @@ public final class Agent implements AutoCloseable {
         this.steeringQueue = new PendingMessageQueue(this.config.steeringMode());
         this.followUpQueue = new PendingMessageQueue(this.config.followUpMode());
         this.context = this.config.initialContext();
+        this.state = AgentState.initial(this.context);
     }
 
     /** Start a new run with a user message; fails if a run is already active. */
@@ -91,6 +97,11 @@ public final class Agent implements AutoCloseable {
     /** Current context; replaced atomically after each successful run. */
     public AgentContext context() {
         return context;
+    }
+
+    /** Real-time agent state snapshot; updated before each event reaches the user sink. */
+    public AgentState state() {
+        return state;
     }
 
     /** True while a run is active. */
@@ -161,7 +172,14 @@ public final class Agent implements AutoCloseable {
                 future.completeExceptionally(new IllegalStateException("last message is assistant; use prompt() instead"));
                 return future;
             }
-        }        var loopConfig = new AgentLoopConfig(
+        }        var reducerSink = new AgentEventSink() {
+            @Override
+            public CompletionStage<Void> emit(AgentEvent event) {
+                reduceState(event);
+                return config.eventSink().emit(event);
+            }
+        };
+        var loopConfig = new AgentLoopConfig(
                 config.model(),
                 config.modelClient(),
                 config.objectMapper(),
@@ -170,7 +188,7 @@ public final class Agent implements AutoCloseable {
                 config.afterToolCall(),
                 steeringQueue,
                 followUpQueue,
-                config.eventSink()
+                reducerSink
         );
         try {
             executor.execute(() -> {
@@ -186,6 +204,10 @@ public final class Agent implements AutoCloseable {
                 } catch (Throwable t) {
                     failure = t;
                 }
+                // Reset streaming state: streaming=false, clear streamingMessage/pendingToolCalls.
+                // Preserve errorMessage from the reducer on success; clear on failure.
+                state = new AgentState(context, false, null, Set.of(),
+                        failure == null ? state.errorMessage() : null);
                 // clear ref → complete future. isRunning() flips to false before the
                 // caller's thenAccept fires.
                 activeRun.compareAndSet(run, null);
@@ -203,6 +225,47 @@ public final class Agent implements AutoCloseable {
             future.completeExceptionally(new IllegalStateException("Agent is closed", rej));
         }
         return future;
+    }
+
+    /**
+     * Event reducer: update {@link #state} based on the event, BEFORE the
+     * user's sink sees it. Called by the internal reducer sink wrapper.
+     */
+    private void reduceState(AgentEvent event) {
+        var current = state;
+        state = switch (event) {
+            case AgentEvent.AgentStarted ignored -> new AgentState(
+                    current.context(), true, null, Set.of(), null);
+            case AgentEvent.TurnStarted ignored -> current;
+            case AgentEvent.MessageStarted m -> new AgentState(
+                    current.context(), current.streaming(),
+                    m.message(), current.pendingToolCalls(), current.errorMessage());
+            case AgentEvent.MessageUpdated u -> new AgentState(
+                    current.context(), current.streaming(),
+                    u.message(), current.pendingToolCalls(), current.errorMessage());
+            case AgentEvent.MessageCompleted ignored -> new AgentState(
+                    current.context(), current.streaming(),
+                    null, current.pendingToolCalls(), current.errorMessage());
+            case AgentEvent.ToolStarted t -> {
+                var pending = new HashSet<>(current.pendingToolCalls());
+                pending.add(t.call().id());
+                yield new AgentState(current.context(), current.streaming(),
+                        current.streamingMessage(), Set.copyOf(pending), current.errorMessage());
+            }
+            case AgentEvent.ToolUpdate ignored -> current;
+            case AgentEvent.ToolCompleted tc -> {
+                var pending = new HashSet<>(current.pendingToolCalls());
+                pending.remove(tc.result().toolCallId());
+                yield new AgentState(current.context(), current.streaming(),
+                        current.streamingMessage(), Set.copyOf(pending), current.errorMessage());
+            }
+            case AgentEvent.TurnCompleted tc -> new AgentState(
+                    current.context(), current.streaming(),
+                    current.streamingMessage(), current.pendingToolCalls(),
+                    tc.assistant().errorMessage());
+            case AgentEvent.AgentCompleted ac -> new AgentState(
+                    ac.result().context(), false, null, Set.of(), current.errorMessage());
+        };
     }
 
     /**

@@ -30,16 +30,20 @@ public sealed interface Message
     /**
      * A model response; may carry text, thinking, and/or tool calls.
      * {@code errorMessage} is only allowed when {@link StopReason#isTerminalFailure()}.
+     * {@code usage} carries token-usage metadata reported by the provider;
+     * use {@link Usage#zero()} when no usage is reported.
      */
     record Assistant(
             List<Content> content,
             StopReason stopReason,
             String errorMessage,
+            Usage usage,
             Instant timestamp
     ) implements Message {
         public Assistant {
             content = List.copyOf(Objects.requireNonNull(content, "content must not be null"));
             Objects.requireNonNull(stopReason, "stopReason must not be null");
+            Objects.requireNonNull(usage, "usage must not be null");
             Objects.requireNonNull(timestamp, "timestamp must not be null");
 
             if (errorMessage != null && !stopReason.isTerminalFailure()) {
@@ -48,9 +52,9 @@ public sealed interface Message
             }
         }
 
-        /** Convenience: an assistant result terminated by {@code stopReason} with no error. */
+        /** Convenience: an assistant result terminated by {@code stopReason} with no error and zero usage. */
         public static Assistant of(List<Content> content, StopReason stopReason, Instant timestamp) {
-            return new Assistant(content, stopReason, null, timestamp);
+            return new Assistant(content, stopReason, null, Usage.zero(), timestamp);
         }
     }
 

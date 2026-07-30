@@ -6,21 +6,25 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 
 | 任务 | 位置 |
 |------|------|
-| 接入 model provider | `client/ModelClient.java`（SPI，`generate()` 返回 `CompletionStage`） |
+| 接入 model provider | `client/ModelClient.java`（SPI，`stream()` 返回 `AssistantMessageStream`） |
 | 模型调用请求 | `client/ModelRequest.java`（model + systemPrompt + messages + tools） |
 | 模型身份 | `model/ModelRef.java`（provider/api/modelId 三维度轻量引用）/ `Model.java`（含 name） |
 | 标准 LLM 消息 | `message/Message.java`（sealed：User/Assistant/ToolResultMessage） |
 | 消息内容块 | `message/Content.java`（sealed：Text/Thinking/ToolCall） |
 | 停止原因 | `message/StopReason.java`（enum，`isTerminalFailure()` = ERROR/ABORTED） |
+| token 元数据 | `message/Usage.java`（已接入 `Message.Assistant.usage`） |
 | 可声明工具 | `tool/ToolSpec.java`（name/description/parameters JsonNode，给模型看） |
 | 只读取消 | `concurrent/CancellationSignal.java`（isCancelled/throwIfCancelled） |
-| token 元数据 | `message/Usage.java`（Wave 1 才接入 Assistant） |
+| 流式事件协议 | `stream/AssistantMessageEvent.java`（sealed，12 变体：Start/Text/Thinking/ToolCall start-delta-end/Done/Error） |
+| 流式消费契约 | `stream/AssistantMessageStream.java`（push-pull 阻塞队列，`take()` 消费，`result()` 获取最终 Assistant） |
 
 ## CONVENTIONS
 
-- `Message.Assistant.errorMessage` 仅允许在 `stopReason.isTerminalFailure()` 时非空（compact constructor 校验）。
+- `Message.Assistant` 携带 `Usage`（token 元数据）；`errorMessage` 仅允许在 `stopReason.isTerminalFailure()` 时非空（compact constructor 校验）。
 - `Message.ToolResultMessage` 不含 `terminate` 字段；terminate 是运行时概念，仅存在于 `agent-core.ToolExecutionResult`，不进入标准 LLM transcript。
-- `ModelClient` adapter 不得同步抛异常；provider/网络失败编码进 failed `CompletionStage`。
+- `ModelClient.stream()` 不得同步抛异常；成功、模型错误、网络错误、主动取消均通过流终止事件（`Done`/`Error`）产生最终 `Message.Assistant`。
+- `AssistantMessageEvent` 每个非终止变体携带 `partial`（累积中的半成品 Assistant）；终止变体 `Done`/`Error` 携带最终消息。`partial()` 方法在接口上声明，终止变体显式实现。
+- `AssistantMessageStream` 为 push-pull 阻塞队列：adapter 调 `push(event)`，loop 调 `take()` 阻塞获取。终止事件后 `push` 被静默忽略。
 - `CancellationSignal` 是只读协议，住在 `ai`（最低共享层），因为 Java 无 `AbortSignal` 等价物；model adapter 和工具都读同一个信号。创建/触发取消的 `CancellationSource` 在 `agent-core`。
 - `ToolSpec` 只携带可声明形状（给模型看）；执行能力在 `agent-core.AgentTool`。
 - 所有 list 在 compact constructor 执行 `List.copyOf()`。
@@ -28,5 +32,7 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 
 ## ANTI-PATTERNS
 
-- `ModelClient.generate()` 不得同步抛；adapter 自行聚合流式为最终 `Message.Assistant`，失败编码进 failed stage。
+- `ModelClient.stream()` 不得同步抛；请求/模型/运行时失败编码进返回的 stream（立即 push `Error` 事件）。
+- `Done` 的 `reason` 不得是 terminal failure（ERROR/ABORTED）；用 `Error` 代替。
+- `Error` 的 `reason` 必须是 terminal failure（ERROR/ABORTED）。
 - 模块边界与不含类型约束见根 AGENTS.md ANTI-PATTERNS（模块边界节）。

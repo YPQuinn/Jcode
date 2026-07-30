@@ -21,6 +21,7 @@ import site.pplee.jcode.ai.client.ModelRequest;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -157,16 +158,19 @@ class AgentLoopTest {
         assertEquals(projected(userMsg("hi")), req.messages());
         assertTrue(req.tools().isEmpty());
 
-        // event sequence: AgentStarted, TurnStarted, MessageCompleted(prompt),
-        // MessageCompleted(assistant), TurnCompleted, AgentCompleted
+        // event sequence: AgentStarted, TurnStarted, MessageStarted(prompt),
+        // MessageCompleted(prompt), MessageStarted(assistant), MessageCompleted(assistant),
+        // TurnCompleted, AgentCompleted
         var events = recorder.events();
         assertInstanceOf(AgentEvent.AgentStarted.class, events.get(0));
         assertInstanceOf(AgentEvent.TurnStarted.class, events.get(1));
-        assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(2));
+        assertInstanceOf(AgentEvent.MessageStarted.class, events.get(2));
         assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(3));
-        assertInstanceOf(AgentEvent.TurnCompleted.class, events.get(4));
-        assertInstanceOf(AgentEvent.AgentCompleted.class, events.get(5));
-        assertEquals(6, events.size());
+        assertInstanceOf(AgentEvent.MessageStarted.class, events.get(4));
+        assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(5));
+        assertInstanceOf(AgentEvent.TurnCompleted.class, events.get(6));
+        assertInstanceOf(AgentEvent.AgentCompleted.class, events.get(7));
+        assertEquals(8, events.size());
     }
 
     @Test
@@ -187,14 +191,16 @@ class AgentLoopTest {
         assertEquals("echo", secondReq.tools().get(0).name());
 
         var events = recorder.events();
-        // AgentStarted, TurnStarted, Msg(prompt), Msg(assistant),
-        // ToolStarted, ToolCompleted, Msg(toolresult), TurnCompleted,
-        // TurnStarted, Msg(assistant), TurnCompleted, AgentCompleted
-        assertInstanceOf(AgentEvent.ToolStarted.class, events.get(4));
-        assertInstanceOf(AgentEvent.ToolCompleted.class, events.get(5));
-        assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(6));
-        assertInstanceOf(AgentEvent.TurnCompleted.class, events.get(7));
-        assertInstanceOf(AgentEvent.TurnStarted.class, events.get(8));
+        // AgentStarted, TurnStarted, MsgStarted(prompt), MsgCompleted(prompt),
+        // MsgStarted(assistant), MsgCompleted(assistant),
+        // ToolStarted, ToolCompleted, MsgStarted(toolresult), MsgCompleted(toolresult),
+        // TurnCompleted, TurnStarted, MsgStarted(assistant), MsgCompleted(assistant),
+        // TurnCompleted, AgentCompleted
+        assertInstanceOf(AgentEvent.ToolStarted.class, events.get(6));
+        assertInstanceOf(AgentEvent.ToolCompleted.class, events.get(7));
+        assertInstanceOf(AgentEvent.MessageCompleted.class, events.get(9));
+        assertInstanceOf(AgentEvent.TurnCompleted.class, events.get(10));
+        assertInstanceOf(AgentEvent.TurnStarted.class, events.get(11));
     }
 
     @Test
@@ -224,7 +230,7 @@ class AgentLoopTest {
         var recorder = new RecordingEventSink();
         var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
                 new Message.Assistant(List.of(new Content.Text("err")),
-                        StopReason.ERROR, "boom", T1));
+                        StopReason.ERROR, "boom", Usage.zero(), T1));
         var ctx = contextWithTools();
         var result = runPrompt(client, ctx, recorder);
 

@@ -20,19 +20,21 @@ Jcode/
 │       ├── concurrent/  # CancellationSignal 只读取消协议
 │       ├── message/     # Message/Content/StopReason/Usage 标准 LLM 类型
 │       ├── model/       # Model/ModelRef 模型身份 (provider/api/modelId)
+│       ├── stream/     # AssistantMessageEvent (sealed 12 variants) + AssistantMessageStream (push-pull)
 │       └── tool/        # ToolSpec 可声明工具规范
 ├── agent-core/          # 通用 Agent Runtime (唯一内部依赖: ai)
 │   └── src/main/java/site/pplee/jcode/agentcore/
 │       ├── Agent.java           # 公开运行门面 (AutoCloseable, 虚拟线程)
-│       ├── AgentLoop.java       # package-private 循环主干 (15步 runLoop, 三阶段工具管道)
 │       ├── AgentConfig.java     # 构造 Agent 的配置 record (含 beforeToolCall/afterToolCall)
+│       ├── AgentState.java      # 实时状态快照 (streaming/streamingMessage/pendingToolCalls/errorMessage)
+│       ├── AgentLoop.java       # package-private 循环主干 (15步 runLoop, 流式消费, 三阶段工具管道)
 │       ├── AgentContext.java     # 不可变 transcript (systemPrompt/messages/tools)
 │       ├── AgentLoopConfig.java  # package-private per-run 配置
 │       ├── LoopState.java        # package-private 唯一可变状态
 │       ├── LoopResult.java       # 一次 run 的结果
 │       ├── ToolSchemaValidator.java  # package-private 最小 JSON Schema 校验器
 │       ├── concurrent/  # CancellationSource (取消所有权)
-│       ├── event/       # AgentEvent sealed (8 variants) + AgentEventSink
+│       ├── event/       # AgentEvent sealed (10 variants) + AgentEventSink
 │       ├── message/     # AgentMessage 开放接口 + StandardAgentMessage 桥接
 │       ├── queue/       # PendingMessageQueue/Source + QueueMode (steering/follow-up)
 │       └── tool/        # AgentTool + ToolExecutionResult + ToolExecutionMode + ToolUpdateSink + BeforeToolCall + AfterToolCall
@@ -48,6 +50,10 @@ Jcode/
 - 包名：`site.pplee.jcode.<module>`（模块名 `agent-core` → 包 `agentcore`，不带连字符）。
 - 显式装配：provider/工具/hook 通过构造参数传入；禁止静态可变注册表、禁止 `ServiceLoader` 扫描、禁止 classpath 自动注册。
 - 公开类型不可变；一次 run 的可变状态仅存在于 package-private `LoopState`。
+- `ModelClient.stream()` 返回 `AssistantMessageStream`；adapter 不得同步抛，成功/错误/取消均通过 `Done`/`Error` 事件产生最终 `Message.Assistant`。
+- `Agent` 内部包装用户 `AgentEventSink` 为归约 sink：先更新 `volatile AgentState`，再委托用户 sink。用户 sink 看到事件时状态已完成归约。
+- 流式消费：`AgentLoop.consumeStream()` 在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终消息。partial 不进入 context。
+- 消息事件序列：用户/toolResult 发 `MessageStarted → MessageCompleted`；assistant 发 `MessageStarted → MessageUpdated... → MessageCompleted`。
 - 工具三阶段管道（prepare/execute/finalize）由 `AgentLoop` 统一保证顺序；具体工具只实现 `AgentTool<A>`。
   - prepare：`prepareArguments` → `ToolSchemaValidator` → `BeforeToolCall` → `treeToValue`
   - execute：`tool.execute(id, args, ToolUpdateSink, cancellation)` → 异常转 error result → settle sink
@@ -128,7 +134,7 @@ mvn verify
 - 无 CI 配置（无 `.github/workflows`/`Jenkinsfile`）。
 - jdtls（Java LSP）未安装；codegraph 未索引（`.codegraph/` 存在但未 `codegraph init`）。
 - 未来模块规划（未创建）：`coding-agent`、`ai-provider-openai/anthropic/google`、`server`、`tui`。创建门槛见 `docs/plans/pi-inspired-module-boundaries.md` §3.6。
-- Wave 进度：Wave 0（模块 seam）✓、Wave 2（工具三阶段执行）✓ 已完成；Wave 1（流式协议）、Wave 3（Context 投影）、Wave 4（下一 Turn 控制）、Wave 5（并行双排序）见 `docs/architecture` §5。
+- Wave 进度：Wave 0（模块 seam）✓、Wave 1（流式协议）✓、Wave 2（工具三阶段执行）✓ 已完成；Wave 3（Context 投影）、Wave 4（下一 Turn 控制）、Wave 5（并行双排序）见 `docs/architecture` §5。
 
 ## Must Do After Change
 

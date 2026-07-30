@@ -21,8 +21,8 @@ import java.util.Objects;
  * sources, and the event sink. Optional sources/sink default to empty/noop.
  *
  * <p>Carries only {@code ai} model-identity types ({@link ModelRef}) and the
- * {@link ModelClient} seam — no provider SDK; streaming is reintroduced in
- * Wave 1 via {@code AssistantMessageStream}.
+ * {@link ModelClient} seam — no provider SDK. Streaming deltas flow through
+ * {@link site.pplee.jcode.ai.stream.AssistantMessageStream}.
  */
 record AgentLoopConfig(
         ModelRef model,

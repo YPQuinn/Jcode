@@ -17,8 +17,6 @@ import com.fasterxml.jackson.databind.node.NullNode;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -80,14 +78,14 @@ class AiModuleTest {
     void assistantRejectsErrorMessageOnNonTerminalStopReason() {
         for (var reason : List.of(StopReason.STOP, StopReason.TOOL_CALL, StopReason.LENGTH)) {
             assertThrows(IllegalArgumentException.class,
-                    () -> new Message.Assistant(List.of(), reason, "unexpected", T1));
+                    () -> new Message.Assistant(List.of(), reason, "unexpected", Usage.zero(), T1));
         }
     }
 
     @Test
     void assistantAcceptsErrorMessageOnTerminalFailure() {
-        var err = new Message.Assistant(List.of(), StopReason.ERROR, "boom", T1);
-        var ab = new Message.Assistant(List.of(), StopReason.ABORTED, "cancelled", T1);
+        var err = new Message.Assistant(List.of(), StopReason.ERROR, "boom", Usage.zero(), T1);
+        var ab = new Message.Assistant(List.of(), StopReason.ABORTED, "cancelled", Usage.zero(), T1);
         assertEquals("boom", err.errorMessage());
         assertEquals("cancelled", ab.errorMessage());
         assertTrue(StopReason.ERROR.isTerminalFailure());
@@ -127,16 +125,19 @@ class AiModuleTest {
 
     @Test
     void modelClientIsImplementableWithoutAgentCore() {
-        // A trivial adapter proving ModelClient lives entirely in `ai`.
-        ModelClient client = (request, cancellation) ->
-                CompletableFuture.completedFuture(
-                        Message.Assistant.of(List.of(new Content.Text("ok")), StopReason.STOP, T1));
+        ModelClient client = (request, cancellation) -> {
+            var stream = new site.pplee.jcode.ai.stream.AssistantMessageStream();
+            var msg = Message.Assistant.of(List.of(new Content.Text("ok")), StopReason.STOP, T1);
+            stream.push(new site.pplee.jcode.ai.stream.AssistantMessageEvent.Start(msg));
+            stream.push(new site.pplee.jcode.ai.stream.AssistantMessageEvent.Done(StopReason.STOP, msg));
+            return stream;
+        };
         var req = new ModelRequest(REF, "sys", List.of(), List.of());
-        CompletionStage<Message.Assistant> stage = client.generate(req, new CancellationSignal() {
+        var stream = client.stream(req, new CancellationSignal() {
             @Override public boolean isCancelled() { return false; }
             @Override public void throwIfCancelled() { }
         });
-        var result = stage.toCompletableFuture().join();
+        var result = stream.result();
         assertEquals(StopReason.STOP, result.stopReason());
         assertDoesNotThrow(() -> {
             @SuppressWarnings("unused")

@@ -4,10 +4,13 @@ import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.client.ModelRequest;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.message.Usage;
+import site.pplee.jcode.ai.stream.AssistantMessageEvent;
+import site.pplee.jcode.ai.stream.AssistantMessageStream;
 
+import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -17,8 +20,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * tests can assert call counts and request payloads.
  *
  * <p>Does not contact any real model or network. When the response queue is
- * exhausted, {@code generate} returns a failed stage so the loop's error path
- * can be exercised.
+ * exhausted, {@code stream} returns a stream that immediately terminates with
+ * an {@link AssistantMessageEvent.Error} so the loop's error path can be
+ * exercised.
  */
 public final class ScriptedModelClient implements ModelClient {
     private final ConcurrentLinkedQueue<Message.Assistant> responses;
@@ -33,13 +37,23 @@ public final class ScriptedModelClient implements ModelClient {
     }
 
     @Override
-    public CompletionStage<Message.Assistant> generate(ModelRequest request, CancellationSignal cancellation) {
+    public AssistantMessageStream stream(ModelRequest request, CancellationSignal cancellation) {
         receivedRequests.add(request);
+        var stream = new AssistantMessageStream();
         var next = responses.poll();
         if (next == null) {
-            return CompletableFuture.failedFuture(
-                    new IllegalStateException("scripted responses exhausted"));
+            var error = new Message.Assistant(
+                    List.of(), StopReason.ERROR, "scripted responses exhausted",
+                    Usage.zero(), Instant.now());
+            stream.push(new AssistantMessageEvent.Start(error));
+            stream.push(new AssistantMessageEvent.Error(StopReason.ERROR, error));
+        } else if (next.stopReason().isTerminalFailure()) {
+            stream.push(new AssistantMessageEvent.Start(next));
+            stream.push(new AssistantMessageEvent.Error(next.stopReason(), next));
+        } else {
+            stream.push(new AssistantMessageEvent.Start(next));
+            stream.push(new AssistantMessageEvent.Done(next.stopReason(), next));
         }
-        return CompletableFuture.completedFuture(next);
+        return stream;
     }
 }

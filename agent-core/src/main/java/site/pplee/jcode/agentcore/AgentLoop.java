@@ -17,6 +17,9 @@ import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.message.Usage;
+import site.pplee.jcode.ai.stream.AssistantMessageEvent;
+import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -55,11 +58,14 @@ import java.util.concurrent.ExecutorService;
  * the standard {@link Message.ToolResultMessage} transcript carries no
  * terminate flag.
  *
- * <p>Model-call seam (Wave 0): before each call the loop projects the open
+ * <p>Model-call seam: before each call the loop projects the open
  * {@link AgentMessage} transcript to {@link Message standard ai messages}
  * (inline default projection — the seed of Wave 3's {@code MessageProjector})
  * and extracts {@link ToolSpec declarable specs} from {@link AgentTool}s, then
- * invokes the {@link ModelClient}. The returned {@link Message.Assistant} is
+ * invokes the {@link ModelClient}. The returned {@link AssistantMessageStream}
+ * is consumed via {@link #consumeStream}, which emits {@code MessageStarted}
+ * on the initial {@code Start} event and {@code MessageUpdated} for each delta.
+ * The final {@link Message.Assistant} from {@code Done}/{@code Error} is
  * wrapped back into the transcript as a {@link StandardAgentMessage}.
  */
 final class AgentLoop {
@@ -87,6 +93,7 @@ final class AgentLoop {
         emit(new AgentEvent.AgentStarted(), config);
         emit(new AgentEvent.TurnStarted(), config);
         for (var p : prompts) {
+            emit(new AgentEvent.MessageStarted(p), config);
             state.append(p);
             emit(new AgentEvent.MessageCompleted(p), config);
         }
@@ -126,14 +133,15 @@ final class AgentLoop {
                 firstTurn = false;
 
                 if (!pendingMessages.isEmpty()) {
-                    state.appendAll(pendingMessages);
                     for (var m : pendingMessages) {
+                        emit(new AgentEvent.MessageStarted(m), config);
+                        state.append(m);
                         emit(new AgentEvent.MessageCompleted(m), config);
                     }
                     pendingMessages = List.of();
                 }
 
-                // step 5: call model (cancellation boundary 2 handles failed future)
+                // step 5: stream from model (cancellation boundary 2 handles stream errors)
                 var request = new ModelRequest(
                         config.model(),
                         state.context().systemPrompt(),
@@ -142,14 +150,18 @@ final class AgentLoop {
                 );
                 Message.Assistant assistantMessage;
                 try {
-                    assistantMessage = config.modelClient()
-                            .generate(request, cancellation)
-                            .toCompletableFuture()
-                            .join();
-                } catch (CompletionException e) {
+                    var stream = config.modelClient().stream(request, cancellation);
+                    assistantMessage = consumeStream(stream, config);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    var reason = cancellation.isCancelled() ? StopReason.ABORTED : StopReason.ERROR;
+                    assistantMessage = new Message.Assistant(
+                            List.of(), reason, "interrupted", Usage.zero(), Instant.now());
+                } catch (RuntimeException e) {
                     var reason = cancellation.isCancelled() ? StopReason.ABORTED : StopReason.ERROR;
                     var msg = cancellation.isCancelled() ? "cancelled" : causeMessage(e);
-                    assistantMessage = new Message.Assistant(List.of(), reason, msg, Instant.now());
+                    assistantMessage = new Message.Assistant(
+                            List.of(), reason, msg, Usage.zero(), Instant.now());
                 }
                 var assistant = StandardAgentMessage.of(assistantMessage);
 
@@ -184,6 +196,7 @@ final class AgentLoop {
                 }
                 for (var outcome : outcomes) {
                     var wrapped = StandardAgentMessage.of(outcome.message());
+                    emit(new AgentEvent.MessageStarted(wrapped), config);
                     state.append(wrapped);
                     emit(new AgentEvent.MessageCompleted(wrapped), config);
                 }
@@ -400,8 +413,9 @@ final class AgentLoop {
 
     private LoopResult abortRun(LoopState state, AgentLoopConfig config) {
         var aborted = new Message.Assistant(
-                List.of(), StopReason.ABORTED, "cancelled", Instant.now());
+                List.of(), StopReason.ABORTED, "cancelled", Usage.zero(), Instant.now());
         var wrapped = StandardAgentMessage.of(aborted);
+        emit(new AgentEvent.MessageStarted(wrapped), config);
         state.append(wrapped);
         emit(new AgentEvent.MessageCompleted(wrapped), config);
         emit(new AgentEvent.TurnCompleted(aborted, List.of()), config);
@@ -449,11 +463,39 @@ final class AgentLoop {
         return drained == null ? List.of() : drained;
     }
 
-    private static String causeMessage(CompletionException e) {
+    private static String causeMessage(Throwable e) {
         var cause = e.getCause();
         var src = cause != null ? cause : e;
         var msg = src.getMessage();
         return msg != null ? msg : "unknown error";
+    }
+
+    /**
+     * Consume streaming events from the model, emitting MessageStarted on
+     * the initial Start event and MessageUpdated for each delta. Returns the
+     * final assistant message from the terminal Done or Error event.
+     */
+    private static Message.Assistant consumeStream(
+            AssistantMessageStream stream, AgentLoopConfig config
+    ) throws InterruptedException {
+        while (true) {
+            var event = stream.take();
+            if (event == null) {
+                return new Message.Assistant(List.of(), StopReason.ERROR,
+                        "stream ended without terminal event", Usage.zero(), Instant.now());
+            }
+            if (event instanceof AssistantMessageEvent.Start s) {
+                emit(new AgentEvent.MessageStarted(
+                        StandardAgentMessage.of(s.partial())), config);
+            } else if (event instanceof AssistantMessageEvent.Done d) {
+                return d.message();
+            } else if (event instanceof AssistantMessageEvent.Error e) {
+                return e.error();
+            } else {
+                emit(new AgentEvent.MessageUpdated(
+                        StandardAgentMessage.of(event.partial()), event), config);
+            }
+        }
     }
 
     /**

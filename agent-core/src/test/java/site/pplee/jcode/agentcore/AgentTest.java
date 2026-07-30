@@ -15,7 +15,10 @@ import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
+import site.pplee.jcode.ai.stream.AssistantMessageEvent;
+import site.pplee.jcode.ai.stream.AssistantMessageStream;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -92,15 +95,18 @@ class AgentTest {
         var release = new CountDownLatch(1);
         var blockingClient = new ModelClient() {
             @Override
-            public CompletionStage<Message.Assistant> generate(
+            public AssistantMessageStream stream(
                     ModelRequest request, CancellationSignal cancellation) {
                 started.countDown();
-                return CompletableFuture.supplyAsync(
-                        () -> {
-                            try { release.await(2, TimeUnit.SECONDS); }
-                            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                            return assistantText("slow", StopReason.STOP);
-                        });
+                var stream = new AssistantMessageStream();
+                CompletableFuture.runAsync(() -> {
+                    try { release.await(2, TimeUnit.SECONDS); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    var msg = assistantText("slow", StopReason.STOP);
+                    stream.push(new AssistantMessageEvent.Start(msg));
+                    stream.push(new AssistantMessageEvent.Done(StopReason.STOP, msg));
+                });
+                return stream;
             }
         };
         try (var agent = new Agent(configWith(blockingClient, AgentEventSink.noop()))) {
@@ -156,14 +162,18 @@ class AgentTest {
         var release = new CountDownLatch(1);
         var blockingClient = new ModelClient() {
             @Override
-            public CompletionStage<Message.Assistant> generate(
+            public AssistantMessageStream stream(
                     ModelRequest request, CancellationSignal cancellation) {
                 started.countDown();
-                return CompletableFuture.supplyAsync(() -> {
+                var stream = new AssistantMessageStream();
+                CompletableFuture.runAsync(() -> {
                     try { release.await(2, TimeUnit.SECONDS); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                    return assistantText("slow", StopReason.STOP);
+                    var msg = assistantText("slow", StopReason.STOP);
+                    stream.push(new AssistantMessageEvent.Start(msg));
+                    stream.push(new AssistantMessageEvent.Done(StopReason.STOP, msg));
                 });
+                return stream;
             }
         };
         var agent = new Agent(configWith(blockingClient, AgentEventSink.noop()));
@@ -187,15 +197,19 @@ class AgentTest {
         var seenCancelled = new AtomicBoolean(false);
         var blockingClient = new ModelClient() {
             @Override
-            public CompletionStage<Message.Assistant> generate(
+            public AssistantMessageStream stream(
                     ModelRequest request, CancellationSignal cancellation) {
                 started.countDown();
-                return CompletableFuture.supplyAsync(() -> {
+                var stream = new AssistantMessageStream();
+                CompletableFuture.runAsync(() -> {
                     try { release.await(2, TimeUnit.SECONDS); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                     seenCancelled.set(cancellation.isCancelled());
-                    return assistantText("slow", StopReason.STOP);
+                    var msg = assistantText("slow", StopReason.STOP);
+                    stream.push(new AssistantMessageEvent.Start(msg));
+                    stream.push(new AssistantMessageEvent.Done(StopReason.STOP, msg));
                 });
+                return stream;
             }
         };
         try (var agent = new Agent(configWith(blockingClient, AgentEventSink.noop()))) {

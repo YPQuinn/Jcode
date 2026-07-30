@@ -86,10 +86,12 @@ class AgentEventTest {
 
     @Test
     void sealedHierarchyCoversAllEventTypes() {
-        // Exhaustive switch without default: proves the sealed interface permits exactly these 8.
+        // Exhaustive switch without default: proves the sealed interface permits exactly these 10.
         java.util.function.Function<AgentEvent, String> label = event -> switch (event) {
             case AgentEvent.AgentStarted ignored -> "agent_started";
             case AgentEvent.TurnStarted ignored -> "turn_started";
+            case AgentEvent.MessageStarted m -> "message_started";
+            case AgentEvent.MessageUpdated m -> "message_updated";
             case AgentEvent.MessageCompleted m -> "message_completed";
             case AgentEvent.ToolStarted t -> "tool_started";
             case AgentEvent.ToolUpdate t -> "tool_update";
@@ -101,6 +103,8 @@ class AgentEventTest {
         var context = new AgentContext("sys", List.of(), List.of());
         assertEquals("agent_started", label.apply(new AgentEvent.AgentStarted()));
         assertEquals("turn_started", label.apply(new AgentEvent.TurnStarted()));
+        assertEquals("message_started", label.apply(
+                new AgentEvent.MessageStarted(StandardAgentMessage.of(user("a")))));
         assertEquals("message_completed", label.apply(
                 new AgentEvent.MessageCompleted(StandardAgentMessage.of(user("a")))));
         assertEquals("tool_started", label.apply(new AgentEvent.ToolStarted(toolCall("c1"))));
