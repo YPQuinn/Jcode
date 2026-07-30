@@ -1,16 +1,13 @@
 package site.pplee.jcode.agentcore;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import site.pplee.jcode.agentcore.event.AgentEventSink;
-import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
 import site.pplee.jcode.agentcore.tool.AfterToolCall;
 import site.pplee.jcode.agentcore.tool.BeforeToolCall;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
-
 import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.model.ModelRef;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.List;
 import java.util.Objects;
@@ -42,8 +39,8 @@ record AgentLoopConfig(
         toolExecution = (toolExecution == null) ? ToolExecutionMode.PARALLEL : toolExecution;
         beforeToolCall = (beforeToolCall == null) ? BeforeToolCall.noop() : beforeToolCall;
         afterToolCall = (afterToolCall == null) ? AfterToolCall.noop() : afterToolCall;
-        steeringMessages = (steeringMessages == null) ? () -> List.<AgentMessage>of() : steeringMessages;
-        followUpMessages = (followUpMessages == null) ? () -> List.<AgentMessage>of() : followUpMessages;
+        steeringMessages = (steeringMessages == null) ? List::of : steeringMessages;
+        followUpMessages = (followUpMessages == null) ? List::of : followUpMessages;
         eventSink = (eventSink == null) ? AgentEventSink.noop() : eventSink;
     }
 }

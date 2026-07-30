@@ -1,16 +1,11 @@
 package site.pplee.jcode.agentcore;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import site.pplee.jcode.agentcore.event.AgentEvent;
-import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
-import site.pplee.jcode.agentcore.tool.AgentTool;
-import site.pplee.jcode.agentcore.tool.BeforeToolCall;
-import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
-import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
-import site.pplee.jcode.agentcore.tool.ToolUpdateSink;
-
+import site.pplee.jcode.agentcore.tool.*;
 import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.client.ModelRequest;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
@@ -22,15 +17,8 @@ import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -40,7 +28,7 @@ import java.util.concurrent.ExecutorService;
  * Package-private agent loop. The only public run entry is {@code Agent}
  * (Step 8); this class is constructed by {@code Agent} and its methods are
  * invoked on {@code Agent}'s virtual-thread-per-task executor.
- *
+ * <p>
  * Implements the full 15-step {@code runLoop} sequence: model call, tool-call
  * extraction, three-phase tool execution (prepare / execute / finalize) with
  * sequential/parallel dispatch, ordered result write-back, LENGTH truncation
@@ -297,8 +285,8 @@ final class AgentLoop {
         }
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         var outcomes = new ArrayList<ToolOutcome>();
-        for (int i = 0; i < futures.size(); i++) {
-            var outcome = futures.get(i).join();
+        for (CompletableFuture<ToolOutcome> future : futures) {
+            var outcome = future.join();
             emit(new AgentEvent.ToolCompleted(outcome.message()), config);
             outcomes.add(outcome);
         }
@@ -353,8 +341,8 @@ final class AgentLoop {
             var internal = ToolExecutionResult.failure("before hook failed: " + causeMessage(e));
             return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
         }
-        if (beforeDecision instanceof BeforeToolCall.Decision.Block block) {
-            var internal = ToolExecutionResult.failure("blocked by before hook: " + block.reason());
+        if (beforeDecision instanceof BeforeToolCall.Decision.Block(String reason)) {
+            var internal = ToolExecutionResult.failure("blocked by before hook: " + reason);
             return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
         }
 
@@ -382,11 +370,10 @@ final class AgentLoop {
 
         // --- finalize ---
         try {
-            var patched = config.afterToolCall()
+            internal = config.afterToolCall()
                     .afterToolCall(toolCall, tool, internal, context, cancellation)
                     .toCompletableFuture()
                     .join();
-            internal = patched;
         } catch (CompletionException e) {
             // after hook failure: keep the original result
         }
@@ -480,19 +467,20 @@ final class AgentLoop {
     ) throws InterruptedException {
         while (true) {
             var event = stream.take();
-            if (event == null) {
-                return new Message.Assistant(List.of(), StopReason.ERROR,
-                        "stream ended without terminal event", Usage.zero(), Instant.now());
-            }
-            if (event instanceof AssistantMessageEvent.Start s) {
-                emit(new AgentEvent.MessageStarted(
-                        StandardAgentMessage.of(s.partial())), config);
-            } else if (event instanceof AssistantMessageEvent.Done d) {
-                return d.message();
-            } else if (event instanceof AssistantMessageEvent.Error e) {
-                return e.error();
-            } else {
-                emit(new AgentEvent.MessageUpdated(
+            switch (event) {
+                case null -> {
+                    return new Message.Assistant(List.of(), StopReason.ERROR,
+                            "stream ended without terminal event", Usage.zero(), Instant.now());
+                }
+                case AssistantMessageEvent.Start(Message.Assistant partial) -> emit(new AgentEvent.MessageStarted(
+                        StandardAgentMessage.of(partial)), config);
+                case AssistantMessageEvent.Done d -> {
+                    return d.message();
+                }
+                case AssistantMessageEvent.Error e -> {
+                    return e.error();
+                }
+                default -> emit(new AgentEvent.MessageUpdated(
                         StandardAgentMessage.of(event.partial()), event), config);
             }
         }
