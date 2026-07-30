@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-07-29 17:32 CST  
-**Commit:** 44f3ce9  
+**Generated:** 2026-07-30 10:22 CST  
+**Commit:** 4435414  
 **Branch:** master  
 
 ## OVERVIEW
@@ -39,9 +39,11 @@ Jcode/
 │       ├── queue/       # PendingMessageQueue/Source + QueueMode (steering/follow-up)
 │       └── tool/        # AgentTool + ToolExecutionResult + ToolExecutionMode + ToolUpdateSink + BeforeToolCall + AfterToolCall
 └── docs/
+    ├── architecture/    # 架构解读文档集入口与目录大纲
     ├── plans/           # 方案文档
     │   └── archived/    # 已归档的过往实现计划，可以参考但不可作为当前的实施规范
-    └── references/      # pi 参考副本 (.gitignored, 不属本仓库规则)
+    ├── references/      # pi 参考副本 (.gitignored, 不属本仓库规则)
+    └── rules/           # 仓库级流程与规范文档
 ```
 
 ## CONVENTIONS
