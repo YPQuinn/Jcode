@@ -1,11 +1,11 @@
 package site.pplee.jcode.agentcore;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
-import site.pplee.jcode.agentcore.tool.*;
+import site.pplee.jcode.agentcore.tool.AgentTool;
+import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
 import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.client.ModelRequest;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
@@ -18,10 +18,8 @@ import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.CompletionStage;
+import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -107,7 +105,7 @@ final class AgentLoop {
 
     private LoopResult runLoop(LoopState state, AgentLoopConfig config, CancellationSignal cancellation) {
         boolean firstTurn = true;
-        var pendingMessages = drain(config.steeringMessages());
+        var pendingMessages = drainSteering(config);
         var events = config.events();
 
         while (true) {
@@ -118,57 +116,16 @@ final class AgentLoop {
                 if (cancellation.isCancelled()) {
                     return abortRun(state, events);
                 }
-                if (!firstTurn) {
-                    events.emit(new AgentEvent.TurnStarted());
-                }
-                firstTurn = false;
+                firstTurn = prepareTurn(state, events, pendingMessages, firstTurn);
+                pendingMessages = List.of();
 
-                if (!pendingMessages.isEmpty()) {
-                    for (var m : pendingMessages) {
-                        events.emit(new AgentEvent.MessageStarted(m));
-                        state.append(m);
-                        events.emit(new AgentEvent.MessageCompleted(m));
-                    }
-                    pendingMessages = List.of();
-                }
+                var assistantMessage = invokeModelSafely(state, config, cancellation);
+                recordAssistant(state, events, assistantMessage);
 
-                // step 5: stream from model (cancellation boundary 2 handles stream errors)
-                var request = new ModelRequest(
-                        config.model(),
-                        state.context().systemPrompt(),
-                        projectMessages(state.context().messages()),
-                        toolSpecs(state.context().tools())
-                );
-                Message.Assistant assistantMessage;
-                try {
-                    var stream = config.modelClient().stream(request, cancellation);
-                    assistantMessage = consumeStream(stream, events);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    var reason = cancellation.isCancelled() ? StopReason.ABORTED : StopReason.ERROR;
-                    assistantMessage = new Message.Assistant(
-                            List.of(), reason, "interrupted", Usage.zero(), Instant.now());
-                } catch (RuntimeException e) {
-                    var reason = cancellation.isCancelled() ? StopReason.ABORTED : StopReason.ERROR;
-                    var msg = cancellation.isCancelled() ? "cancelled" : causeMessage(e);
-                    assistantMessage = new Message.Assistant(
-                            List.of(), reason, msg, Usage.zero(), Instant.now());
-                }
-                var assistant = StandardAgentMessage.of(assistantMessage);
-
-                // step 6: write assistant
-                state.append(assistant);
-                events.emit(new AgentEvent.MessageCompleted(assistant));
-
-                // step 7: terminal failure -> end
                 if (assistantMessage.stopReason().isTerminalFailure()) {
-                    events.emit(new AgentEvent.TurnCompleted(assistantMessage, List.of()));
-                    var result = state.result();
-                    events.emit(new AgentEvent.AgentCompleted(result));
-                    return result;
+                    return handleTerminalFailure(state, events, assistantMessage);
                 }
 
-                // step 8: extract tool calls
                 var toolCalls = extractToolCalls(assistantMessage);
 
                 // cancellation boundary 3: before tool batch
@@ -176,48 +133,27 @@ final class AgentLoop {
                     return abortRun(state, events);
                 }
 
-                // step 9-10: execute tools (LENGTH -> fail all; otherwise dispatch)
-                List<ToolOutcome> outcomes;
-                if (toolCalls.isEmpty()) {
-                    outcomes = List.of();
-                } else if (assistantMessage.stopReason() == StopReason.LENGTH) {
-                    outcomes = failTruncatedToolCalls(toolCalls, events);
-                } else {
-                    outcomes = executeToolCalls(toolCalls, state, config, cancellation);
-                }
-                for (var outcome : outcomes) {
-                    var wrapped = StandardAgentMessage.of(outcome.message());
-                    events.emit(new AgentEvent.MessageStarted(wrapped));
-                    state.append(wrapped);
-                    events.emit(new AgentEvent.MessageCompleted(wrapped));
-                }
+                var outcomes = dispatchToolCalls(assistantMessage, toolCalls, state, config, cancellation, events);
+                recordOutcomes(state, events, outcomes);
+                events.emit(new AgentEvent.TurnCompleted(assistantMessage, toolResultMessagesOf(outcomes)));
 
-                // step 11: TurnCompleted
-                var toolResultMessages = outcomes.stream()
-                        .map(ToolOutcome::message)
-                        .toList();
-                events.emit(new AgentEvent.TurnCompleted(assistantMessage, toolResultMessages));
-
-                // step 12: drain steering; decide inner loop continuation
-                pendingMessages = drain(config.steeringMessages());
-                hasMoreToolCalls = !outcomes.isEmpty() && !allTerminated(outcomes);
+                pendingMessages = drainSteering(config);
+                hasMoreToolCalls = shouldContinueInnerLoop(outcomes);
             }
 
             // cancellation boundary: after the inner loop, before the run ends or
             // the next (follow-up) turn starts. Catches cancellation that arrived
-            // during the tool batch (boundary 4 broke with empty or all-terminated
+            // during the tool batch (boundary 3 broke with empty or all-terminated
             // results, so the inner loop exited without hitting boundary 1 again).
             if (cancellation.isCancelled()) {
                 return abortRun(state, events);
             }
 
-            // step 13: drain follow-up
-            var followUp = drain(config.followUpMessages());
-            if (!followUp.isEmpty()) {
-                pendingMessages = followUp;
-                continue;
+            var followUp = drainFollowUp(config);
+            if (followUp.isEmpty()) {
+                break;
             }
-            break;
+            pendingMessages = followUp;
         }
 
         var result = state.result();
@@ -225,187 +161,112 @@ final class AgentLoop {
         return result;
     }
 
-    // --- three-phase tool execution ---
+    /**
+     * Emit {@code TurnStarted} (except on the first turn) and append pending
+     * steering messages. Returns the new {@code firstTurn} (always false).
+     */
+    private boolean prepareTurn(LoopState state, RunEventEmitter events,
+                                 List<AgentMessage> pending, boolean firstTurn) {
+        if (!firstTurn) {
+            events.emit(new AgentEvent.TurnStarted());
+        }
+        for (var m : pending) {
+            events.emit(new AgentEvent.MessageStarted(m));
+            state.append(m);
+            events.emit(new AgentEvent.MessageCompleted(m));
+        }
+        return false;
+    }
 
-    private List<ToolOutcome> executeToolCalls(
-            List<Content.ToolCall> toolCalls,
-            LoopState state,
-            AgentLoopConfig config,
-            CancellationSignal cancellation
-    ) {
+    /**
+     * Build the model request from the current context, stream the response,
+     * and normalize failures into a zero-usage {@link Message.Assistant}.
+     * Cancellation boundary 2 lives here: stream and interruption errors are
+     * turned into an {@link StopReason#ABORTED} (if cancelled) or
+     * {@link StopReason#ERROR} assistant message.
+     */
+    private Message.Assistant invokeModelSafely(LoopState state, AgentLoopConfig config,
+                                                  CancellationSignal cancellation) {
+        var request = new ModelRequest(
+                config.model(),
+                state.context().systemPrompt(),
+                projectMessages(state.context().messages()),
+                toolSpecs(state.context().tools())
+        );
+        try {
+            var stream = config.modelClient().stream(request, cancellation);
+            return consumeStream(stream, config.events());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return cancellation.isCancelled() ? abortedAssistant("interrupted") : erroredAssistant("interrupted");
+        } catch (RuntimeException e) {
+            var msg = cancellation.isCancelled() ? "cancelled" : ToolCallExecutor.causeMessage(e);
+            return cancellation.isCancelled() ? abortedAssistant(msg) : erroredAssistant(msg);
+        }
+    }
+
+    /**
+     * Wrap the assistant message, append it to the transcript, and emit
+     * {@code MessageCompleted}. {@code MessageStarted} is not emitted here:
+     * it was already produced by {@link #consumeStream} on the initial
+     * {@code Start} event (or omitted on the failure path).
+     */
+    private void recordAssistant(LoopState state, RunEventEmitter events, Message.Assistant assistantMessage) {
+        var assistant = StandardAgentMessage.of(assistantMessage);
+        state.append(assistant);
+        events.emit(new AgentEvent.MessageCompleted(assistant));
+    }
+
+    private LoopResult handleTerminalFailure(LoopState state, RunEventEmitter events,
+                                              Message.Assistant assistantMessage) {
+        events.emit(new AgentEvent.TurnCompleted(assistantMessage, List.of()));
+        var result = state.result();
+        events.emit(new AgentEvent.AgentCompleted(result));
+        return result;
+    }
+
+    private List<ToolCallExecutor.ToolOutcome> dispatchToolCalls(Message.Assistant assistant,
+                                                 List<Content.ToolCall> toolCalls,
+                                                 LoopState state, AgentLoopConfig config,
+                                                 CancellationSignal cancellation,
+                                                 RunEventEmitter events) {
         if (toolCalls.isEmpty()) {
             return List.of();
         }
-        var toolMap = buildNameToTool(state.context().tools());
-        boolean sequential = config.toolExecution() == ToolExecutionMode.SEQUENTIAL
-                || toolCalls.stream().anyMatch(tc -> {
-                    var t = toolMap.get(tc.name());
-                    return t != null && t.executionMode() == ToolExecutionMode.SEQUENTIAL;
-                });
-        return sequential
-                ? executeSequential(toolCalls, toolMap, state, config, cancellation)
-                : executeParallel(toolCalls, toolMap, state, config, cancellation);
+        var exec = ToolCallExecutor.of(state, config, cancellation, executor);
+        if (assistant.stopReason() == StopReason.LENGTH) {
+            return exec.failTruncated(toolCalls);
+        }
+        return exec.runBatch(toolCalls);
     }
 
-    private List<ToolOutcome> executeSequential(
-            List<Content.ToolCall> toolCalls,
-            Map<String, AgentTool<?>> toolMap,
-            LoopState state,
-            AgentLoopConfig config,
-            CancellationSignal cancellation
-    ) {
-        var events = config.events();
-        var outcomes = new ArrayList<ToolOutcome>();
-        for (var tc : toolCalls) {
-            if (cancellation.isCancelled()) {
-                break;
-            }
-            events.emit(new AgentEvent.ToolStarted(tc));
-            var outcome = executeOneToolCall(tc, toolMap, state, config, cancellation);
-            events.emit(new AgentEvent.ToolCompleted(outcome.message()));
-            outcomes.add(outcome);
+    private void recordOutcomes(LoopState state, RunEventEmitter events, List<ToolCallExecutor.ToolOutcome> outcomes) {
+        for (var outcome : outcomes) {
+            var wrapped = StandardAgentMessage.of(outcome.message());
+            events.emit(new AgentEvent.MessageStarted(wrapped));
+            state.append(wrapped);
+            events.emit(new AgentEvent.MessageCompleted(wrapped));
         }
-        return List.copyOf(outcomes);
     }
 
-    private List<ToolOutcome> executeParallel(
-            List<Content.ToolCall> toolCalls,
-            Map<String, AgentTool<?>> toolMap,
-            LoopState state,
-            AgentLoopConfig config,
-            CancellationSignal cancellation
-    ) {
-        var events = config.events();
-        var futures = new ArrayList<CompletableFuture<ToolOutcome>>();
-        var submitted = new ArrayList<Content.ToolCall>();
-        for (var tc : toolCalls) {
-            if (cancellation.isCancelled()) {
-                break;
-            }
-            events.emit(new AgentEvent.ToolStarted(tc));
-            submitted.add(tc);
-            futures.add(CompletableFuture.supplyAsync(
-                    () -> executeOneToolCall(tc, toolMap, state, config, cancellation),
-                    executor));
-        }
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        var outcomes = new ArrayList<ToolOutcome>();
-        for (CompletableFuture<ToolOutcome> future : futures) {
-            var outcome = future.join();
-            events.emit(new AgentEvent.ToolCompleted(outcome.message()));
-            outcomes.add(outcome);
-        }
-        return List.copyOf(outcomes);
+    private static List<Message.ToolResultMessage> toolResultMessagesOf(List<ToolCallExecutor.ToolOutcome> outcomes) {
+        return outcomes.stream().map(ToolCallExecutor.ToolOutcome::message).toList();
     }
 
-    private ToolOutcome executeOneToolCall(
-            Content.ToolCall toolCall,
-            Map<String, AgentTool<?>> toolMap,
-            LoopState state,
-            AgentLoopConfig config,
-            CancellationSignal cancellation
-    ) {
-        var tool = toolMap.get(toolCall.name());
-        if (tool == null) {
-            var internal = ToolExecutionResult.failure("tool not found: " + toolCall.name());
-            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
-        }
-        return executeOneToolCallTyped(tool, toolCall, state, config, cancellation);
+    private static boolean shouldContinueInnerLoop(List<ToolCallExecutor.ToolOutcome> outcomes) {
+        return !outcomes.isEmpty() && !ToolCallExecutor.allTerminated(outcomes);
     }
 
-    private <A> ToolOutcome executeOneToolCallTyped(
-            AgentTool<A> tool,
-            Content.ToolCall toolCall,
-            LoopState state,
-            AgentLoopConfig config,
-            CancellationSignal cancellation
-    ) {
-        // --- prepare ---
-        JsonNode preparedArgs;
-        try {
-            preparedArgs = tool.prepareArguments(toolCall.arguments());
-        } catch (RuntimeException e) {
-            var internal = ToolExecutionResult.failure("argument preparation failed: " + e.getMessage());
-            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
-        }
-
-        var schemaResult = ToolSchemaValidator.validate(preparedArgs, tool.parametersSchema());
-        if (!schemaResult.valid()) {
-            var internal = ToolExecutionResult.failure("schema validation failed: " + schemaResult.error());
-            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
-        }
-
-        var context = state.context();
-        BeforeToolCall.Decision beforeDecision;
-        try {
-            beforeDecision = config.beforeToolCall()
-                    .beforeToolCall(toolCall, tool, preparedArgs, context, cancellation)
-                    .toCompletableFuture()
-                    .join();
-        } catch (CompletionException e) {
-            var internal = ToolExecutionResult.failure("before hook failed: " + causeMessage(e));
-            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
-        }
-        if (beforeDecision instanceof BeforeToolCall.Decision.Block(String reason)) {
-            var internal = ToolExecutionResult.failure("blocked by before hook: " + reason);
-            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
-        }
-
-        A args;
-        try {
-            args = config.objectMapper().treeToValue(preparedArgs, tool.argumentType());
-        } catch (Exception e) {
-            var internal = ToolExecutionResult.failure("argument conversion failed: " + e.getMessage());
-            return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
-        }
-
-        // --- execute ---
-        var updateSink = new LoopToolUpdateSink(toolCall, config.events());
-        ToolExecutionResult internal;
-        try {
-            internal = tool.execute(toolCall.id(), args, updateSink, cancellation)
-                    .toCompletableFuture()
-                    .join();
-        } catch (CompletionException e) {
-            internal = ToolExecutionResult.failure("tool execution failed: " + causeMessage(e));
-        } catch (RuntimeException e) {
-            internal = ToolExecutionResult.failure("tool execution failed: " + e.getMessage());
-        }
-        updateSink.settle();
-
-        // --- finalize ---
-        try {
-            internal = config.afterToolCall()
-                    .afterToolCall(toolCall, tool, internal, context, cancellation)
-                    .toCompletableFuture()
-                    .join();
-        } catch (CompletionException e) {
-            // after hook failure: keep the original result
-        }
-
-        return new ToolOutcome(internal, toToolResultMessage(toolCall, internal));
+    private static List<AgentMessage> drainSteering(AgentLoopConfig config) {
+        return drain(config.steeringMessages());
     }
 
-    private List<ToolOutcome> failTruncatedToolCalls(
-            List<Content.ToolCall> toolCalls,
-            RunEventEmitter events
-    ) {
-        var outcomes = new ArrayList<ToolOutcome>();
-        for (var tc : toolCalls) {
-            events.emit(new AgentEvent.ToolStarted(tc));
-            var internal = ToolExecutionResult.failure(
-                    "tool call \"" + tc.name() + "\" not executed: "
-                            + "response hit output token limit, arguments may be truncated");
-            var msg = toToolResultMessage(tc, internal);
-            events.emit(new AgentEvent.ToolCompleted(msg));
-            outcomes.add(new ToolOutcome(internal, msg));
-        }
-        return List.copyOf(outcomes);
+    private static List<AgentMessage> drainFollowUp(AgentLoopConfig config) {
+        return drain(config.followUpMessages());
     }
 
     private LoopResult abortRun(LoopState state, RunEventEmitter events) {
-        var aborted = new Message.Assistant(
-                List.of(), StopReason.ABORTED, "cancelled", Usage.zero(), Instant.now());
+        var aborted = abortedAssistant("cancelled");
         var wrapped = StandardAgentMessage.of(aborted);
         events.emit(new AgentEvent.MessageStarted(wrapped));
         state.append(wrapped);
@@ -416,38 +277,11 @@ final class AgentLoop {
         return result;
     }
 
-    private static Map<String, AgentTool<?>> buildNameToTool(List<AgentTool<?>> tools) {
-        var map = new HashMap<String, AgentTool<?>>();
-        for (var t : tools) {
-            map.putIfAbsent(t.name(), t);
-        }
-        return map;
-    }
-
-    private static Message.ToolResultMessage toToolResultMessage(
-            Content.ToolCall toolCall, ToolExecutionResult internal
-    ) {
-        return new Message.ToolResultMessage(
-                toolCall.id(),
-                toolCall.name(),
-                internal.content(),
-                internal.error(),
-                Instant.now()
-        );
-    }
-
-    private static boolean allTerminated(List<ToolOutcome> outcomes) {
-        return outcomes.stream().allMatch(o -> o.internal().terminate());
-    }
-
     private static List<Content.ToolCall> extractToolCalls(Message.Assistant assistant) {
-        var calls = new ArrayList<Content.ToolCall>();
-        for (var c : assistant.content()) {
-            if (c instanceof Content.ToolCall tc) {
-                calls.add(tc);
-            }
-        }
-        return List.copyOf(calls);
+        return assistant.content().stream()
+                .filter(Content.ToolCall.class::isInstance)
+                .map(Content.ToolCall.class::cast)
+                .toList();
     }
 
     private static List<AgentMessage> drain(PendingMessageSource source) {
@@ -455,11 +289,12 @@ final class AgentLoop {
         return drained == null ? List.of() : drained;
     }
 
-    private static String causeMessage(Throwable e) {
-        var cause = e.getCause();
-        var src = cause != null ? cause : e;
-        var msg = src.getMessage();
-        return msg != null ? msg : "unknown error";
+    private static Message.Assistant abortedAssistant(String msg) {
+        return new Message.Assistant(List.of(), StopReason.ABORTED, msg, Usage.zero(), Instant.now());
+    }
+
+    private static Message.Assistant erroredAssistant(String msg) {
+        return new Message.Assistant(List.of(), StopReason.ERROR, msg, Usage.zero(), Instant.now());
     }
 
     /**
@@ -497,53 +332,15 @@ final class AgentLoop {
      * product messages (keep user/assistant/toolResult, drop the rest).
      */
     private static List<Message> projectMessages(List<AgentMessage> messages) {
-        var out = new ArrayList<Message>();
-        for (var m : messages) {
-            if (m instanceof StandardAgentMessage sam) {
-                out.add(sam.message());
-            }
-            // unknown product messages are filtered out by the default projector
-        }
-        return List.copyOf(out);
+        return messages.stream()
+                .filter(StandardAgentMessage.class::isInstance)
+                .map(StandardAgentMessage.class::cast)
+                .map(StandardAgentMessage::message)
+                .toList();
     }
 
     private static List<ToolSpec> toolSpecs(List<AgentTool<?>> tools) {
-        var out = new ArrayList<ToolSpec>(tools.size());
-        for (var t : tools) {
-            out.add(t.spec());
-        }
-        return List.copyOf(out);
+        return tools.stream().map(AgentTool::spec).toList();
     }
 
-    /** Internal outcome: runtime result (with terminate) + transcript message (without). */
-    private record ToolOutcome(ToolExecutionResult internal, Message.ToolResultMessage message) {}
-
-    /**
-     * Settle-aware update sink. Emits {@link AgentEvent.ToolUpdate} events
-     * through the {@link RunEventEmitter}; after {@link #settle()} all further
-     * updates are silently dropped.
-     */
-    private static final class LoopToolUpdateSink implements ToolUpdateSink {
-        private final Content.ToolCall call;
-        private final RunEventEmitter events;
-        private volatile boolean settled;
-
-        LoopToolUpdateSink(Content.ToolCall call, RunEventEmitter events) {
-            this.call = call;
-            this.events = events;
-        }
-
-        @Override
-        public CompletionStage<Void> update(Content update) {
-            if (settled) {
-                return CompletableFuture.completedStage(null);
-            }
-            events.emit(new AgentEvent.ToolUpdate(call, update));
-            return CompletableFuture.completedStage(null);
-        }
-
-        void settle() {
-            settled = true;
-        }
-    }
 }

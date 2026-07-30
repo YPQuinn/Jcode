@@ -27,7 +27,8 @@ Jcode/
 │       ├── Agent.java           # 公开运行门面 (AutoCloseable, 虚拟线程)
 │       ├── AgentConfig.java     # 构造 Agent 的配置 record (含 beforeToolCall/afterToolCall)
 │       ├── AgentState.java      # 实时状态快照 (streaming/streamingMessage/pendingToolCalls/errorMessage)
-│       ├── AgentLoop.java       # package-private 循环主干 (15步 runLoop, 流式消费, 三阶段工具管道)
+│       ├── AgentLoop.java       # package-private 循环主干 (线性编排 runLoop, 流式消费, 调度 ToolCallExecutor)
+│       ├── ToolCallExecutor.java # package-private 工具执行编排 (三阶段管道, 顺序/并行分发, LoopToolUpdateSink, ToolOutcome)
 │       ├── AgentContext.java     # 不可变 transcript (systemPrompt/messages/tools)
 │       ├── AgentLoopConfig.java  # package-private per-run 配置
 │       ├── LoopState.java        # package-private 唯一可变状态
@@ -57,7 +58,7 @@ Jcode/
 - `Agent` 内部包装用户 `AgentEventSink` 为归约 sink：先更新 `volatile AgentState`，再委托用户 sink。用户 sink 看到事件时状态已完成归约。
 - 流式消费：`AgentLoop.consumeStream()` 在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终消息。partial 不进入 context。
 - 消息事件序列：用户/toolResult 发 `MessageStarted → MessageCompleted`；assistant 发 `MessageStarted → MessageUpdated... → MessageCompleted`。
-- 工具三阶段管道（prepare/execute/finalize）由 `AgentLoop` 统一保证顺序；具体工具只实现 `AgentTool<A>`。
+- 工具三阶段管道（prepare/execute/finalize）由 `ToolCallExecutor` 统一保证顺序；具体工具只实现 `AgentTool<A>`。
   - prepare：`prepareArguments` → `ToolSchemaValidator` → `BeforeToolCall` → `treeToValue`
   - execute：`tool.execute(id, args, ToolUpdateSink, cancellation)` → 异常转 error result → settle sink
   - finalize：`AfterToolCall` patch → 生成 `Message.ToolResultMessage`
