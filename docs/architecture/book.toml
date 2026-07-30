@@ -1,0 +1,22 @@
+[book]
+title = "Jcode 架构解读"
+authors = ["Jcode Maintainers"]
+language = "zh"
+src = "src"
+
+[build]
+build-dir = "../../target/mdbook/architecture"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/YPQuinn/Jcode"
+additional-css = ["theme/custom.css"]
+
+[output.html.search]
+enable = true
+limit-results = 30
+
+[output.html.fold]
+enable = true
+level = 1

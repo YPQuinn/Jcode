@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-07-30 10:22 CST  
-**Commit:** 4435414  
+**Generated:** 2026-07-30 10:27 CST  
+**Commit:** 2a7353f  
 **Branch:** master  
 
 ## OVERVIEW
@@ -39,7 +39,7 @@ Jcode/
 │       ├── queue/       # PendingMessageQueue/Source + QueueMode (steering/follow-up)
 │       └── tool/        # AgentTool + ToolExecutionResult + ToolExecutionMode + ToolUpdateSink + BeforeToolCall + AfterToolCall
 └── docs/
-    ├── architecture/    # 架构解读文档集入口与目录大纲
+    ├── architecture/    # mdBook 架构解读文档集 (book.toml + src/SUMMARY.md)
     ├── plans/           # 方案文档
     │   └── archived/    # 已归档的过往实现计划，可以参考但不可作为当前的实施规范
     ├── references/      # pi 参考副本 (.gitignored, 不属本仓库规则)
@@ -126,6 +126,12 @@ mvn -pl ai test
 
 # 根 reactor 验证（enforcer + 全测试）
 mvn verify
+
+# 架构文档构建（需要先安装 mdBook）
+mdbook build docs/architecture
+
+# 架构文档本地预览
+mdbook serve docs/architecture --open
 ```
 
 ## NOTES

@@ -1,0 +1,15 @@
+:root {
+  --content-max-width: 920px;
+}
+
+.content main {
+  line-height: 1.75;
+}
+
+.content code {
+  font-size: 0.94em;
+}
+
+.content blockquote {
+  border-left-width: 0.25rem;
+}
