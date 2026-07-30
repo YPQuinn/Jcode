@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-07-30 11:09 CST  
-**Commit:** 23af47e  
+**Generated:** 2026-07-30 11:28 CST  
+**Commit:** c0eda94  
 **Branch:** master  
 
 ## OVERVIEW
@@ -146,5 +146,5 @@ mdbook serve docs/architecture --open
 
 ## Must Do After Change
 
-- 每次任务完成后必须按照 `docs/rules/git-commit-message.md` 规范提交代码
-- 每次代码提交前必须更新本文档以及各子 AGENTS.md 文档（如果有涉及到相应模块的更新）
+- 每次任务完成后要询问用户是否需要提交代码，如果提交代码**必须**按照 `docs/rules/git-commit-message.md` 规范提交代码
+- 每次代码提交前**必须**更新本文档以及各子 AGENTS.md 文档（如果有涉及到相应模块的更新）

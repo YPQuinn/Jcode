@@ -1,19 +1,10 @@
 # Jcode 架构解读文档集
 
-本文档集用于沉淀 Jcode 的架构解读、模块边界、运行机制与设计约束。它不是短期实施计划，也不是外部资料摘录；它面向后续维护者，解释当前代码为什么这样组织、关键流程如何协作，以及扩展时应守住哪些边界。
+本文档集用于沉淀 Jcode 的架构解读、模块边界、运行机制与设计约束。它不是短期实施计划，也不是外部资料摘录；它面向想理解技术设计的读者，解释代码背后的核心抽象、职责边界、协作方式与取舍原因。
 
-## 阅读顺序
+## 阅读入口
 
-建议按以下顺序阅读：
-
-1. [`00-overview.md`](00-overview.md)：项目全局视图、目标范围、模块关系。
-2. [`01-module-boundaries.md`](01-module-boundaries.md)：Maven reactor、模块依赖方向、禁止跨越的边界。
-3. [`02-ai-protocol.md`](02-ai-protocol.md)：`ai` 模块提供的 provider-neutral 模型调用协议。
-4. [`03-agent-runtime.md`](03-agent-runtime.md)：`agent-core` 的 Agent 门面、运行循环与状态归约。
-5. [`04-streaming-model.md`](04-streaming-model.md)：Assistant stream 事件、partial 消息、完成语义。
-6. [`05-tool-pipeline.md`](05-tool-pipeline.md)：工具三阶段管道、hook、schema 校验与结果写回。
-7. [`06-concurrency-and-cancellation.md`](06-concurrency-and-cancellation.md)：单 run 约束、虚拟线程、取消所有权与 sink backpressure。
-8. [`07-extension-roadmap.md`](07-extension-roadmap.md)：未来 provider、coding-agent、server、tui 等模块的扩展入口与门槛。
+从 [`00. 项目全局视图`](00-overview.md) 开始阅读。第 00 章先建立理解 Jcode 的技术坐标系：它从 Coding Agent 的运行结构出发，说明模型协议、Agent Runtime、流式事件、工具管道、状态归约和取消边界如何组合成一个内核。
 
 ## 写作约定
 

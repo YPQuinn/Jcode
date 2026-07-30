@@ -21,6 +21,7 @@ mdbook serve docs/architecture --open
 
 ```text
 docs/architecture/
+├── AGENTS.md           # 架构文档写作规则
 ├── README.md           # mdBook 使用说明
 ├── book.toml           # mdBook 配置
 ├── theme/
@@ -28,14 +29,7 @@ docs/architecture/
 └── src/
     ├── SUMMARY.md      # mdBook 目录入口
     ├── index.md
-    ├── 00-overview.md
-    ├── 01-module-boundaries.md
-    ├── 02-ai-protocol.md
-    ├── 03-agent-runtime.md
-    ├── 04-streaming-model.md
-    ├── 05-tool-pipeline.md
-    ├── 06-concurrency-and-cancellation.md
-    └── 07-extension-roadmap.md
+    └── 00-overview.md
 ```
 
 ## 写作约定
