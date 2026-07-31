@@ -183,6 +183,8 @@ public final class Agent implements AutoCloseable {
                 config.model(),
                 config.modelClient(),
                 config.objectMapper(),
+                config.contextTransformer(),
+                config.messageProjector(),
                 config.toolExecution(),
                 config.beforeToolCall(),
                 config.afterToolCall(),

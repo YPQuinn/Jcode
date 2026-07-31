@@ -29,7 +29,7 @@
 | model 失败 + `abortRun` | 同样的 `new Message.Assistant(List.of(), reason, msg, zero(), now())` 出现 3+ 次 | 缺 `Messages.aborted/errored` 工厂 |
 | `runLoop` 内 stop reason 三分支 | 空 / LENGTH / 正常裸写在主流程 | 可封进 `dispatchToolCalls()` 单方法 |
 
-证据见 `agent-core/src/main/java/site/pplee/jcode/agentcore/AgentLoop.java`（基线 `c0eda94`）。
+证据见 `../../../agent-core/src/main/java/site/pplee/jcode/agentcore/AgentLoop.java`（基线 `c0eda94`）。
 
 ## 3. 设计原则与不变量
 
@@ -338,7 +338,7 @@ private List<ToolOutcome> dispatchToolCalls(
 6. `ToolCallExecutor` package-private，构造入口仅 `of(...)`，无跨 run 状态，字段 `final`。
 7. 事件序列、取消边界、错误归一、工具管道顺序、流式消费行为与基线 `c0eda94` 逐项一致（由 `ToolPipelineTest` / `StreamingEventTest` 兜底）。
 8. `mvn -pl agent-core -am test` 全绿；`mvn verify`（根 reactor）通过 enforcer 与全测试。
-9. `agent-core/AGENTS.md` 的 WHERE TO LOOK 表更新：工具三阶段指向 `ToolCallExecutor` 而非 `AgentLoop.executeOneToolCallTyped`。
+9. `../../../agent-core/AGENTS.md` 的 WHERE TO LOOK 表更新：工具三阶段指向 `ToolCallExecutor` 而非 `AgentLoop.executeOneToolCallTyped`。
 
 ## 9. 明确拒绝的划分
 
@@ -356,7 +356,7 @@ L1.3 的 `dispatchToolCalls` 方法提取已足够表达。引入 sealed 类型�
 
 ### 拒绝：把 `ToolCallExecutor` 升为 public
 
-唯一调用者是 `AgentLoop`（package-private），无第二调用者。提前公开会发布假想 seam，与 `AgentLoop` 暂不扩公开接口的既定决策一致（见 `pi-inspired-module-boundaries.md` §3.2）。
+唯一调用者是 `AgentLoop`（package-private），无第二调用者。提前公开会发布假想 seam，与 `AgentLoop` 暂不扩公开接口的既定决策一致（见 `../pi-inspired-module-boundaries.md` §3.2）。
 
 ### 拒绝：把 sequential/parallel 做成策略模式（`ToolDispatchStrategy` 接口 + 两个实现类）
 
@@ -375,16 +375,16 @@ L1.3 的 `dispatchToolCalls` 方法提取已足够表达。引入 sealed 类型�
 
 ### Jcode 基线
 
-- `agent-core/src/main/java/site/pplee/jcode/agentcore/AgentLoop.java`（`c0eda94`）
-- `agent-core/src/main/java/site/pplee/jcode/agentcore/LoopState.java`
-- `agent-core/src/main/java/site/pplee/jcode/agentcore/AgentLoopConfig.java`
-- `agent-core/src/main/java/site/pplee/jcode/agentcore/RunEventEmitter.java`
-- `agent-core/AGENTS.md`（模块约定、不变量、anti-patterns）
+- `../../../agent-core/src/main/java/site/pplee/jcode/agentcore/AgentLoop.java`（`c0eda94`）
+- `../../../agent-core/src/main/java/site/pplee/jcode/agentcore/LoopState.java`
+- `../../../agent-core/src/main/java/site/pplee/jcode/agentcore/AgentLoopConfig.java`
+- `../../../agent-core/src/main/java/site/pplee/jcode/agentcore/RunEventEmitter.java`
+- `../../../agent-core/AGENTS.md`（模块约定、不变量、anti-patterns）
 
 ### 仓库内设计参照
 
-- [`docs/plans/pi-inspired-module-boundaries.md`](pi-inspired-module-boundaries.md) §2.3（无状态循环与有状态 Agent 分开）、§2.5（工具三阶段管道）、§3.2（`AgentLoop` 保持 package-private）
-- [`docs/architecture/AGENTS.md`](../architecture/AGENTS.md)（写作规则：中文正文、标识符英文、技术解读语气）
+- [`../pi-inspired-module-boundaries.md`](../pi-inspired-module-boundaries.md) §2.3（无状态循环与有状态 Agent 分开）、§2.5（工具三阶段管道）、§3.2（`AgentLoop` 保持 package-private）
+- [`../../architecture/AGENTS.md`](../../architecture/AGENTS.md)（写作规则：中文正文、标识符英文、技术解读语气）
 
 ### pi 参照（设计背景，非实现依据）
 

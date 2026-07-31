@@ -2,6 +2,8 @@ package site.pplee.jcode.agentcore;
 
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.AgentMessage;
+import site.pplee.jcode.agentcore.message.ContextTransformer;
+import site.pplee.jcode.agentcore.message.MessageProjector;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
 import site.pplee.jcode.agentcore.tool.AgentTool;
@@ -44,15 +46,23 @@ import java.util.concurrent.ExecutorService;
  * the standard {@link Message.ToolResultMessage} transcript carries no
  * terminate flag.
  *
- * <p>Model-call seam: before each call the loop projects the open
- * {@link AgentMessage} transcript to {@link Message standard ai messages}
- * (inline default projection — the seed of Wave 3's {@code MessageProjector})
- * and extracts {@link ToolSpec declarable specs} from {@link AgentTool}s, then
- * invokes the {@link ModelClient}. The returned {@link AssistantMessageStream}
- * is consumed via {@link #consumeStream}, which emits {@code MessageStarted}
- * on the initial {@code Start} event and {@code MessageUpdated} for each delta.
- * The final {@link Message.Assistant} from {@code Done}/{@code Error} is
- * wrapped back into the transcript as a {@link StandardAgentMessage}.
+ * <p>Model-call seam: before each call the loop runs the two-stage context
+ * projection pipeline — {@link ContextTransformer} (async, cancellation-aware)
+ * produces a request-local {@link AgentMessage} view, then
+ * {@link MessageProjector} (sync) projects that to {@link Message standard ai
+ * messages} — and extracts {@link ToolSpec declarable specs} from
+ * {@link AgentTool}s, then invokes the {@link ModelClient}. The returned
+ * {@link AssistantMessageStream} is consumed via {@link #consumeStream}, which
+ * emits {@code MessageStarted} on the initial {@code Start} event and
+ * {@code MessageUpdated} for each delta. The final {@link Message.Assistant}
+ * from {@code Done}/{@code Error} is wrapped back into the transcript as a
+ * {@link StandardAgentMessage}.
+ *
+ * <p>Projection failures (transformer throw/exceptional stage, projector throw,
+ * null or invalid output) are normalized into a terminal {@code ERROR} (or
+ * {@code ABORTED} if cancelled) assistant message; the model is not called.
+ * Cancellation is checked after transform and after project so a cancelled run
+ * does not invoke the projector or model unnecessarily.
  */
 final class AgentLoop {
     private final ExecutorService executor;
@@ -179,18 +189,59 @@ final class AgentLoop {
     }
 
     /**
-     * Build the model request from the current context, stream the response,
-     * and normalize failures into a zero-usage {@link Message.Assistant}.
-     * Cancellation boundary 2 lives here: stream and interruption errors are
-     * turned into an {@link StopReason#ABORTED} (if cancelled) or
-     * {@link StopReason#ERROR} assistant message.
+     * Build the model request from the current context via the two-stage
+     * projection pipeline, stream the response, and normalize failures into a
+     * zero-usage {@link Message.Assistant}.
+     *
+     * <p>Pipeline: {@link ContextTransformer} (awaited) → copy/validate →
+     * cancellation check → {@link MessageProjector} → copy/validate →
+     * cancellation check → {@code ModelRequest} → {@code ModelClient.stream}.
+     *
+     * <p>Cancellation boundary 2 lives in the model-call phase: stream and
+     * interruption errors are turned into an {@link StopReason#ABORTED} (if
+     * cancelled) or {@link StopReason#ERROR} assistant message. Projection
+     * failures follow the same normalization — the model is never called.
      */
     private Message.Assistant invokeModelSafely(LoopState state, AgentLoopConfig config,
                                                   CancellationSignal cancellation) {
+        var messages = state.context().messages();
+        var events = config.events();
+
+        List<AgentMessage> transformed;
+        try {
+            var stage = Objects.requireNonNull(
+                    config.contextTransformer().transform(messages, cancellation),
+                    "context transformer returned null stage");
+            transformed = stage.toCompletableFuture().join();
+            transformed = List.copyOf(Objects.requireNonNull(
+                    transformed, "context transformer returned null result"));
+        } catch (RuntimeException e) {
+            return projectionFailure(events, cancellation,
+                    "context transformer failed: " + ToolCallExecutor.causeMessage(e));
+        }
+
+        if (cancellation.isCancelled()) {
+            return projectionFailure(events, cancellation, "cancelled");
+        }
+
+        List<Message> projected;
+        try {
+            projected = List.copyOf(Objects.requireNonNull(
+                    config.messageProjector().project(transformed),
+                    "message projector returned null"));
+        } catch (RuntimeException e) {
+            return projectionFailure(events, cancellation,
+                    "message projector failed: " + ToolCallExecutor.causeMessage(e));
+        }
+
+        if (cancellation.isCancelled()) {
+            return projectionFailure(events, cancellation, "cancelled");
+        }
+
         var request = new ModelRequest(
                 config.model(),
                 state.context().systemPrompt(),
-                projectMessages(state.context().messages()),
+                projected,
                 toolSpecs(state.context().tools())
         );
         try {
@@ -203,6 +254,21 @@ final class AgentLoop {
             var msg = cancellation.isCancelled() ? "cancelled" : ToolCallExecutor.causeMessage(e);
             return cancellation.isCancelled() ? abortedAssistant(msg) : erroredAssistant(msg);
         }
+    }
+
+    /**
+     * Emit {@code MessageStarted} for a projection-failure assistant (which
+     * has no preceding stream {@code Start} event), then return it so the
+     * caller's {@link #recordAssistant} can emit {@code MessageCompleted}.
+     */
+    private static Message.Assistant projectionFailure(
+            RunEventEmitter events, CancellationSignal cancellation, String message
+    ) {
+        var failure = cancellation.isCancelled()
+                ? abortedAssistant(message)
+                : erroredAssistant(message);
+        events.emit(new AgentEvent.MessageStarted(StandardAgentMessage.of(failure)));
+        return failure;
     }
 
     /**
@@ -324,19 +390,6 @@ final class AgentLoop {
                         StandardAgentMessage.of(event.partial()), event));
             }
         }
-    }
-
-    /**
-     * Wave-0 default message projection (seed of Wave 3 {@code MessageProjector}):
-     * unwrap {@link StandardAgentMessage} to {@link Message}; filter out unknown
-     * product messages (keep user/assistant/toolResult, drop the rest).
-     */
-    private static List<Message> projectMessages(List<AgentMessage> messages) {
-        return messages.stream()
-                .filter(StandardAgentMessage.class::isInstance)
-                .map(StandardAgentMessage.class::cast)
-                .map(StandardAgentMessage::message)
-                .toList();
     }
 
     private static List<ToolSpec> toolSpecs(List<AgentTool<?>> tools) {

@@ -93,13 +93,13 @@ class ToolPipelineTest {
     }
 
     private AgentLoopConfig config(ModelClient client, AgentEventSink sink) {
-        return new AgentLoopConfig(MODEL, client, MAPPER, null, null, null, null, null, new RunEventEmitter(sink));
+        return new AgentLoopConfig(MODEL, client, MAPPER, null, null, null, null, null, null, null, new RunEventEmitter(sink));
     }
 
     private AgentLoopConfig configWithHooks(
             ModelClient client, AgentEventSink sink,
             BeforeToolCall before, AfterToolCall after) {
-        return new AgentLoopConfig(MODEL, client, MAPPER, null, before, after, null, null, new RunEventEmitter(sink));
+        return new AgentLoopConfig(MODEL, client, MAPPER, null, null, null, before, after, null, null, new RunEventEmitter(sink));
     }
 
     private LoopResult runPrompt(ModelClient client, AgentContext ctx, AgentEventSink sink) {

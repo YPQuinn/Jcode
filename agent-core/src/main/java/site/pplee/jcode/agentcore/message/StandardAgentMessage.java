@@ -11,10 +11,9 @@ import java.util.Objects;
  * {@code ToolResultMessage}) so it can live in an
  * {@code AgentContext} alongside future custom product messages.
  *
- * <p>The default message projection (inline in {@code AgentLoop} for Wave 0,
- * formalized as {@code MessageProjector} in Wave 3) unwraps
- * {@code StandardAgentMessage} back to {@code ai.Message}; unknown product
- * messages are filtered out.
+ * <p>The default message projection ({@link MessageProjector#standard()})
+ * unwraps {@code StandardAgentMessage} back to {@link Message}; unknown
+ * product messages are filtered out.
  *
  * <p>Transcript shape:
  * <pre>

@@ -97,13 +97,13 @@ class AgentLoopTest {
     }
 
     private AgentLoopConfig config(ModelClient modelClient, AgentEventSink eventSink) {
-        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, null, null, new RunEventEmitter(eventSink));
+        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, null, null, null, null, new RunEventEmitter(eventSink));
     }
 
     private AgentLoopConfig configWithSources(
             ModelClient modelClient, AgentEventSink eventSink,
             PendingMessageSource steering, PendingMessageSource followUp) {
-        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, steering, followUp, new RunEventEmitter(eventSink));
+        return new AgentLoopConfig(MODEL, modelClient, MAPPER, null, null, null, null, null, steering, followUp, new RunEventEmitter(eventSink));
     }
 
     private List<Message> projected(AgentMessage... msgs) {
@@ -365,7 +365,7 @@ class AgentLoopTest {
 
         var loop = new AgentLoop(executor);
         var source = new CancellationSource();
-        var cfg = new AgentLoopConfig(MODEL, client, MAPPER, ToolExecutionMode.SEQUENTIAL,
+        var cfg = new AgentLoopConfig(MODEL, client, MAPPER, null, null, ToolExecutionMode.SEQUENTIAL,
                 null, null, null, null, new RunEventEmitter(recorder));
         var fut = CompletableFuture.supplyAsync(() ->
                 loop.runPrompt(List.of(userMsg("hi")), ctx, cfg, source.signal()), executor);

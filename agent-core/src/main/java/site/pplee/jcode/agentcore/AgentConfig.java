@@ -1,6 +1,8 @@
 package site.pplee.jcode.agentcore;
 
 import site.pplee.jcode.agentcore.event.AgentEventSink;
+import site.pplee.jcode.agentcore.message.ContextTransformer;
+import site.pplee.jcode.agentcore.message.MessageProjector;
 import site.pplee.jcode.agentcore.queue.QueueMode;
 import site.pplee.jcode.agentcore.tool.AfterToolCall;
 import site.pplee.jcode.agentcore.tool.BeforeToolCall;
@@ -21,6 +23,8 @@ import java.util.Objects;
  * optional ones.
  *
  * <p>Defaults: {@code toolExecution = PARALLEL}, {@code eventSink = noop()},
+ * {@code contextTransformer = identity()},
+ * {@code messageProjector = standard()},
  * {@code steeringMode = ONE_AT_A_TIME},
  * {@code followUpMode = ONE_AT_A_TIME}.
  */
@@ -29,6 +33,8 @@ public record AgentConfig(
         ModelRef model,
         ModelClient modelClient,
         ObjectMapper objectMapper,
+        ContextTransformer contextTransformer,
+        MessageProjector messageProjector,
         ToolExecutionMode toolExecution,
         BeforeToolCall beforeToolCall,
         AfterToolCall afterToolCall,
@@ -41,6 +47,8 @@ public record AgentConfig(
         Objects.requireNonNull(model, "model must not be null");
         Objects.requireNonNull(modelClient, "modelClient must not be null");
         Objects.requireNonNull(objectMapper, "objectMapper must not be null");
+        contextTransformer = (contextTransformer == null) ? ContextTransformer.identity() : contextTransformer;
+        messageProjector = (messageProjector == null) ? MessageProjector.standard() : messageProjector;
         toolExecution = (toolExecution == null) ? ToolExecutionMode.PARALLEL : toolExecution;
         beforeToolCall = (beforeToolCall == null) ? BeforeToolCall.noop() : beforeToolCall;
         afterToolCall = (afterToolCall == null) ? AfterToolCall.noop() : afterToolCall;

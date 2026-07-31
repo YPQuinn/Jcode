@@ -64,7 +64,7 @@ class StreamingEventTest {
     private static AgentConfig configWith(ModelClient client, AgentEventSink sink) {
         return new AgentConfig(
                 new AgentContext("sys", List.of(), List.of()),
-                MODEL, client, MAPPER, null, null, null, sink, null, null);
+                MODEL, client, MAPPER, null, null, null, null, null, sink, null, null);
     }
 
     @Test
@@ -146,7 +146,7 @@ class StreamingEventTest {
         var recorder = new RecordingEventSink();
         var cfg = new AgentConfig(
                 new AgentContext("sys", List.of(), List.of(TestTools.terminating())),
-                MODEL, client, MAPPER, null, null, null, recorder, null, null);
+                MODEL, client, MAPPER, null, null, null, null, null, recorder, null, null);
         try (var agent = new Agent(cfg)) {
             agent.prompt(user("hi")).toCompletableFuture().get(3, TimeUnit.SECONDS);
 

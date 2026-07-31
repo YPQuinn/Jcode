@@ -53,7 +53,7 @@ class AgentTest {
     private AgentConfig configWith(ModelClient client, AgentEventSink sink) {
         return new AgentConfig(
                 new AgentContext("sys", List.of(), List.of()),
-                MODEL, client, MAPPER, null, null, null, sink, null, null);
+                MODEL, client, MAPPER, null, null, null, null, null, sink, null, null);
     }
 
     // --- basic run ---
@@ -259,7 +259,7 @@ class AgentTest {
                 assistantText("final", StopReason.STOP));
         var cfg = new AgentConfig(
                 new AgentContext("sys", List.of(), List.of(steeringTool)),
-                MODEL, client, MAPPER, null, null, null, null, QueueMode.ALL, null);
+                MODEL, client, MAPPER, null, null, null, null, null, null, QueueMode.ALL, null);
         try (var agent = new Agent(cfg)) {
             ref.set(agent);
             var result = agent.prompt(user("hi")).toCompletableFuture().get(3, TimeUnit.SECONDS);
@@ -299,7 +299,7 @@ class AgentTest {
         var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient();
         var cfg = new AgentConfig(
                 new AgentContext("sys", List.of(), List.of()),
-                MODEL, client, MAPPER, null, null, null, null, null, null);
+                MODEL, client, MAPPER, null, null, null, null, null, null, null, null);
         try (var agent = new Agent(cfg)) {
             assertEquals(QueueMode.ONE_AT_A_TIME, agent.steeringMode());
             assertEquals(QueueMode.ONE_AT_A_TIME, agent.followUpMode());

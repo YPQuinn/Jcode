@@ -82,6 +82,8 @@ Jcode 的核心抽象可以按职责分成四组。
 | `Agent` | 对外运行门面 |
 | `AgentConfig` | 构造 Agent 的配置 |
 | `AgentContext` | 不可变 transcript 与工具上下文 |
+| `ContextTransformer` | 模型调用前的异步消息裁剪与注入 seam |
+| `MessageProjector` | 模型调用前的同步标准消息投影 seam |
 | `AgentLoop` | package-private 的运行循环主干 |
 | `LoopState` | 一次 run 内部唯一可变状态 |
 | `LoopResult` | 一次 run 的结束结果 |
@@ -131,7 +133,7 @@ Agent.prompt()
 AgentContext + AgentLoopConfig
   │
   ▼
-ModelClient.stream(ModelRequest)
+ContextTransformer → MessageProjector → ModelRequest
   │
   ▼
 AssistantMessageStream
@@ -159,11 +161,12 @@ AssistantMessageStream
 这条路径体现了几个重要约束：
 
 1. 模型调用通过 `ModelClient` 进入，runtime 不直接依赖具体 provider。
-2. assistant 流式输出先以事件形式被消费，partial 消息不会直接进入上下文。
-3. 只有完成后的 assistant message 才能成为 transcript 的一部分。
-4. 如果 assistant message 包含 tool call，runtime 进入工具管道。
-5. 工具结果被转成标准 tool result message 后，再写回上下文。
-6. 上下文推进后，runtime 可以继续发起下一轮模型请求。
+2. 每次模型调用前，`ContextTransformer` 和 `MessageProjector` 依次将开放 transcript 投影为标准请求视图，不修改持久 transcript。
+3. assistant 流式输出先以事件形式被消费，partial 消息不会直接进入上下文。
+4. 只有完成后的 assistant message 才能成为 transcript 的一部分。
+5. 如果 assistant message 包含 tool call，runtime 进入工具管道。
+6. 工具结果被转成标准 tool result message 后，再写回上下文。
+7. 上下文推进后，runtime 可以继续发起下一轮模型请求。
 
 ## 贯穿代码的设计思想
 

@@ -15,8 +15,11 @@ import java.util.Objects;
  * <p>Holds the open {@link AgentMessage} transcript type (standard messages
  * wrapped in {@link site.pplee.jcode.agentcore.message.StandardAgentMessage},
  * plus future custom product messages) and executable {@link AgentTool}s.
- * The model-call seam projects these to {@code ai.Message}/{@code ai.ToolSpec}
- * (Wave 0: inline in {@link AgentLoop}; Wave 3: {@code MessageProjector}).
+ * The model-call seam projects a request-local view of these to
+ * {@code ai.Message}/{@code ai.ToolSpec} via
+ * {@link site.pplee.jcode.agentcore.message.ContextTransformer} and
+ * {@link site.pplee.jcode.agentcore.message.MessageProjector}; the transcript
+ * itself is never modified by projection.
  */
 public record AgentContext(
         String systemPrompt,

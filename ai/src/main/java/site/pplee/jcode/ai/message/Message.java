@@ -11,7 +11,7 @@ import java.util.Objects;
  *
  * <p>{@code agent-core} keeps an open {@code AgentMessage} interface so product
  * layers can add custom transcript messages; at the model-call seam those are
- * projected back to {@code ai.Message} (Wave 3 formalizes the projector).
+ * projected back to this type before constructing a {@code ModelRequest}.
  */
 public sealed interface Message
         permits Message.User, Message.Assistant, Message.ToolResultMessage {

@@ -12,10 +12,11 @@ package site.pplee.jcode.agentcore.message;
  * non-sealed) interface plus a standard bridge ({@link StandardAgentMessage}).
  *
  * <p><b>Not</b> sealed: any product module may add an {@code AgentMessage}.
- * The default message projector (Wave 0: inline in {@code AgentLoop}; Wave 3:
- * {@code MessageProjector}) unwraps {@link StandardAgentMessage} and filters
- * out unknown product messages (keep {@code user}/{@code assistant}/{@code toolResult},
- * drop the rest).
+ * The default {@link MessageProjector#standard()} unwraps
+ * {@link StandardAgentMessage} and filters out unknown product messages
+ * (keep {@code user}/{@code assistant}/{@code toolResult}, drop the rest).
+ * A {@link ContextTransformer} may prune or inject messages into a
+ * request-local view before projection; neither modifies the transcript.
  */
 public interface AgentMessage {
     // Intentionally empty: a marker extension point. Implementations include
