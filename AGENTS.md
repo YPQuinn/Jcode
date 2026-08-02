@@ -41,6 +41,7 @@ Jcode/
 │       ├── queue/       # PendingMessageQueue/Source + QueueMode (steering/follow-up)
 │       └── tool/        # AgentTool + ToolExecutionResult + ToolExecutionMode + ToolUpdateSink + BeforeToolCall + AfterToolCall
 └── docs/
+    ├── agents/          # issue tracker、triage 标签与 domain docs 配置
     ├── architecture/    # mdBook 架构解读文档集 (含写作规则 AGENTS.md)
     ├── plans/           # 方案文档
     │   └── archived/    # 已归档的过往实现计划，可以参考但不可作为当前的实施规范
@@ -152,3 +153,17 @@ mdbook serve docs/architecture --open
 - 每次任务完成后要询问用户是否需要提交代码，如果提交代码**必须**按照 `docs/rules/git-commit-message.md` 规范提交代码
 - 每次代码提交前**必须**更新本文档以及各子 AGENTS.md 文档（如果有涉及到相应模块的更新）
 - `docs/plans` 根目录下的计划文档已经实现后要挪入 `docs/plans/archived` 文件夹
+
+## Agent skills
+
+### Issue tracker
+
+Issues and planning artifacts are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the five canonical skill roles. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain documentation uses a single-context layout. See `docs/agents/domain.md`.
