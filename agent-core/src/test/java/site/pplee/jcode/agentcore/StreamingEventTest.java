@@ -33,8 +33,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Wave 1 streaming protocol tests: text/thinking/toolcall start/delta/end
- * order, partial assistant progression, state reduction before sink sees
+ * Streaming protocol tests: text/thinking/toolcall start/delta/end order,
+ * partial assistant progression, state reduction before sink sees
  * events, agent_end gating run settlement, and provider error not failing
  * the run future.
  */

@@ -1,6 +1,6 @@
 # Jcode 模块边界：基于 pi 的分包与极简核心思想
 
-> 状态：架构提案  
+> 状态：已完成并归档
 > Jcode 基线：`83b1feb`（2026-07-29）  
 > pi 源码基线：`cee5ff7`（2026-07-26，`@earendil-works/pi-*` 0.82.1）  
 > pi-book 基线：`c01f38d`（2026-07-27）
@@ -344,9 +344,11 @@ ai-provider-google     -> ai
 
 迁移应一次性完成，不在两个模块长期维护重复的 Message / Content / StopReason 类型，否则 provider 和 Agent 会形成两套事实来源。
 
-## 5. 本轮只实施 1–5 的波次
+## 5. 已实施的内核能力
 
-## Wave 0：建立模块 seam
+以下能力按依赖关系依次落地，现均已纳入稳定内核基线。
+
+### 5.1 建立模块 seam
 
 1. 根 reactor 顺序改为：`ai` → `agent-core`。
 2. 新建最小 `ai` 模块，不加入任何 provider SDK。
@@ -356,7 +358,7 @@ ai-provider-google     -> ai
 
 完成标准：现有最小工具闭环迁移后仍通过；仓库中只有一套标准 LLM message 类型。
 
-## Wave 1：流式协议与 Agent 实时状态
+### 5.2 流式协议与 Agent 实时状态
 
 实现：
 
@@ -374,7 +376,7 @@ ai-provider-google     -> ai
 - `agent_end` listener 完成前 run 不算 settled；
 - provider 运行期错误不使 run future 异常失败。
 
-## Wave 2：工具声明和三阶段执行
+### 5.3 工具声明和三阶段执行
 
 实现：
 
@@ -394,7 +396,7 @@ ai-provider-google     -> ai
 - settle 后增量被忽略；
 - 任一 sequential 工具令整批串行。
 
-## Wave 3：Context 投影 seam
+### 5.4 Context 投影 seam
 
 实现：
 
@@ -417,7 +419,7 @@ MessageProjector:   AgentMessage[] -> ai.Message[]
 - 原始 AgentContext 不被裁剪；
 - hook 失败的生命周期和错误归一策略明确。
 
-## Wave 4：下一 Turn 控制点
+### 5.5 下一 Turn 控制点
 
 实现两个稳定 seam：
 
@@ -441,21 +443,21 @@ TurnCompleted
 - hook 收到完整 assistant、按源顺序的工具结果、当前 context 和 newMessages；
 - 取消信号传入 turn hook。
 
-## Wave 5：并行工具的双排序契约
+### 5.6 并行工具的双排序契约
 
 固定：
 
 ```text
-ToolExecutionCompleted event -> 实际完成顺序
-ToolResult message            -> assistant 中的源顺序
-TurnCompleted.toolResults     -> assistant 中的源顺序
+AgentEvent.ToolCompleted              -> 实际完成顺序
+Message.ToolResultMessage             -> assistant 中的源顺序
+AgentEvent.TurnCompleted.toolResults   -> assistant 中的源顺序
 ```
 
-prepare 与 `tool_execution_start` 始终按源顺序；execute/finalize 可并行。该拆分服务两个消费者：UI 需要尽快看到完成结果，模型与存储需要确定性 transcript [B9][P-LOOP]。
+prepare 与 `AgentEvent.ToolStarted` 始终按源顺序；execute/finalize 可并行。该拆分服务两个消费者：UI 需要尽快看到完成结果，模型与存储需要确定性 transcript [B9][P-LOOP]。
 
 ## 6. 稳定 `agent-core` 的验收条件
 
-完成 Wave 0–5 后才冻结第一版 public interface：
+上述内核能力完成后，第一版 public interface 按以下条件冻结：
 
 1. `agent-core` 只有一个 Jcode 内部依赖：`ai`。
 2. `ai` 不含 Agent、Session、coding 工具或 UI 类型。
@@ -513,5 +515,5 @@ Session、Compaction、Skill、ExecutionEnv 会立即扩大并拖慢 `agent-core
 
 ### Jcode 当前基线
 
-- [`archived/java21-agent-loop-minimal-plan.md`](archived/java21-agent-loop-minimal-plan.md)
-- `../../agent-core/src/main/java/site/pplee/jcode/agentcore`
+- [`java21-agent-loop-minimal-plan.md`](java21-agent-loop-minimal-plan.md)
+- `../../../agent-core/src/main/java/site/pplee/jcode/agentcore`

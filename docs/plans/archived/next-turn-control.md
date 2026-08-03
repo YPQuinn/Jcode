@@ -1,7 +1,7 @@
-# Wave 4：下一 Turn 控制点实施计划
+# 下一 Turn 控制点实施计划
 
-> 状态：已完成
-> 上位提案：[`../pi-inspired-module-boundaries.md`](../pi-inspired-module-boundaries.md)
+> 状态：已完成并归档
+> 架构基线：[`pi-inspired-module-boundaries.md`](pi-inspired-module-boundaries.md)
 > 实施范围：`ai` 的 thinking 请求协议，以及 `agent-core` 的 turn 间更新与优雅停止
 
 ## 1. 目标
@@ -37,7 +37,7 @@ TurnCompleted
 
 ## 2. 非目标
 
-本波次不实现：
+本方案不实现：
 
 - provider adapter 或 thinking level 的厂商映射；
 - model capability catalog、thinking level clamp 或自动降级；
@@ -45,10 +45,10 @@ TurnCompleted
 - 在 turn update 中替换 `ModelClient`；
 - model/thinking update 跨独立 run 的持久化；
 - 新的 `AgentEvent` 变体；
-- Wave 5 的并行工具完成顺序与 transcript 源顺序拆分；
+- 并行工具完成顺序与 transcript 源顺序拆分；
 - `AgentConfig` builder 或通用 request-options map。
 
-仅需 request-local 裁剪或注入时，继续使用 Wave 3 的 `ContextTransformer`，而不是持久替换 `AgentContext`。
+仅需 request-local 裁剪或注入时，继续使用现有 `ContextTransformer`，而不是持久替换 `AgentContext`。
 
 ## 3. Public interface 决策
 
@@ -344,7 +344,7 @@ package-private `AgentLoop` 测试只补严格低层时序，不把私有 helper
 - cancellation signal 传入 hook，取消优先；
 - prepare/stop hook 的同步异常、exceptional/null 输出归一；
 - terminal model failure 不调用 hook；
-- 默认 hook 完全保持 Wave 0-3 行为。
+- 默认 hook 完全保持既有行为。
 
 ## 10. 预计改动文件
 
@@ -388,7 +388,7 @@ mdbook build docs/architecture
 验收标准：
 
 1. 新增测试覆盖严格时序、更新作用域、停止、取消和失败归一。
-2. Wave 0-3 全部测试保持通过。
+2. 此前全部测试保持通过。
 3. `ModelRequest` 是自包含 provider-neutral 请求，不出现通用 options map。
 4. 可变 turn 状态集中于 `LoopState`。
 5. 不新增 Jcode 模块依赖或 provider SDK。

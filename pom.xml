@@ -85,8 +85,8 @@
         </pluginManagement>
 
         <!--
-          Module-boundary guard (Wave 0 requirement #5). The Jcode dependency
-          graph must be acyclic and point only from product layer to core layer:
+          Module-boundary guard. The Jcode dependency graph must be acyclic
+          and point only from product layer to core layer:
             ai           has NO Jcode-internal dependency
             agent-core   depends ONLY on ai
           Future modules (coding-agent, provider-*) will be added to the

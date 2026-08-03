@@ -305,11 +305,11 @@ private List<ToolOutcome> dispatchToolCalls(
 | 可变状态边界 | `LoopState` 仍唯一可变集合；`ToolCallExecutor` 字段 final，无跨 run 状态 |
 | 可见性 | `ToolCallExecutor` package-private |
 
-## 7. 实施波次
+## 7. 实施阶段
 
-每波次结束跑 `mvn -pl agent-core -am test`，必须全绿才进下一波。
+每个阶段结束后运行 `mvn -pl agent-core -am test`，必须全绿才进入下一阶段。
 
-### Wave R1：L1 纯结构重构（不引入新类）
+### R1：L1 纯结构重构（不引入新类）
 
 1. **R1.1** 提取 `prepareTurn` / `recordAssistant` / `handleTerminalFailure` / `recordOutcomes` / `shouldContinueInnerLoop` / `drainSteering` / `drainFollowUp`，`runLoop` 主干改调用。跑测试。
 2. **R1.2** 提取 `invokeModelSafely`（含两种 catch 归一）。跑 `StreamingEventTest` + 全量。
@@ -319,7 +319,7 @@ private List<ToolOutcome> dispatchToolCalls(
 
 完成标志：`AgentLoop` 行数下降、`runLoop` 主干线性、无 `step N` 注释、无重复 `Message.Assistant` 构造、测试全绿。
 
-### Wave R2：L2 抽取 `ToolCallExecutor`
+### R2：L2 抽取 `ToolCallExecutor`
 
 1. **R2.1** 新建 `ToolCallExecutor.java`（pkg-private），迁移 `executeToolCalls` → `runBatch`、`executeSequential` → `runSequential`、`executeParallel` → `runParallel`、`executeOneToolCall` → `runOne`、`executeOneToolCallTyped` → `runTyped`。`AgentLoop` 临时保留转发方法。跑 `ToolPipelineTest` + 全量。
 2. **R2.2** 迁移 `failTruncatedToolCalls` → `failTruncated`、`buildNameToTool` 到构造器、`toToolResultMessage` 到 `ToolOutcome` 工厂、`allTerminated` 到 `ToolCallExecutor`、`LoopToolUpdateSink` 为内部类。跑全量。
@@ -356,7 +356,7 @@ L1.3 的 `dispatchToolCalls` 方法提取已足够表达。引入 sealed 类型�
 
 ### 拒绝：把 `ToolCallExecutor` 升为 public
 
-唯一调用者是 `AgentLoop`（package-private），无第二调用者。提前公开会发布假想 seam，与 `AgentLoop` 暂不扩公开接口的既定决策一致（见 `../pi-inspired-module-boundaries.md` §3.2）。
+唯一调用者是 `AgentLoop`（package-private），无第二调用者。提前公开会发布假想 seam，与 `AgentLoop` 暂不扩公开接口的既定决策一致（见 `pi-inspired-module-boundaries.md` §3.2）。
 
 ### 拒绝：把 sequential/parallel 做成策略模式（`ToolDispatchStrategy` 接口 + 两个实现类）
 
@@ -383,7 +383,7 @@ L1.3 的 `dispatchToolCalls` 方法提取已足够表达。引入 sealed 类型�
 
 ### 仓库内设计参照
 
-- [`../pi-inspired-module-boundaries.md`](../pi-inspired-module-boundaries.md) §2.3（无状态循环与有状态 Agent 分开）、§2.5（工具三阶段管道）、§3.2（`AgentLoop` 保持 package-private）
+- [`pi-inspired-module-boundaries.md`](pi-inspired-module-boundaries.md) §2.3（无状态循环与有状态 Agent 分开）、§2.5（工具三阶段管道）、§3.2（`AgentLoop` 保持 package-private）
 - [`../../architecture/AGENTS.md`](../../architecture/AGENTS.md)（写作规则：中文正文、标识符英文、技术解读语气）
 
 ### pi 参照（设计背景，非实现依据）

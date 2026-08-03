@@ -54,7 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Wave 4 next-turn control contract tests: per-request context/model/thinking
+ * Next-turn control contract tests: per-request context/model/thinking
  * updates, graceful stop ordering, replacement-context semantics, hook
  * payloads, async waiting, cancellation, and failure normalization.
  */
@@ -423,7 +423,7 @@ class NextTurnControlTest {
     }
 
     @Test
-    void defaultHooksPreserveWave3Behavior() throws Exception {
+    void defaultHooksPreserveContextProjectionBehavior() throws Exception {
         // legacy 12-arg constructor: no next-turn controls configured
         var recorder = new RecordingEventSink();
         var client = new ScriptedModelClient(

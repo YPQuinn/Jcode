@@ -36,7 +36,7 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Wave 3 context projection contract tests: transform-before-project ordering,
+ * Context projection contract tests: transform-before-project ordering,
  * per-turn repetition, transcript isolation, default filtering, custom
  * projection, async waiting, cancellation, and failure normalization.
  */

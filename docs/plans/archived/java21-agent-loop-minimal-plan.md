@@ -526,7 +526,7 @@ void followUpMode(QueueMode mode)
 - [ ] 9. 完成所有 faux client/tool 测试，运行 `mvn -pl agent-core test`。
 - [ ] 10. 运行 `mvn verify`，确认根聚合项目在 Java 21 下通过。
 
-## 最终验证波次
+## 最终验证阶段
 
 - [ ] F1. 运行 `mvn -pl agent-core test`，确认领域约束、loop、工具、队列、取消和 `Agent` 生命周期测试全部通过。
 - [ ] F2. 运行根目录 `mvn verify`，确认聚合构建使用 Java 21 且退出 0。

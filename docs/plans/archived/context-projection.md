@@ -1,7 +1,7 @@
-# Wave 3：Context 投影 seam 执行方案
+# Context 投影 seam 执行方案
 
-> 状态：已完成  
-> 上位提案：[`../pi-inspired-module-boundaries.md`](../pi-inspired-module-boundaries.md)  
+> 状态：已完成并归档
+> 架构基线：[`pi-inspired-module-boundaries.md`](pi-inspired-module-boundaries.md)
 > 实施范围：`agent-core` 的 context transform 与 LLM message projection
 
 ## 1. 目标
@@ -29,14 +29,14 @@ AgentMessage[]
 
 ## 2. 非目标
 
-本波次不实现：
+本方案不实现：
 
 - 持久化 compaction 或具体裁剪算法；
 - system prompt、tools 或 model 的转换；
 - provider-specific 消息顺序校验；
 - 新的 Agent lifecycle event；
-- Wave 4 的 next-turn 控制点；
-- Wave 5 的并行工具双排序；
+- next-turn 控制点；
+- 并行工具双排序；
 - `AgentConfig` builder 或兼容构造器。
 
 ## 3. 接口决策
@@ -91,7 +91,7 @@ public interface MessageProjector {
 - projector 是同步、无 I/O 的格式投影；需要异步获取的数据应在 transformer 阶段完成；
 - 默认 `standard()` 展开 `StandardAgentMessage`，按原顺序保留标准消息，静默过滤未知产品消息。
 
-本波次只做 provider-neutral 结构校验：Java 类型约束、非 null 列表和非 null 元素。是否允许空 context、assistant/tool-result 配对和最终消息角色由 projector 与 provider adapter 负责，`agent-core` 不编码某一家 provider 的规则。
+本方案只做 provider-neutral 结构校验：Java 类型约束、非 null 列表和非 null 元素。是否允许空 context、assistant/tool-result 配对和最终消息角色由 projector 与 provider adapter 负责，`agent-core` 不编码某一家 provider 的规则。
 
 ### 3.3 配置位置
 
@@ -111,7 +111,7 @@ messageProjector == null    -> MessageProjector.standard()
 
 `Agent` 在创建每次 run 的 `AgentLoopConfig` 时复制这两个值。`AgentLoopConfig` 同样应用默认值，使 package-private loop 测试可安全直接构造配置。
 
-添加 record component 会改变 `AgentConfig` 的 canonical constructor。`agent-core` 的 public interface 在 Wave 0-5 完成前尚未冻结，本波次直接更新仓库内调用点，不添加旧参数列表的兼容重载。
+添加 record component 会改变 `AgentConfig` 的 canonical constructor。实施时 `agent-core` 的 public interface 尚未冻结，因此直接更新仓库内调用点，不添加旧参数列表的兼容重载。
 
 ## 4. 运行时顺序
 
@@ -152,7 +152,7 @@ transformer 完成后使用 `List.copyOf()` 固定输出，再将其交给 proje
 - 防止后续修改调用方返回的可变 list；
 - 保持当前公开不可变模型约束。
 
-复制是浅复制。产品层提供的自定义 `AgentMessage` 仍应自身保持不可变；本波次不尝试深拷贝未知产品消息或可变 `JsonNode`。
+复制是浅复制。产品层提供的自定义 `AgentMessage` 仍应自身保持不可变；本方案不尝试深拷贝未知产品消息或可变 `JsonNode`。
 
 ## 5. 失败与取消语义
 
@@ -211,7 +211,7 @@ AgentCompleted
 |---|---|
 | `agent-core/src/main/java/site/pplee/jcode/agentcore/message/ContextTransformer.java` | 公开异步 transformer 与 `identity()` 默认实现 |
 | `agent-core/src/main/java/site/pplee/jcode/agentcore/message/MessageProjector.java` | 公开同步 projector 与 `standard()` 默认实现 |
-| `agent-core/src/test/java/site/pplee/jcode/agentcore/ContextProjectionTest.java` | Wave 3 集成契约测试 |
+| `agent-core/src/test/java/site/pplee/jcode/agentcore/ContextProjectionTest.java` | Context 投影集成契约测试 |
 
 ### 6.2 修改文件
 
@@ -222,15 +222,15 @@ AgentCompleted
 | `AgentLoopConfig.java` | 携带两个 seam 并应用默认值 |
 | `AgentLoop.java` | 替换内联 `projectMessages()`，实现 transform/project/cancel/failure 管道 |
 | `AgentContext.java` | 明确真实 transcript 与 request view 的区别 |
-| `message/AgentMessage.java` | 用正式 seam 替换 Wave 3 占位描述 |
+| `message/AgentMessage.java` | 用正式 seam 替换占位描述 |
 | `message/StandardAgentMessage.java` | 链接 `MessageProjector.standard()` |
-| `ai/message/Message.java` | 删除“Wave 3 将实现”的过期措辞，不引用上层 Java 类型 |
+| `ai/message/Message.java` | 删除“后续将实现”的过期措辞，不引用上层 Java 类型 |
 | `AgentLoopTest.java` | 更新 `AgentLoopConfig` 构造参数 |
 | `ToolPipelineTest.java` | 更新 `AgentLoopConfig` 构造参数 |
 | `AgentTest.java` | 更新 `AgentConfig` 构造参数并验证默认值 |
 | `StreamingEventTest.java` | 更新 `AgentConfig` 构造参数 |
 | `docs/architecture/src/00-overview.md` | 将 context 投影加入抽象地图和主运行路径 |
-| `AGENTS.md` | 更新 Wave 进度与仓库级投影约束 |
+| `AGENTS.md` | 更新稳定能力说明与仓库级投影约束 |
 | `agent-core/AGENTS.md` | 记录 seam 位置、调用顺序、失败和取消语义 |
 
 ### 6.3 保持不变
@@ -286,7 +286,7 @@ transformer 与 projector 使用独立 try/catch，以生成准确的错误前�
 
 ### 步骤 5：更新注释和架构文档
 
-删除所有“Wave 3 将 formalize projector”的过渡说明，改成现在时契约。架构文档重点解释两个 seam 的职责差异和 request view 不持久化，不写成源码文件清单。
+删除所有“后续将 formalize projector”的过渡说明，改成现在时契约。架构文档重点解释两个 seam 的职责差异和 request view 不持久化，不写成源码文件清单。
 
 ## 8. 测试矩阵
 
@@ -344,11 +344,11 @@ mdbook build docs/architecture
 
 ## 10. 完成标准
 
-Wave 3 只有在以下条件全部满足后才算完成：
+Context 投影实现只有在以下条件全部满足后才算完成：
 
 1. 两个公开 seam 具备完整英文 Javadoc，说明调用时机、等待、失败、取消和不可变约束。
 2. 每个模型请求都严格执行 transform 后 project。
-3. 默认配置下的模型请求内容与 Wave 3 前保持一致。
+3. 默认配置下的模型请求内容与实施前保持一致。
 4. 产品消息可由默认 projector 过滤，也可由自定义 projector 投影。
 5. transformer 的裁剪和注入不改变真实 transcript。
 6. callback 失败形成 terminal assistant，不使 run future 异常失败。
@@ -357,4 +357,4 @@ Wave 3 只有在以下条件全部满足后才算完成：
 9. 根 `mvn verify` 通过。
 10. 架构文档和根、模块 `AGENTS.md` 与实现保持一致。
 
-本文档已随实施完成归档至 `docs/plans/archived/`。上位提案仍包含 Wave 4、5，在全部波次完成前继续保留于 `docs/plans/` 根目录。
+本文档已随实施完成归档；对应架构基线也已归档。

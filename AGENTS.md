@@ -59,8 +59,8 @@ Jcode/
 - `ModelClient.stream()` 返回 `AssistantMessageStream`；adapter 不得同步抛，成功/错误/取消均通过 `Done`/`Error` 事件产生最终 `Message.Assistant`。
 - `Agent` 内部包装用户 `AgentEventSink` 为归约 sink：先以 `AtomicReference<AgentState>` + CAS 更新 AgentState，再委托用户 sink。用户 sink 看到事件时状态已完成归约。
 - 流式消费：`AgentLoop.consumeStream()` 在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终消息。partial 不进入 context。
-- Context 投影（Wave 3）：每次模型调用前依次执行 `ContextTransformer`（异步、取消感知）→ `MessageProjector`（同步），只生成本次请求视图，不修改 transcript。transformer 裁剪/注入的消息不进入 context、`LoopResult.newMessages` 或事件。回调失败归一为 terminal `ERROR`/`ABORTED` assistant，不使 run future 异常失败。取消在 transform 后和 project 后各检查一次。
-- 下一 Turn 控制（Wave 4）：每个正常 turn 的 `TurnCompleted` 之后依次执行 `PrepareNextTurn`（替换 context/model/thinking，Optional 空值表示保持）→ 原子应用 → `ShouldStopAfterTurn`（STOP 优雅停止，不改 stop reason、不 drain steering/follow-up）→ steering drain → follow-up drain。hook 失败归一为 terminal `ERROR`/`ABORTED` assistant；terminal model failure 跳过 hook；model/thinking 更新仅影响当前 run 后续 turn，context 替换持久到 `Agent.context()`。`ModelRequest` 携带绝对 `ThinkingLevel`（`PROVIDER_DEFAULT` 表示 adapter 不主动指定）。
+- Context 投影：每次模型调用前依次执行 `ContextTransformer`（异步、取消感知）→ `MessageProjector`（同步），只生成本次请求视图，不修改 transcript。transformer 裁剪/注入的消息不进入 context、`LoopResult.newMessages` 或事件。回调失败归一为 terminal `ERROR`/`ABORTED` assistant，不使 run future 异常失败。取消在 transform 后和 project 后各检查一次。
+- 下一 Turn 控制：每个正常 turn 的 `TurnCompleted` 之后依次执行 `PrepareNextTurn`（替换 context/model/thinking，Optional 空值表示保持）→ 原子应用 → `ShouldStopAfterTurn`（STOP 优雅停止，不改 stop reason、不 drain steering/follow-up）→ steering drain → follow-up drain。hook 失败归一为 terminal `ERROR`/`ABORTED` assistant；terminal model failure 跳过 hook；model/thinking 更新仅影响当前 run 后续 turn，context 替换持久到 `Agent.context()`。`ModelRequest` 携带绝对 `ThinkingLevel`（`PROVIDER_DEFAULT` 表示 adapter 不主动指定）。
 - 消息事件序列：用户/toolResult 发 `MessageStarted → MessageCompleted`；assistant 发 `MessageStarted → MessageUpdated... → MessageCompleted`。
 - 工具三阶段管道（prepare/execute/finalize）由 `ToolCallExecutor` 统一保证顺序；具体工具只实现 `AgentTool<A>`。
   - prepare：`prepareArguments` → `ToolSchemaValidator` → `BeforeToolCall` → `treeToValue`
@@ -150,8 +150,8 @@ mdbook serve docs/architecture --open
 - 无 Maven wrapper（`mvnw`）；用系统 `mvn`。
 - 无 CI 配置（无 `.github/workflows`/`Jenkinsfile`）。
 - jdtls（Java LSP）未安装；codegraph 未索引（`.codegraph/` 存在但未 `codegraph init`）。
-- 未来模块规划（未创建）：`coding-agent`、`ai-provider-openai/anthropic/google`、`server`、`tui`。创建门槛见 `docs/plans/pi-inspired-module-boundaries.md` §3.6。
-- Wave 进度：Wave 0（模块 seam）✓、Wave 1（流式协议）✓、Wave 2（工具三阶段执行）✓、Wave 3（Context 投影）✓、Wave 4（下一 Turn 控制）✓、Wave 5（并行工具双排序）✓ 全部完成。
+- 未来模块（未创建）：`coding-agent`、`ai-provider-openai/anthropic/google`、`server`、`tui`。仅在出现真实独立使用者或产品入口时创建，不预建空模块。
+- `agent-core` 核心基线已包含模块 seam、流式协议、工具三阶段执行、Context 投影、下一 Turn 控制与并行工具双排序；对应实施方案均已归档。
 
 ## Must Do After Change
 

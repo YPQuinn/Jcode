@@ -1,7 +1,7 @@
-# Wave 5：并行工具双排序实施计划
+# 并行工具双排序实施计划
 
-> 状态：已完成（Wave 5 实现已落地并通过全部验证）
-> 上位提案：[`../pi-inspired-module-boundaries.md`](../pi-inspired-module-boundaries.md)
+> 状态：已完成并归档（实现已落地并通过全部验证）
+> 架构基线：[`pi-inspired-module-boundaries.md`](pi-inspired-module-boundaries.md)
 > 实施范围：`agent-core` 的工具 prepare/execute/finalize 调度、完成事件排序、transcript 排序与实时状态归约
 
 ## 1. 目标
@@ -64,7 +64,7 @@ for source future:
 - `LENGTH` tool call 不执行并按源顺序失败；
 - 并行 outcome 在写回前恢复源顺序。
 
-但仍有三个 Wave 5 缺口：
+但仍有三个并行工具调度缺口：
 
 1. `runOne()` 被整体提交，导致 prepare 也在 worker 中并行执行。
 2. `ToolCompleted` 在 `allOf()` 后按 future 源顺序回放，不代表实际完成顺序，也不能及时服务 UI。
@@ -120,7 +120,7 @@ ToolStarted(call N)
 
 ## 4. Public interface 决策
 
-本波次不新增、删除或重命名 public 类型、方法或 record component：
+本方案不新增、删除或重命名 public 类型、方法或 record component：
 
 - 继续使用 `AgentEvent.ToolStarted` / `ToolUpdate` / `ToolCompleted`；
 - 继续返回 `LoopResult`；
@@ -128,7 +128,7 @@ ToolStarted(call N)
 - `Prepared`、completion entry、source index 和 `ToolOutcome` 保持 `ToolCallExecutor` 的内部实现细节；
 - `AgentLoop` 仍只通过 `List<ToolOutcome>` 接收工具批次结果。
 
-公开行为变化仅是 Wave 5 明确要求的事件时序：并行批次中的 `ToolCompleted` 从“全部完成后按源顺序回放”改为“每个 execute+finalize 完成后按实际完成顺序投递”。
+公开行为变化仅是完成事件时序：并行批次中的 `ToolCompleted` 从“全部完成后按源顺序回放”改为“每个 execute+finalize 完成后按实际完成顺序投递”。
 
 ## 5. 工具管道内部拆分
 
@@ -191,7 +191,7 @@ AgentTool.execute
 
 ### 5.3 `LoopToolUpdateSink` 结算
 
-当前单个 volatile `settled` 检查无法覆盖“update 已通过接纳检查、但其 sink stage 仍阻塞”的 in-flight update。Wave 5 将其收敛为每个工具调用私有的 close-and-drain 协议：
+当前单个 volatile `settled` 检查无法覆盖“update 已通过接纳检查、但其 sink stage 仍阻塞”的 in-flight update。本方案将其收敛为每个工具调用私有的 close-and-drain 协议：
 
 1. `update()` 在短临界区内检查 accepting，并登记 in-flight 计数；不在持锁时调用 event sink。
 2. 投递完成或失败后，在 finally 中减少 in-flight 计数并唤醒 settle waiter。
@@ -326,7 +326,7 @@ after the whole batch:
 
 ## 8. AgentState 原子归约
 
-Wave 5 允许一个工具完成时其他工具仍在发送 `ToolUpdate`。`Agent.reduceState()` 必须从 volatile read-modify-write 改为原子更新。
+并行双排序允许一个工具完成时其他工具仍在发送 `ToolUpdate`。`Agent.reduceState()` 必须从 volatile read-modify-write 改为原子更新。
 
 选择：
 
@@ -402,7 +402,7 @@ completion drain 记录第一个未归一异常：
 
 ### 9.4 慢或不合作的依赖
 
-慢 sink、忽略取消的 provider/tool/hook 仍可能使 run 等待；这属于既有协作式取消与同步事件投递契约。Wave 5 不新增超时、强杀或重试策略。
+慢 sink、忽略取消的 provider/tool/hook 仍可能使 run 等待；这属于既有协作式取消与同步事件投递契约。本方案不新增超时、强杀或重试策略。
 
 ## 10. 取消语义
 
@@ -415,7 +415,7 @@ completion drain 记录第一个未归一异常：
 3. 在没有基础设施失败的 cooperative cancellation 路径中，已经 `ToolStarted` 且完成 prepare 的 entry 必须结算；即使取消发生在统一提交前，也仍以已取消的 `CancellationSignal` 进入 execute/finalize，使工具有机会协作结束。
 4. 已产生的 immediate outcome 已经完成，无需重复处理。
 5. 所有 started entries settle 后，outcome 仍按其 source index 写回。
-6. 批次 `TurnCompleted` 后由既有 cancellation boundary 生成后续 `ABORTED` assistant；Wave 5 不提前篡改该生命周期。
+6. 批次 `TurnCompleted` 后由既有 cancellation boundary 生成后续 `ABORTED` assistant；并行调度不提前篡改该生命周期。
 
 这一区分避免两类错误：
 
@@ -527,7 +527,7 @@ ToolStarted(c2)
 
 - `agent-core/src/test/java/site/pplee/jcode/agentcore/ParallelToolOrderingTest.java`
 
-该类集中表达 Wave 5 的双排序与并发结算契约，避免继续膨胀 `AgentLoopTest` 和 `ToolPipelineTest`。
+该类集中表达并行双排序与并发结算契约，避免继续膨胀 `AgentLoopTest` 和 `ToolPipelineTest`。
 
 必要时小幅修改：
 
@@ -562,7 +562,7 @@ ToolStarted(c2)
 
 ## 14. 非目标
 
-本波次不实现：
+本方案不实现：
 
 - 新的 `AgentEvent` 变体或事件重命名；
 - provider adapter、认证、Session、Compaction、Extension、Skill 或具体 coding 工具；
@@ -582,7 +582,7 @@ ToolStarted(c2)
 1. 在 `docs/architecture/src/00-overview.md` 的工具执行路径中解释双排序服务的两个消费者：
    - UI 使用完成顺序事件；
    - 模型、存储和回放使用源顺序 transcript。
-2. 更新根 `AGENTS.md` 的 Wave 进度为 Wave 0-5 完成。
+2. 更新根 `AGENTS.md`，记录稳定内核已包含并行工具双排序。
 3. 更新 `agent-core/AGENTS.md`：
    - parallel prepare/start 源顺序；
    - execute/finalize 并行；
@@ -593,7 +593,7 @@ ToolStarted(c2)
    - prepare/submit 失败状态机；
    - drain-before-rethrow；
    - 事件 sink 的跨线程调用契约。
-4. 将本文状态改为“已完成”，并移动到 `docs/plans/archived/wave5-parallel-tool-ordering.md`。
+4. 将本文状态改为“已完成并归档”，并移动到 `docs/plans/archived/parallel-tool-ordering.md`。
 
 ## 16. 验证
 

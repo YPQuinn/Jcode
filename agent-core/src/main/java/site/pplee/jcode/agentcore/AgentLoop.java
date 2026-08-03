@@ -38,7 +38,7 @@ import java.util.concurrent.ExecutorService;
  * sequential/parallel dispatch, ordered result write-back, LENGTH truncation
  * protection, steering/follow-up queues, and cancellation boundaries.
  *
- * <p>Tool pipeline (Wave 2):
+ * <p>Tool pipeline:
  * <ul>
  *   <li><b>prepare</b>: find tool → prepareArguments → schema validate → beforeToolCall
  *   <li><b>execute</b>: tool.execute with ToolUpdateSink; exceptions → error result;
@@ -46,7 +46,7 @@ import java.util.concurrent.ExecutorService;
  *   <li><b>finalize</b>: afterToolCall field-level patch → generate transcript message
  * </ul>
  *
- * <p>Parallel tool batches (Wave 5): the serial prepare pass ({@code ToolStarted}
+ * <p>For parallel tool batches, the serial prepare pass ({@code ToolStarted}
  * plus the full prepare phase) runs in tool-call source order; execute and
  * finalize run concurrently; {@code ToolCompleted} events are emitted in
  * completion order while tool-result messages are written back in source order.
@@ -73,8 +73,8 @@ import java.util.concurrent.ExecutorService;
  * Cancellation is checked after transform and after project so a cancelled run
  * does not invoke the projector or model unnecessarily.
  *
- * <p>Next-turn control (Wave 4): after each normal turn's {@code TurnCompleted}
- * has been emitted and awaited, the loop runs {@link PrepareNextTurn}, applies
+ * <p>After each normal turn's {@code TurnCompleted} has been emitted and
+ * awaited, the loop runs {@link PrepareNextTurn}, applies
  * the returned update to the run-local state, then runs
  * {@link ShouldStopAfterTurn} before draining the steering/follow-up queues.
  * Hook failures are normalized into a synthetic terminal turn; terminal
@@ -173,7 +173,7 @@ final class AgentLoop {
                 recordOutcomes(state, events, outcomes);
                 events.emit(new AgentEvent.TurnCompleted(assistantMessage, toolResultMessagesOf(outcomes)));
 
-                // Wave 4 next-turn control. Strict order after TurnCompleted:
+                // Strict next-turn control order after TurnCompleted:
                 // PrepareNextTurn -> apply update -> ShouldStopAfterTurn
                 // -> steering drain -> follow-up drain.
                 if (cancellation.isCancelled()) {

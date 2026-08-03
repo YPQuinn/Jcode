@@ -58,8 +58,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Wave 5 parallel tool ordering contract tests: serial prepare in source
- * order, concurrent execute/finalize, completion-order {@code ToolCompleted}
+ * Parallel tool ordering contract tests: serial prepare in source order,
+ * concurrent execute/finalize, completion-order {@code ToolCompleted}
  * events, source-order transcript write-back, accepted-update draining,
  * interrupt/delivery-failure drain semantics, the prepare/submit
  * infrastructure failure state machine, the failure normalization matrix,

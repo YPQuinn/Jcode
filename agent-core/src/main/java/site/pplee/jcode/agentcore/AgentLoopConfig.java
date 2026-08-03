@@ -26,11 +26,11 @@ import java.util.Objects;
  * {@link ModelClient} seam — no provider SDK. Streaming deltas flow through
  * {@link site.pplee.jcode.ai.stream.AssistantMessageStream}.
  *
- * <p>Context projection (Wave 3): {@link ContextTransformer} runs first
- * (async, cancellation-aware), then {@link MessageProjector} (sync), before
- * every {@code ModelRequest}. Both default to identity/standard when null.
+ * <p>For context projection, {@link ContextTransformer} runs first (async,
+ * cancellation-aware), then {@link MessageProjector} (sync), before every
+ * {@code ModelRequest}. Both default to identity/standard when null.
  *
- * <p>Next-turn control (Wave 4): {@code thinkingLevel} is the run's initial
+ * <p>For next-turn control, {@code thinkingLevel} is the run's initial
  * thinking preference, {@code prepareNextTurn} and {@code shouldStopAfterTurn}
  * are invoked between turns after {@code TurnCompleted}. The config stays
  * immutable; per-turn updates live in {@link LoopState}.
