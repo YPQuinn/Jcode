@@ -22,31 +22,29 @@ import java.util.Objects;
  *     └── coding-agent 自己定义的消息类型
  * </pre>
  */
-public final class StandardAgentMessage implements AgentMessage {
-    private final Message message;
-
+public record StandardAgentMessage(Message message) implements AgentMessage {
     public StandardAgentMessage(Message message) {
         this.message = Objects.requireNonNull(message, "message must not be null");
     }
 
-    /** Convenience: wrap a standard {@link Message}. */
+    /**
+     * Convenience: wrap a standard {@link Message}.
+     */
     public static StandardAgentMessage of(Message message) {
         return new StandardAgentMessage(message);
     }
 
-    /** The wrapped standard {@link Message}. */
+    /**
+     * The wrapped standard {@link Message}.
+     */
+    @Override
     public Message message() {
         return message;
     }
 
     @Override
     public boolean equals(Object o) {
-        return o instanceof StandardAgentMessage s && message.equals(s.message);
-    }
-
-    @Override
-    public int hashCode() {
-        return message.hashCode();
+        return o instanceof StandardAgentMessage(Message message1) && message.equals(message1);
     }
 
     @Override
