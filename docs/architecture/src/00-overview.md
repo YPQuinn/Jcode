@@ -64,6 +64,7 @@ Jcode 的核心抽象可以按职责分成四组。
 | `ModelClient` | 模型调用 SPI，负责发起流式请求 |
 | `ModelRequest` | 一次模型请求的边界对象 |
 | `Model` / `ModelRef` | 模型身份描述 |
+| `ThinkingLevel` | provider-neutral 思考强度请求值 |
 | `Message` / `Content` | 标准 LLM transcript 类型 |
 | `StopReason` / `Usage` | 模型完成原因与用量信息 |
 | `AssistantMessageEvent` | assistant 流式输出事件 |
@@ -84,6 +85,9 @@ Jcode 的核心抽象可以按职责分成四组。
 | `AgentContext` | 不可变 transcript 与工具上下文 |
 | `ContextTransformer` | 模型调用前的异步消息裁剪与注入 seam |
 | `MessageProjector` | 模型调用前的同步标准消息投影 seam |
+| `PrepareNextTurn` | turn 间替换 context/model/thinking 的 hook |
+| `ShouldStopAfterTurn` | turn 后优雅停止 hook |
+| `TurnContext` / `NextTurnUpdate` | turn 快照与 next-turn 补丁 |
 | `AgentLoop` | package-private 的运行循环主干 |
 | `LoopState` | 一次 run 内部唯一可变状态 |
 | `LoopResult` | 一次 run 的结束结果 |
@@ -167,6 +171,7 @@ AssistantMessageStream
 5. 如果 assistant message 包含 tool call，runtime 进入工具管道。
 6. 工具结果被转成标准 tool result message 后，再写回上下文。
 7. 上下文推进后，runtime 可以继续发起下一轮模型请求。
+8. 每个正常 turn 结束后，`PrepareNextTurn` 可以先替换下一轮的 context/model/thinking，`ShouldStopAfterTurn` 再决定是否优雅停止；两者都发生在 steering/follow-up 队列消费之前。
 
 ## 贯穿代码的设计思想
 

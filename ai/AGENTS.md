@@ -7,7 +7,8 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 | 任务 | 位置 |
 |------|------|
 | 接入 model provider | `client/ModelClient.java`（SPI，`stream()` 返回 `AssistantMessageStream`） |
-| 模型调用请求 | `client/ModelRequest.java`（model + systemPrompt + messages + tools） |
+| 模型调用请求 | `client/ModelRequest.java`（model + systemPrompt + messages + tools + thinkingLevel） |
+| 思考级别 | `model/ThinkingLevel.java`（PROVIDER_DEFAULT/OFF/MINIMAL/LOW/MEDIUM/HIGH/XHIGH/MAX 绝对请求值） |
 | 模型身份 | `model/ModelRef.java`（provider/api/modelId 三维度轻量引用）/ `Model.java`（含 name） |
 | 标准 LLM 消息 | `message/Message.java`（sealed：User/Assistant/ToolResultMessage） |
 | 消息内容块 | `message/Content.java`（sealed：Text/Thinking/ToolCall） |
@@ -29,6 +30,7 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 - `ToolSpec` 只携带可声明形状（给模型看）；执行能力在 `agent-core.AgentTool`。
 - 所有 list 在 compact constructor 执行 `List.copyOf()`。
 - `ModelRequest` 只携带 `ai` 类型，不含 `AgentMessage` 或可执行工具。
+- `ModelRequest` 携带绝对 `ThinkingLevel`：`PROVIDER_DEFAULT` 表示 adapter 不主动指定思考参数；`OFF` 明确请求关闭；其余为 provider-neutral 相对强度。厂商映射与不支持值的处理由 adapter 负责，通过流错误协议表达。
 
 ## ANTI-PATTERNS
 

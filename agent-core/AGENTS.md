@@ -28,6 +28,9 @@
 | 取消 | `concurrent/CancellationSource.java`（`signal()` 返回私有 `SignalView`，不可 cast 回） |
 | 消息桥接 | `message/StandardAgentMessage.java`（包装 `ai.Message` 进开放 `AgentMessage`） |
 | Context 投影 | `message/ContextTransformer.java`（异步 transform seam，默认 identity）→ `message/MessageProjector.java`（同步 project seam，默认 standard） |
+| turn 间更新 | `turn/PrepareNextTurn.java`（默认 noop）→ `turn/NextTurnUpdate.java`（Optional 补丁，替换 context/model/thinking） |
+| 优雅停止 | `turn/ShouldStopAfterTurn.java`（Decision CONTINUE/STOP，默认 never） |
+| turn 快照 | `turn/TurnContext.java`（assistant + 源顺序 toolResults + context + newMessages） |
 | 工具管道契约测试 | `src/test/.../ToolPipelineTest`（schema/before/after/update/settle/ToolUpdate 阻塞语义） |
 | 流式事件契约测试 | `src/test/.../StreamingEventTest`（text/thinking/toolcall start-delta-end 顺序、状态归约、provider 错误） |
 | Context 投影契约测试 | `src/test/.../ContextProjectionTest`（transform-before-project、每轮重复、transcript 隔离、失败归一、取消） |
@@ -47,9 +50,10 @@
   - finalize：`AfterToolCall.afterToolCall` → 生成 `Message.ToolResultMessage`
 - `terminate` 仅存在于运行时 `ToolExecutionResult`；`Message.ToolResultMessage` 不含 terminate 字段。
 - 工具参数用共享 `ObjectMapper.treeToValue(arguments, argumentType())`；转换失败转 error result。
-- 默认值：`toolExecution=PARALLEL`、`beforeToolCall=noop()`、`afterToolCall=noop()`、`contextTransformer=identity()`、`messageProjector=standard()`、`events=RunEventEmitter.noop()`、`steeringMode/followUpMode=ONE_AT_A_TIME`。
+- 默认值：`toolExecution=PARALLEL`、`beforeToolCall=noop()`、`afterToolCall=noop()`、`contextTransformer=identity()`、`messageProjector=standard()`、`events=RunEventEmitter.noop()`、`steeringMode/followUpMode=ONE_AT_A_TIME`、`thinkingLevel=PROVIDER_DEFAULT`、`prepareNextTurn=noop()`、`shouldStopAfterTurn=never()`。
 - 消息事件序列：用户/toolResult 消息发 `MessageStarted → MessageCompleted`；assistant 消息发 `MessageStarted → MessageUpdated... → MessageCompleted`。
 - Context 投影（Wave 3）：每次模型调用前在 `AgentLoop.invokeModelSafely()` 中依次执行 `ContextTransformer`（异步，`.toCompletableFuture().join()` 等待）→ `List.copyOf` 校验 → 取消检查 → `MessageProjector`（同步）→ `List.copyOf` 校验 → 取消检查 → `ModelRequest`。投影输出是 request-only 局部变量，不写回 `LoopState`/`AgentContext`/`LoopResult.newMessages`/事件。transformer 裁剪/注入的消息只影响当前请求。回调失败（同步抛异常、exceptional stage、null 输出）归一为 terminal `ERROR`（取消时 `ABORTED`）assistant，model 不被调用，run future 正常完成。
+- 下一 Turn 控制（Wave 4）：严格顺序为 `TurnCompleted` → `PrepareNextTurn`（pre-update 快照）→ 校验 → 取消检查 → 原子应用 update 到 `LoopState` → `ShouldStopAfterTurn`（post-update 快照）→ 取消检查 → steering drain → follow-up drain。`NextTurnUpdate` 的 `Optional.empty()` 表示保持；thinking 三态为 KEEP / `PROVIDER_DEFAULT`（重置）/ 绝对级别。`STOP` 不 drain 队列、不改 assistant stop reason、不强制额外 model call；cancellation 优先于 STOP。`ModelRequest` 从 `LoopState` 读 model/thinkingLevel。hook 失败（同步抛/exceptional/null stage/result/decision）合成终止 turn：`TurnStarted → MessageStarted → MessageCompleted → TurnCompleted → AgentCompleted`，run future 正常完成；sink 异常仍传播。terminal model ERROR/ABORTED 跳过 turn hooks。
 
 ## ANTI-PATTERNS
 

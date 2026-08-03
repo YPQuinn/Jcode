@@ -45,3 +45,5 @@ build/
 .claude
 .codex
 .gemini
+.pi
+.pi-subagents

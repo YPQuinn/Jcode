@@ -10,6 +10,7 @@ import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.Model;
 import site.pplee.jcode.ai.model.ModelRef;
+import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -114,6 +115,18 @@ class AiModuleTest {
         assertEquals(1, req.tools().size());
         assertThrows(UnsupportedOperationException.class, () -> req.messages().add(messages.get(0)));
         assertThrows(UnsupportedOperationException.class, () -> req.tools().add(tools.get(0)));
+    }
+
+    @Test
+    void modelRequestCarriesAbsoluteThinkingLevel() {
+        var defaultRequest = new ModelRequest(REF, "sys", List.of(), List.of());
+        var highRequest = new ModelRequest(
+                REF, "sys", List.of(), List.of(), ThinkingLevel.HIGH);
+
+        assertEquals(ThinkingLevel.PROVIDER_DEFAULT, defaultRequest.thinkingLevel());
+        assertEquals(ThinkingLevel.HIGH, highRequest.thinkingLevel());
+        assertThrows(NullPointerException.class,
+                () -> new ModelRequest(REF, "sys", List.of(), List.of(), null));
     }
 
     @Test

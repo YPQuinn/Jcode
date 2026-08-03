@@ -21,7 +21,8 @@ public interface ModelClient {
      * Start a model response stream. The returned stream is ready for
      * immediate consumption via {@link AssistantMessageStream#take()}.
      *
-     * @param request      provider-neutral request (model, system prompt, standard messages, tool specs)
+     * @param request      provider-neutral request (model, system prompt, standard messages,
+ *                     tool specs, thinking level)
      * @param cancellation read-only cancellation signal; honored on a best-effort basis
      * @return a stream of assistant message events terminating in Done or Error
      */
