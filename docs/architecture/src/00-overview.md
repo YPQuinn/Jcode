@@ -123,6 +123,8 @@ Jcode 的状态不是由 UI 或调用方临时拼出来的，而是由 runtime �
 
 工具调用并不是“模型说调用就直接调用”。Jcode 把工具生命周期固定为 prepare、execute、finalize 三个阶段，由 runtime 统一保证顺序、校验、hook 和结果写回。
 
+并行工具批次使用双排序契约：`ToolStarted` 与完整 prepare 阶段（参数准备、schema 校验、before hook、类型转换）严格按 tool call 的源顺序串行执行；execute 与 finalize 并行运行；`ToolCompleted` 事件按实际完成顺序由 loop 线程串行投递，让 UI 尽快看到完成结果；而 tool-result 消息事件、context transcript、下一次模型请求与 `TurnCompleted.toolResults` 始终按源顺序写回，保证模型与存储看到确定的 transcript。事件投递失败、executor 拒绝等基础设施失败不归一为工具错误：已提交任务先全部结算，再传播首个异常，未提交的调用不会执行。
+
 ## 一次 Agent 运行的主路径
 
 从外部看，一次运行通常从 `Agent.prompt()` 开始：

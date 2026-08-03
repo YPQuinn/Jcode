@@ -39,6 +39,9 @@ build/
 ### Mac OS ###
 .DS_Store
 
+### Maven tmpdir side effect (non-Windows) ###
+/C:/
+
 ### AI ###
 .omo
 .agents

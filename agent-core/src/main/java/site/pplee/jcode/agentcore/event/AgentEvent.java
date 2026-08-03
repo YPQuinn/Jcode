@@ -13,7 +13,16 @@ import java.util.Objects;
 
 /**
  * Sealed lifecycle event emitted through {@link AgentEventSink}. The loop
- * waits for each emit to complete, so observers see a deterministic order.
+ * awaits each emit before proceeding, so lifecycle events are observed in a
+ * deterministic order. With parallel tool execution, {@link ToolUpdate}
+ * events are emitted by tool worker threads and may interleave with
+ * lifecycle events emitted by the loop thread; while a tool call settles
+ * normally the runtime guarantees its per-tool lifecycle
+ * ({@link ToolStarted} → {@link ToolUpdate}… → {@link ToolCompleted}) and
+ * completion-order {@link ToolCompleted} delivery, but not a global order
+ * across concurrent tool updates. An infrastructure failure (for example an
+ * event delivery failure) may abort a per-tool lifecycle after
+ * {@link ToolStarted} without a {@link ToolCompleted}.
  * <p>Streaming deltas are delivered through {@link MessageUpdated} events,
  * which carry the low-level {@link AssistantMessageEvent} from the model
  * stream. The full sequence for an assistant message is
@@ -61,7 +70,11 @@ public sealed interface AgentEvent
         }
     }
 
-    /** A tool is about to execute. */
+    /**
+     * A tool call has entered the prepare phase. Emitted by the loop thread
+     * in tool-call source order; the call may still fail preparation and
+     * never execute.
+     */
     record ToolStarted(Content.ToolCall call) implements AgentEvent {
         public ToolStarted {
             Objects.requireNonNull(call, "call must not be null");
@@ -76,7 +89,14 @@ public sealed interface AgentEvent
         }
     }
 
-    /** A tool finished and its result was appended. */
+    /**
+     * A tool finished. In a parallel batch, {@code ToolCompleted} events are
+     * emitted by the loop thread in actual completion order; the transcript
+     * tool-result message is appended later, in source order. For a single
+     * tool call the lifecycle is {@link ToolStarted} → {@link ToolUpdate}… →
+     * {@link ToolCompleted} while the call settles normally; an
+     * infrastructure failure may end the lifecycle earlier.
+     */
     record ToolCompleted(Message.ToolResultMessage result) implements AgentEvent {
         public ToolCompleted {
             Objects.requireNonNull(result, "result must not be null");

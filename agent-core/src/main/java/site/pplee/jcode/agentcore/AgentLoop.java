@@ -46,6 +46,11 @@ import java.util.concurrent.ExecutorService;
  *   <li><b>finalize</b>: afterToolCall field-level patch → generate transcript message
  * </ul>
  *
+ * <p>Parallel tool batches (Wave 5): the serial prepare pass ({@code ToolStarted}
+ * plus the full prepare phase) runs in tool-call source order; execute and
+ * finalize run concurrently; {@code ToolCompleted} events are emitted in
+ * completion order while tool-result messages are written back in source order.
+ *
  * <p>{@code terminate} is tracked on the runtime {@link ToolExecutionResult} only;
  * the standard {@link Message.ToolResultMessage} transcript carries no
  * terminate flag.

@@ -53,7 +53,7 @@ public final class Agent implements AutoCloseable {
     private final AtomicReference<ActiveRun> activeRun = new AtomicReference<>(null);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private volatile AgentContext context;
-    private volatile AgentState state;
+    private final AtomicReference<AgentState> state;
 
     public Agent(AgentConfig config) {
         this.config = Objects.requireNonNull(config, "config must not be null");
@@ -62,7 +62,7 @@ public final class Agent implements AutoCloseable {
         this.steeringQueue = new PendingMessageQueue(this.config.steeringMode());
         this.followUpQueue = new PendingMessageQueue(this.config.followUpMode());
         this.context = this.config.initialContext();
-        this.state = AgentState.initial(this.context);
+        this.state = new AtomicReference<>(AgentState.initial(this.context));
     }
 
     /** Start a new run with a user message; fails if a run is already active. */
@@ -101,7 +101,7 @@ public final class Agent implements AutoCloseable {
 
     /** Real-time agent state snapshot; updated before each event reaches the user sink. */
     public AgentState state() {
-        return state;
+        return state.get();
     }
 
     /** True while a run is active. */
@@ -166,35 +166,14 @@ public final class Agent implements AutoCloseable {
                 future.completeExceptionally(new IllegalStateException("no messages to continue from"));
                 return future;
             }
-            var last = snapshot.messages().get(snapshot.messages().size() - 1);
+            var last = snapshot.messages().getLast();
             if (isStandardAssistant(last)) {
                 activeRun.compareAndSet(run, null);
                 future.completeExceptionally(new IllegalStateException("last message is assistant; use prompt() instead"));
                 return future;
             }
-        }        var reducerSink = new AgentEventSink() {
-            @Override
-            public CompletionStage<Void> emit(AgentEvent event) {
-                reduceState(event);
-                return config.eventSink().emit(event);
-            }
-        };
-        var loopConfig = new AgentLoopConfig(
-                config.model(),
-                config.modelClient(),
-                config.objectMapper(),
-                config.contextTransformer(),
-                config.messageProjector(),
-                config.toolExecution(),
-                config.beforeToolCall(),
-                config.afterToolCall(),
-                steeringQueue,
-                followUpQueue,
-                new RunEventEmitter(reducerSink),
-                config.thinkingLevel(),
-                config.prepareNextTurn(),
-                config.shouldStopAfterTurn()
-        );
+        }
+        var loopConfig = getLoopConfig();
         try {
             executor.execute(() -> {
                 LoopResult result = null;
@@ -211,8 +190,9 @@ public final class Agent implements AutoCloseable {
                 }
                 // Reset streaming state: streaming=false, clear streamingMessage/pendingToolCalls.
                 // Preserve errorMessage from the reducer on success; clear on failure.
-                state = new AgentState(context, false, null, Set.of(),
-                        failure == null ? state.errorMessage() : null);
+                final Throwable runFailure = failure;
+                state.updateAndGet(current -> new AgentState(context, false, null, Set.of(),
+                        runFailure == null ? current.errorMessage() : null));
                 // clear ref → complete future. isRunning() flips to false before the
                 // caller's thenAccept fires.
                 activeRun.compareAndSet(run, null);
@@ -232,13 +212,49 @@ public final class Agent implements AutoCloseable {
         return future;
     }
 
+    private AgentLoopConfig getLoopConfig() {
+        var reducerSink = new AgentEventSink() {
+            @Override
+            public CompletionStage<Void> emit(AgentEvent event) {
+                reduceState(event);
+                return config.eventSink().emit(event);
+            }
+        };
+        return new AgentLoopConfig(
+                config.model(),
+                config.modelClient(),
+                config.objectMapper(),
+                config.contextTransformer(),
+                config.messageProjector(),
+                config.toolExecution(),
+                config.beforeToolCall(),
+                config.afterToolCall(),
+                steeringQueue,
+                followUpQueue,
+                new RunEventEmitter(reducerSink),
+                config.thinkingLevel(),
+                config.prepareNextTurn(),
+                config.shouldStopAfterTurn()
+        );
+    }
+
     /**
      * Event reducer: update {@link #state} based on the event, BEFORE the
      * user's sink sees it. Called by the internal reducer sink wrapper.
+     *
+     * <p>The reduction is a CAS loop over the immutable {@link AgentState}
+     * snapshot: tool worker threads reduce {@code ToolUpdate} events
+     * concurrently with the loop thread reducing lifecycle events, and the
+     * atomic update prevents lost pending-tool-call updates. Only the
+     * reduction is atomic; the user sink is invoked after the CAS settles and
+     * never while holding a lock.
      */
     private void reduceState(AgentEvent event) {
-        var current = state;
-        state = switch (event) {
+        state.updateAndGet(current -> reduce(current, event));
+    }
+
+    private static AgentState reduce(AgentState current, AgentEvent event) {
+        return switch (event) {
             case AgentEvent.AgentStarted ignored -> new AgentState(
                     current.context(), true, null, Set.of(), null);
             case AgentEvent.TurnStarted ignored -> current;

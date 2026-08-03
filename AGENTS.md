@@ -57,7 +57,7 @@ Jcode/
 - 显式装配：provider/工具/hook 通过构造参数传入；禁止静态可变注册表、禁止 `ServiceLoader` 扫描、禁止 classpath 自动注册。
 - 公开类型不可变；一次 run 的可变状态仅存在于 package-private `LoopState`。
 - `ModelClient.stream()` 返回 `AssistantMessageStream`；adapter 不得同步抛，成功/错误/取消均通过 `Done`/`Error` 事件产生最终 `Message.Assistant`。
-- `Agent` 内部包装用户 `AgentEventSink` 为归约 sink：先更新 `volatile AgentState`，再委托用户 sink。用户 sink 看到事件时状态已完成归约。
+- `Agent` 内部包装用户 `AgentEventSink` 为归约 sink：先以 `AtomicReference<AgentState>` + CAS 更新 AgentState，再委托用户 sink。用户 sink 看到事件时状态已完成归约。
 - 流式消费：`AgentLoop.consumeStream()` 在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终消息。partial 不进入 context。
 - Context 投影（Wave 3）：每次模型调用前依次执行 `ContextTransformer`（异步、取消感知）→ `MessageProjector`（同步），只生成本次请求视图，不修改 transcript。transformer 裁剪/注入的消息不进入 context、`LoopResult.newMessages` 或事件。回调失败归一为 terminal `ERROR`/`ABORTED` assistant，不使 run future 异常失败。取消在 transform 后和 project 后各检查一次。
 - 下一 Turn 控制（Wave 4）：每个正常 turn 的 `TurnCompleted` 之后依次执行 `PrepareNextTurn`（替换 context/model/thinking，Optional 空值表示保持）→ 原子应用 → `ShouldStopAfterTurn`（STOP 优雅停止，不改 stop reason、不 drain steering/follow-up）→ steering drain → follow-up drain。hook 失败归一为 terminal `ERROR`/`ABORTED` assistant；terminal model failure 跳过 hook；model/thinking 更新仅影响当前 run 后续 turn，context 替换持久到 `Agent.context()`。`ModelRequest` 携带绝对 `ThinkingLevel`（`PROVIDER_DEFAULT` 表示 adapter 不主动指定）。
@@ -99,6 +99,9 @@ Jcode/
 - `ToolUpdateSink` settle 后的迟到 update 被静默丢弃。
 - `LENGTH` 响应中的 tool call 全部转 failure，禁止执行。
 - 任一工具声明 `SEQUENTIAL`，整批按原顺序执行。
+- 并行批次中 `ToolStarted` 与 prepare 按源顺序串行；`ToolCompleted` 按实际完成顺序由 loop 线程投递；tool-result 消息、context、`TurnCompleted.toolResults` 按源顺序写回。
+- prepare 失败（未知工具/schema/before hook/参数转换）在 prepare pass 当场发 error `ToolCompleted`，不执行工具。
+- 事件投递失败/executor 拒绝/中断等基础设施失败不归一为 tool error：已提交任务先 drain 再传播首个异常，未提交 entry 不执行；已接纳的 `ToolUpdate` 在 finalize 前投递完成。
 - 并行结果必须恢复为原 tool-call 顺序后写回上下文。
 - `terminate` 不进入标准 LLM transcript。
 
@@ -148,7 +151,7 @@ mdbook serve docs/architecture --open
 - 无 CI 配置（无 `.github/workflows`/`Jenkinsfile`）。
 - jdtls（Java LSP）未安装；codegraph 未索引（`.codegraph/` 存在但未 `codegraph init`）。
 - 未来模块规划（未创建）：`coding-agent`、`ai-provider-openai/anthropic/google`、`server`、`tui`。创建门槛见 `docs/plans/pi-inspired-module-boundaries.md` §3.6。
-- Wave 进度：Wave 0（模块 seam）✓、Wave 1（流式协议）✓、Wave 2（工具三阶段执行）✓、Wave 3（Context 投影）✓、Wave 4（下一 Turn 控制）✓ 已完成；Wave 5（并行双排序）见 `docs/architecture` §5。
+- Wave 进度：Wave 0（模块 seam）✓、Wave 1（流式协议）✓、Wave 2（工具三阶段执行）✓、Wave 3（Context 投影）✓、Wave 4（下一 Turn 控制）✓、Wave 5（并行工具双排序）✓ 全部完成。
 
 ## Must Do After Change
 
