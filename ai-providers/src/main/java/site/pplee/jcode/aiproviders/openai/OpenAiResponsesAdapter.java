@@ -165,10 +165,7 @@ final class OpenAiResponsesAdapter implements AutoCloseable {
                 fail(stream, StopReason.ERROR, "stream ended ([DONE]) before terminal response", mapper.content());
             }
             return;
-        } catch (SseFormatException e) {
-            fail(stream, StopReason.ERROR, e.getMessage(), mapper.content());
-            return;
-        } catch (MappingException e) {
+        } catch (SseFormatException | MappingException e) {
             fail(stream, StopReason.ERROR, e.getMessage(), mapper.content());
             return;
         } catch (TerminalPushedException e) {
