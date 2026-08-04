@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-08-03 16:04 CST
-**Commit:** 3e46520
+**Generated:** 2026-08-04 15:08 CST
+**Commit:** 8d15c8e
 **Branch:** master  
 
 ## OVERVIEW
@@ -12,7 +12,7 @@ Java 21 多模块 Maven monorepo。`ai` 是 provider-neutral 模型调用协议�
 
 ```
 Jcode/
-├── pom.xml              # 聚合 reactor: ai -> agent-core; enforcer 强制模块边界
+├── pom.xml              # 聚合 reactor: ai -> ai-providers -> agent-core; enforcer 强制模块边界
 ├── .mvn/jvm.config      # -Djava.io.tmpdir=C:/Temp/maven (会副作用创建根目录 C:/)
 ├── ai/                  # 模型调用协议层 (零 Jcode 内部依赖)
 │   └── src/main/java/site/pplee/jcode/ai/
@@ -20,8 +20,14 @@ Jcode/
 │       ├── concurrent/  # CancellationSignal 只读取消协议
 │       ├── message/     # Message/Content/StopReason/Usage 标准 LLM 类型
 │       ├── model/       # Model/ModelRef 模型身份 (provider/api/modelId)
-│       ├── stream/     # AssistantMessageEvent (sealed 12 variants) + AssistantMessageStream (push-pull)
+│       ├── provider/    # ModelProvider/Models/DefaultModels/CopyOnWriteModels provider runtime 抽象
+│       ├── stream/     # AssistantMessageEvent (sealed 12 variants) + AssistantMessageStream (push-pull) + AssistantMessageStreams (合成失败流)
 │       └── tool/        # ToolSpec 可声明工具规范
+├── ai-providers/       # 共享的具体 provider 模块 (唯一依赖: ai; 每 provider 一子包, 当前含 openai)
+│   └── src/main/java/site/pplee/jcode/aiproviders/openai/
+│       ├── OpenAiProvider.java          # public provider runtime (implements ai.provider.ModelProvider)
+│       ├── OpenAiProviderConfig.java    # 显式配置 (redacted toString) + OpenAiCredentials/OpenAiModelCapabilities
+│       └── OpenAiResponsesAdapter.java  # package-private Responses HTTP/SSE 流 adapter
 ├── agent-core/          # 通用 Agent Runtime (唯一内部依赖: ai)
 │   └── src/main/java/site/pplee/jcode/agentcore/
 │       ├── Agent.java           # 公开运行门面 (AutoCloseable, 虚拟线程)
@@ -79,7 +85,7 @@ Jcode/
 
 **模块边界（enforcer 强制）：**
 - `ai` 不得依赖 `agent-core` 或任何 Jcode 模块。
-- `agent-core` 仅可依赖 `ai`；禁止依赖 `coding-agent`/`ai-provider-*`/`server`/`tui`（前瞻 guard）。
+- `agent-core` 仅可依赖 `ai`；禁止依赖 `ai-providers`/`coding-agent`/`server`/`tui`（前瞻 guard）。
 - 依赖图必须无环，只能产品层 → 内核层。
 - `message`/`event`/`tool`/`queue`/`concurrent` 是源码包，不是 Maven 模块。
 - 禁止 `common`/`shared` 杂物模块。
@@ -106,7 +112,7 @@ Jcode/
 - `terminate` 不进入标准 LLM transcript。
 
 **ModelClient SPI：**
-- adapter 不得同步抛异常；provider/网络失败编码进 failed `CompletionStage`。
+- adapter 不得同步抛异常；provider/网络失败必须通过返回的 `AssistantMessageStream` 推送 terminal `Error` 事件表达，不使用 failed `CompletionStage` 表示模型调用失败。
 
 **Must-NOT-Have（首批实现）：**
 - 无 Spring Boot/Guice/DI 容器。
@@ -130,6 +136,9 @@ mvn test
 # 单模块测试（agent-core 会自动拉 ai）
 mvn -pl agent-core -am test
 
+# 单模块测试（ai-providers 会自动拉 ai）
+mvn -pl ai-providers -am test
+
 # 单模块测试（ai 独立）
 mvn -pl ai test
 
@@ -150,7 +159,7 @@ mdbook serve docs/architecture --open
 - 无 Maven wrapper（`mvnw`）；用系统 `mvn`。
 - 无 CI 配置（无 `.github/workflows`/`Jenkinsfile`）。
 - jdtls（Java LSP）未安装；codegraph 未索引（`.codegraph/` 存在但未 `codegraph init`）。
-- 未来模块（未创建）：`coding-agent`、`ai-provider-openai/anthropic/google`、`server`、`tui`。仅在出现真实独立使用者或产品入口时创建，不预建空模块。
+- 未来模块（未创建）：`coding-agent`、`server`、`tui`。仅在出现真实独立使用者或产品入口时创建，不预建空模块。未来 provider 实现（anthropic/google 等）不再新建 Maven 模块，而是放入共享模块 `ai-providers` 的子包。
 - `agent-core` 核心基线已包含模块 seam、流式协议、工具三阶段执行、Context 投影、下一 Turn 控制与并行工具双排序；对应实施方案均已归档。
 
 ## Must Do After Change

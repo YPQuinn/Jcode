@@ -12,7 +12,7 @@ import java.util.Objects;
  *
  * <p>Carried in {@link site.pplee.jcode.ai.client.ModelRequest}; a fully
  * resolved {@link Model} is reconstructed by a {@code Provider}/{@code Models}
- * runtime (future {@code ai-provider-*} adapters) and is not needed by the
+ * runtime (in the {@code ai-providers} module) and is not needed by the
  * loop.
  */
 public record ModelRef(

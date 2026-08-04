@@ -4,10 +4,11 @@
 
 Jcode 将「模型调用协议」与「Agent 循环运行时」严格分层：
 
-- `ai`：provider-neutral 的模型调用协议层（零 Jcode 内部依赖）
+- `ai`：provider-neutral 的模型调用协议层（零 Jcode 内部依赖），含 provider runtime 抽象（`ModelProvider`/`Models`）
+- `ai-providers`：共享的具体 provider 模块（唯一内部依赖为 `ai`；每 provider 一子包，当前含 OpenAI Responses API adapter，无第三方 SDK）
 - `agent-core`：通用 Agent Runtime（唯一内部依赖为 `ai`）
 
-当前仓库是**库模块**，不包含 Spring Boot 启动类、CLI、HTTP Server、Session 持久化或具体 provider SDK。
+当前仓库是**库模块**，不包含 Spring Boot 启动类、CLI、HTTP Server、Session 持久化或第三方 provider SDK。
 
 ---
 
@@ -16,7 +17,7 @@ Jcode 将「模型调用协议」与「Agent 循环运行时」严格分层：
 | 类别 | 选型 | 说明 |
 |------|------|------|
 | 语言 / 平台 | Java 21 | `record`、`sealed interface`、模式匹配、虚拟线程 |
-| 构建 | Maven（多模块 reactor） | 根聚合：`ai` → `agent-core` |
+| 构建 | Maven（多模块 reactor） | 根聚合：`ai` → `ai-providers` → `agent-core` |
 | JSON | Jackson Databind `2.18.2` | 工具参数边界使用 `JsonNode` |
 | 工具辅助 | Lombok `1.18.46` | 编译期辅助 |
 | 测试 | JUnit 5 `5.11.4` | 无 Mockito；自定义测试双放 `support/` |

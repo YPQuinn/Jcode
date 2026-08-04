@@ -1,6 +1,6 @@
 # AgentLoop Java 设计感重构：从 TS 直译到 Java 习惯表达
 
-> 状态：重构方案  
+> 状态：已完成并归档
 > Jcode 基线：`c0eda94`（2026-07-30）  
 > 涉及模块：`agent-core`  
 > 路径：L1（纯结构重构）+ L2（抽取 `ToolCallExecutor` 协作对象）

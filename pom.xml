@@ -10,6 +10,7 @@
     <packaging>pom</packaging>
     <modules>
         <module>ai</module>
+        <module>ai-providers</module>
         <module>agent-core</module>
     </modules>
 
@@ -31,9 +32,10 @@
             <!--
               Jcode-internal modules. Declared here so child modules reference
               them by groupId:artifactId without repeating the version. The
-              reactor build order (ai -> agent-core) is fixed in <modules>;
-              the dependency graph itself (ai knows nothing of agent-core;
-              agent-core depends only on ai) is enforced by maven-enforcer
+              reactor build order (ai -> ai-providers -> agent-core) is
+              fixed in <modules>; the dependency graph itself (ai knows nothing
+              of agent-core; agent-core depends only on ai; ai-providers
+              depends only on ai) is enforced by maven-enforcer
               bannedDependencies below.
             -->
             <dependency>
@@ -88,10 +90,12 @@
           Module-boundary guard. The Jcode dependency graph must be acyclic
           and point only from product layer to core layer:
             ai           has NO Jcode-internal dependency
+            ai-providers depends ONLY on ai
             agent-core   depends ONLY on ai
-          Future modules (coding-agent, provider-*) will be added to the
-          excludes as they are created. For now this also forbids agent-core
-          from depending on any not-yet-created coding-agent / ai-provider-*.
+          Future modules (coding-agent, server, tui) will be added to the
+          excludes as they are created. Concrete provider implementations live
+          inside the shared ai-providers module (one sub-package per provider),
+          so the provider forward guard is the ai-providers artifact itself.
         -->
         <plugins>
             <plugin>
@@ -107,11 +111,9 @@
                                     <excludes>
                                         <!-- ai must not depend on agent-core (or any other Jcode module) -->
                                         <exclude>site.pplee:agent-core</exclude>
-                                        <!-- agent-core must not depend on coding-agent / provider adapters / server / tui (forward guard; none exist yet) -->
+                                        <!-- agent-core must not depend on the shared providers module / product modules (forward guard; product modules do not exist yet) -->
+                                        <exclude>site.pplee:ai-providers</exclude>
                                         <exclude>site.pplee:coding-agent</exclude>
-                                        <exclude>site.pplee:ai-provider-openai</exclude>
-                                        <exclude>site.pplee:ai-provider-anthropic</exclude>
-                                        <exclude>site.pplee:ai-provider-google</exclude>
                                         <exclude>site.pplee:server</exclude>
                                         <exclude>site.pplee:tui</exclude>
                                     </excludes>

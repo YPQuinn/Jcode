@@ -18,6 +18,8 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 | 只读取消 | `concurrent/CancellationSignal.java`（isCancelled/throwIfCancelled） |
 | 流式事件协议 | `stream/AssistantMessageEvent.java`（sealed，12 变体：Start/Text/Thinking/ToolCall start-delta-end/Done/Error） |
 | 流式消费契约 | `stream/AssistantMessageStream.java`（push-pull 阻塞队列，`take()` 消费，`result()` 获取最终 Assistant） |
+| provider runtime | `provider/ModelProvider.java`（provider 运行时单元）/ `provider/Models.java`（集合 + ModelClient 路由视图）/ `provider/DefaultModels.java`（不可变集合）/ `provider/CopyOnWriteModels.java`（可变 copy-on-write 集合）/ `provider/ProviderAuth.java` + `AuthCheck`（认证状态，无 secret） |
+| 合成失败流 | `stream/AssistantMessageStreams.java`（`failed(...)` 统一 `Start -> Error` 生命周期） |
 
 ## CONVENTIONS
 
@@ -31,10 +33,13 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 - 所有 list 在 compact constructor 执行 `List.copyOf()`。
 - `ModelRequest` 只携带 `ai` 类型，不含 `AgentMessage` 或可执行工具。
 - `ModelRequest` 携带绝对 `ThinkingLevel`：`PROVIDER_DEFAULT` 表示 adapter 不主动指定思考参数；`OFF` 明确请求关闭；其余为 provider-neutral 相对强度。厂商映射与不支持值的处理由 adapter 负责，通过流错误协议表达。
+- Provider runtime：`Models` 是唯一公开 provider 集合；`DefaultModels` 不可变；`CopyOnWriteModels` 可变（mutation 序列化，`stream()` call-start 快照）。`ModelProvider` 不实现 `ModelClient`；`Models` 实现 `ModelClient` 作为路由视图。`ProviderAuth` 只表达认证状态，不暴露 secrets。
 
 ## ANTI-PATTERNS
 
 - `ModelClient.stream()` 不得同步抛；请求/模型/运行时失败编码进返回的 stream（立即 push `Error` 事件）。
 - `Done` 的 `reason` 不得是 terminal failure（ERROR/ABORTED）；用 `Error` 代替。
 - `Error` 的 `reason` 必须是 terminal failure（ERROR/ABORTED）。
+- `Models.stream()` / `ModelProvider.stream()` 不抛同步 provider/网络异常；unknown provider/unsupported model 用 `AssistantMessageStreams.failed(...)` 生成 `Start -> Error`。
+- provider runtime 不读取环境变量、不使用 `ServiceLoader`/静态注册表。
 - 模块边界与不含类型约束见根 AGENTS.md ANTI-PATTERNS（模块边界节）。

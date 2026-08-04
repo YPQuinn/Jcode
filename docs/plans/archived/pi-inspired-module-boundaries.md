@@ -16,7 +16,7 @@ ai  <-  agent-core  <-  coding-agent  <-  server（需要时再建）
  |          +---------------+
  |               coding-agent 同时直接使用 ai 的模型/消息类型
  |
-ai-provider-*（有真实 provider 后按需创建）
+ai-providers（共享 providers 模块，有真实 provider 后按需创建；每 provider 一子包）
 
 coding-agent  ->  tui（需要终端产品时再建；tui 自身零 Jcode 内部依赖）
 ```
@@ -290,24 +290,23 @@ coding-agent -> tui      # 只有终端产品需要时
 
 这对应 pi-tui 的独立消费者和零内部依赖 [B2][P-PACKAGES]。
 
-## 3.5 `ai-provider-*`：Java 特有的可选 Adapter（未来）
+## 3.5 `ai-providers`：共享的具体 provider 模块（已实施）
 
-pi 通过 provider 子路径、lazy import 和 tree-shaking 避免无关 SDK 被加载 [B4]。Maven 依赖没有相同的 tree-shaking 语义，因此 Java 更适合：
+pi 通过 provider 子路径、lazy import 和 tree-shaking 避免无关 SDK 被加载 [B4]。Maven 依赖没有相同的 tree-shaking 语义；早期设想是每个 provider 一个 Maven 模块（`ai-provider-openai`/`ai-provider-anthropic`/`ai-provider-google`），后续评审改为共享 providers 模块策略：
 
 ```text
-ai-provider-openai     -> ai
-ai-provider-anthropic  -> ai
-ai-provider-google     -> ai
+aiproviders 模块: ai-providers     -> ai
+  子包:         aiproviders.openai -> ai
+                aiproviders.anthropic -> ai
+                aiproviders.google -> ai
 ```
 
 约束：
 
-- 每个 adapter 显式返回 `Provider`；
-- composition root 显式加入 `Models`；
+- 每个 provider 一个子包，不再为每个 provider 新建 Maven 模块；
+- 每个 provider 显式实现 `ModelProvider`，composition root 显式加入 `Models`；
 - 不用静态注册器或隐式 `ServiceLoader` 扫描；
-- 第一个真实 provider 开始实现时再创建，不在本轮创建空模块。
-
-如果将来确实需要“一键启用所有 provider”，再新增只负责显式组装的 `ai-providers-all`；它不是核心依赖。
+- 模块边界由 enforcer 保证 `ai-providers` 只依赖 `ai`，`agent-core` 不得依赖 `ai-providers`。
 
 ## 3.6 其他候选模块的创建门槛
 
@@ -354,7 +353,7 @@ ai-provider-google     -> ai
 2. 新建最小 `ai` 模块，不加入任何 provider SDK。
 3. `agent-core` 增加唯一 Jcode 内部依赖 `ai`。
 4. 按上一节迁移标准模型与调用协议。
-5. 增加构建检查，禁止 `ai -> agent-core` 和 `agent-core -> coding-agent/provider-*`。
+5. 增加构建检查，禁止 `ai -> agent-core` 和 `agent-core -> coding-agent/ai-providers`（后续随共享 provider 模块调整）。
 
 完成标准：现有最小工具闭环迁移后仍通过；仓库中只有一套标准 LLM message 类型。
 
