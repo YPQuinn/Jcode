@@ -40,9 +40,14 @@ public final class FakeOpenAiServer implements AutoCloseable {
 
     private final HttpServer server;
     private final List<CapturedRequest> requests = new CopyOnWriteArrayList<>();
+    private final CountDownLatch requestReceived = new CountDownLatch(1);
+    private final CountDownLatch headersSent = new CountDownLatch(1);
+    private final CountDownLatch bodyClosed = new CountDownLatch(1);
     private volatile List<Chunk> chunks = List.of();
     private volatile int statusCode = 200;
     private volatile String errorBody = "";
+    private volatile CountDownLatch holdBeforeHeaders;
+    private volatile boolean closed;
 
     public FakeOpenAiServer() {
         try {
@@ -72,50 +77,94 @@ public final class FakeOpenAiServer implements AutoCloseable {
         this.chunks = List.copyOf(chunks);
     }
 
+    /**
+     * Hold the handler after the request is captured and before response
+     * headers are written. Tests must not release this latch to prove that
+     * client cancellation aborts {@code sendAsync}.
+     */
+    public void holdBeforeHeaders(CountDownLatch gate) {
+        this.holdBeforeHeaders = gate;
+    }
+
+    /** Signaled once the current request has been captured. */
+    public CountDownLatch requestReceived() {
+        return requestReceived;
+    }
+
+    /** Signaled once HTTP response headers have been sent. */
+    public CountDownLatch headersSent() {
+        return headersSent;
+    }
+
+    /** Signaled once the handler finishes and the response body is closed. */
+    public CountDownLatch bodyClosed() {
+        return bodyClosed;
+    }
+
     /** Requests captured so far. */
     public List<CapturedRequest> requests() {
         return List.copyOf(requests);
     }
 
     private void handle(HttpExchange exchange) throws IOException {
-        var body = exchange.getRequestBody().readAllBytes();
-        requests.add(new CapturedRequest(
-                exchange.getRequestURI().getPath(),
-                Map.copyOf(exchange.getRequestHeaders()),
-                new String(body, StandardCharsets.UTF_8)));
+        try {
+            var body = exchange.getRequestBody().readAllBytes();
+            requests.add(new CapturedRequest(
+                    exchange.getRequestURI().getPath(),
+                    Map.copyOf(exchange.getRequestHeaders()),
+                    new String(body, StandardCharsets.UTF_8)));
+            requestReceived.countDown();
 
-        if (statusCode != 200) {
-            byte[] error = errorBody.getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().set("Content-Type", "application/json");
-            exchange.sendResponseHeaders(statusCode, error.length);
-            try (var os = exchange.getResponseBody()) {
-                os.write(error);
+            CountDownLatch beforeHeaders = holdBeforeHeaders;
+            if (beforeHeaders != null && !awaitGate(beforeHeaders)) {
+                return;
             }
-            return;
-        }
 
-        exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
-        exchange.sendResponseHeaders(200, 0);
-        try (var os = exchange.getResponseBody()) {
-            for (Chunk chunk : chunks) {
-                if (chunk.gate() != null) {
-                    try {
-                        if (!chunk.gate().await(10, TimeUnit.SECONDS)) {
-                            return;
-                        }
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
+            if (statusCode != 200) {
+                byte[] error = errorBody.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(statusCode, error.length);
+                headersSent.countDown();
+                try (var os = exchange.getResponseBody()) {
+                    os.write(error);
+                }
+                return;
+            }
+
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            headersSent.countDown();
+            try (var os = exchange.getResponseBody()) {
+                for (Chunk chunk : chunks) {
+                    if (chunk.gate() != null && !awaitGate(chunk.gate())) {
                         return;
                     }
+                    os.write(chunk.text().getBytes(StandardCharsets.UTF_8));
+                    os.flush();
                 }
-                os.write(chunk.text().getBytes(StandardCharsets.UTF_8));
-                os.flush();
             }
+        } finally {
+            bodyClosed.countDown();
+        }
+    }
+
+    private boolean awaitGate(CountDownLatch gate) {
+        try {
+            while (!closed) {
+                if (gate.await(50, TimeUnit.MILLISECONDS)) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
     @Override
     public void close() {
+        closed = true;
         server.stop(0);
     }
 }

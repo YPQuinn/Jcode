@@ -1,5 +1,7 @@
 package site.pplee.jcode.ai.message;
 
+import site.pplee.jcode.ai.model.ModelRef;
+
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -32,13 +34,16 @@ public sealed interface Message
      * {@code errorMessage} is only allowed when {@link StopReason#isTerminalFailure()}.
      * {@code usage} carries token-usage metadata reported by the provider;
      * use {@link Usage#zero()} when no usage is reported.
+     * {@code sourceModel} is the provider-neutral model that produced this
+     * message; {@code null} means synthetic, legacy, or unknown origin.
      */
     record Assistant(
             List<Content> content,
             StopReason stopReason,
             String errorMessage,
             Usage usage,
-            Instant timestamp
+            Instant timestamp,
+            ModelRef sourceModel
     ) implements Message {
         public Assistant {
             content = List.copyOf(Objects.requireNonNull(content, "content must not be null"));
@@ -52,9 +57,20 @@ public sealed interface Message
             }
         }
 
+        /** Compatibility constructor: assistant with unknown source model. */
+        public Assistant(
+                List<Content> content,
+                StopReason stopReason,
+                String errorMessage,
+                Usage usage,
+                Instant timestamp
+        ) {
+            this(content, stopReason, errorMessage, usage, timestamp, null);
+        }
+
         /** Convenience: an assistant result terminated by {@code stopReason} with no error and zero usage. */
         public static Assistant of(List<Content> content, StopReason stopReason, Instant timestamp) {
-            return new Assistant(content, stopReason, null, Usage.zero(), timestamp);
+            return new Assistant(content, stopReason, null, Usage.zero(), timestamp, null);
         }
     }
 

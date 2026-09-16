@@ -116,6 +116,15 @@ class OpenAiToolCallIdsTest {
     }
 
     @Test
+    void hashedForeignCallIdIsDeterministicAndBounded() {
+        String hashed = OpenAiToolCallIds.hashedForeignCallId("bad id with spaces");
+        assertEquals(hashed, OpenAiToolCallIds.hashedForeignCallId("bad id with spaces"));
+        assertTrue(hashed.startsWith("call_jcode_"));
+        assertTrue(hashed.length() <= 64);
+        assertTrue(OpenAiToolCallIds.isSafeId(hashed));
+    }
+
+    @Test
     void rejectsUnsafeCallIdInsteadOfRoundTripping() {
         assertThrows(IllegalArgumentException.class,
                 () -> OpenAiToolCallIds.encode("call_|:with$special#chars", "fc_99"));

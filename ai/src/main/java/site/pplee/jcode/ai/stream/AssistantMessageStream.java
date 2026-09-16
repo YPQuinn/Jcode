@@ -23,36 +23,40 @@ import java.util.concurrent.LinkedBlockingQueue;
  *       silently ignored.
  * </ul>
  *
- * <p>The stream is safe for single-producer, single-consumer use: one adapter
- * thread pushes events, one loop thread takes them. The internal queue is
- * thread-safe, so multi-producer use is also safe, though ordering across
- * producers is not guaranteed beyond queue FIFO semantics.
+ * <p>The stream is safe for single-consumer use. {@link #push} linearizes
+ * enqueue, the {@code done} flag, and {@link #resultStage()} completion so
+ * concurrent producers admit at most one terminal event and cannot enqueue
+ * a delta after that terminal.
  */
 public final class AssistantMessageStream {
     private final LinkedBlockingQueue<AssistantMessageEvent> queue = new LinkedBlockingQueue<>();
     private final CompletableFuture<Message.Assistant> resultFuture = new CompletableFuture<>();
+    private final Object lock = new Object();
     private volatile boolean done;
 
     /**
      * Push an event. Called by the model adapter (producer side).
      * After a terminal event ({@link AssistantMessageEvent.Done} or
      * {@link AssistantMessageEvent.Error}), subsequent pushes are silently
-     * ignored.
+     * ignored. Checking {@code done}, enqueue, and completing the result
+     * stage are one linearizable step.
      */
     public void push(AssistantMessageEvent event) {
-        if (done) {
-            return;
-        }
-        if (event instanceof AssistantMessageEvent.Done d) {
-            queue.add(event);
-            done = true;
-            resultFuture.complete(d.message());
-        } else if (event instanceof AssistantMessageEvent.Error e) {
-            queue.add(event);
-            done = true;
-            resultFuture.complete(e.error());
-        } else {
-            queue.add(event);
+        synchronized (lock) {
+            if (done) {
+                return;
+            }
+            if (event instanceof AssistantMessageEvent.Done d) {
+                queue.add(event);
+                done = true;
+                resultFuture.complete(d.message());
+            } else if (event instanceof AssistantMessageEvent.Error e) {
+                queue.add(event);
+                done = true;
+                resultFuture.complete(e.error());
+            } else {
+                queue.add(event);
+            }
         }
     }
 

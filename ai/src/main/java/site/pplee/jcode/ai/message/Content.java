@@ -14,17 +14,33 @@ import java.util.Objects;
 public sealed interface Content
         permits Content.Text, Content.Thinking, Content.ToolCall {
 
-    /** Plain text. */
-    record Text(String text) implements Content {
+    /**
+     * Plain text. {@code replayState} is opaque same-model provider state;
+     * {@code null} means there is nothing to replay.
+     */
+    record Text(String text, ModelReplayState replayState) implements Content {
         public Text {
             Objects.requireNonNull(text, "text must not be null");
         }
+
+        /** Compatibility constructor: text with no replay state. */
+        public Text(String text) {
+            this(text, null);
+        }
     }
 
-    /** Model reasoning / thinking trace. */
-    record Thinking(String text) implements Content {
+    /**
+     * Model reasoning / thinking trace. {@code replayState} is opaque
+     * same-model provider state; {@code null} means there is nothing to replay.
+     */
+    record Thinking(String text, ModelReplayState replayState) implements Content {
         public Thinking {
             Objects.requireNonNull(text, "text must not be null");
+        }
+
+        /** Compatibility constructor: thinking text with no replay state. */
+        public Thinking(String text) {
+            this(text, null);
         }
     }
 

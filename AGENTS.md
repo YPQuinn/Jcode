@@ -1,8 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-08-04 15:08 CST
-**Commit:** 8d15c8e
-**Branch:** master  
+**Generated:** 2026-09-16 00:33 PDT
+**Branch:** master
 
 ## OVERVIEW
 
@@ -17,17 +16,20 @@ Jcode/
 ├── ai/                  # 模型调用协议层 (零 Jcode 内部依赖)
 │   └── src/main/java/site/pplee/jcode/ai/
 │       ├── client/      # ModelClient SPI + ModelRequest 边界
-│       ├── concurrent/  # CancellationSignal 只读取消协议
-│       ├── message/     # Message/Content/StopReason/Usage 标准 LLM 类型
+│       ├── concurrent/  # CancellationSignal 只读取消协议 + CancellationRegistration
+│       ├── message/     # Message/Content/StopReason/Usage/ModelReplayState 标准 LLM 类型
 │       ├── model/       # Model/ModelRef 模型身份 (provider/api/modelId)
 │       ├── provider/    # ModelProvider/Models/DefaultModels/CopyOnWriteModels provider runtime 抽象
 │       ├── stream/     # AssistantMessageEvent (sealed 12 variants) + AssistantMessageStream (push-pull) + AssistantMessageStreams (合成失败流)
 │       └── tool/        # ToolSpec 可声明工具规范
 ├── ai-providers/       # 共享的具体 provider 模块 (唯一依赖: ai; 每 provider 一子包, 当前含 openai)
 │   └── src/main/java/site/pplee/jcode/aiproviders/openai/
-│       ├── OpenAiProvider.java          # public provider runtime (implements ai.provider.ModelProvider)
-│       ├── OpenAiProviderConfig.java    # 显式配置 (redacted toString) + OpenAiCredentials/OpenAiModelCapabilities
-│       └── OpenAiResponsesAdapter.java  # package-private Responses HTTP/SSE 流 adapter
+│       ├── OpenAiProvider.java            # public provider runtime (implements ai.provider.ModelProvider)
+│       ├── OpenAiProviderConfig.java      # 显式配置 (redacted toString) + OpenAiCredentials/OpenAiModelCapabilities
+│       ├── OpenAiResponsesAdapter.java    # package-private Responses HTTP/SSE 流 adapter（可中断 ActiveExchange）
+│       ├── OpenAiTranscriptPlanner.java   # package-private transcript 规划（reasoning replay / pairing）
+│       ├── OpenAiReplayStateCodec.java    # package-private opaque replay envelope
+│       └── OpenAiPartialJsonParser.java   # package-private 有界 partial JSON 预览
 ├── agent-core/          # 通用 Agent Runtime (唯一内部依赖: ai)
 │   └── src/main/java/site/pplee/jcode/agentcore/
 │       ├── Agent.java           # 公开运行门面 (AutoCloseable, 虚拟线程)
@@ -50,6 +52,7 @@ Jcode/
 └── docs/
     ├── agents/          # issue tracker、triage 标签与 domain docs 配置
     ├── architecture/    # mdBook 架构解读文档集 (含写作规则 AGENTS.md)
+    ├── issues/          # 本地问题分析与待发布 issue 记录（GitHub Issues 仍为权威 tracker）
     ├── plans/           # 方案文档
     │   └── archived/    # 已归档的过往实现计划，可以参考但不可作为当前的实施规范
     ├── references/      # pi 参考副本 (.gitignored, 不属本仓库规则)
@@ -93,8 +96,8 @@ Jcode/
 
 **并发与取消：**
 - 每个 `Agent` 同时最多一个 active run；并发 `prompt()`/`continueRun()` fail fast。
-- `CancellationSignal` 只读；不得 cast 回 `CancellationSource` 调 `cancel()`。
-- `cancel()` 幂等。
+- `CancellationSignal` 只读；不得 cast 回 `CancellationSource` 调 `cancel()`。`onCancellation` 只观察取消，listener 必须非阻塞。
+- `cancel()` 幂等；listener 最多执行一次，失败不得阻止其他 listener 或让 `cancel()` 失败。
 - 不阻塞轮询、不用 `Thread.sleep()`、不用长期共享无界平台线程池。
 - `AgentEventSink.emit()` 返回的 stage 必须被等待；慢 sink 阻塞 run。`RunEventEmitter` 是唯一等待点——loop 和 `LoopToolUpdateSink` 均通过它投递事件。
 
@@ -161,6 +164,7 @@ mdbook serve docs/architecture --open
 - jdtls（Java LSP）未安装；codegraph 未索引（`.codegraph/` 存在但未 `codegraph init`）。
 - 未来模块（未创建）：`coding-agent`、`server`、`tui`。仅在出现真实独立使用者或产品入口时创建，不预建空模块。未来 provider 实现（anthropic/google 等）不再新建 Maven 模块，而是放入共享模块 `ai-providers` 的子包。
 - `agent-core` 核心基线已包含模块 seam、流式协议、工具三阶段执行、Context 投影、下一 Turn 控制与并行工具双排序；对应实施方案均已归档。
+- OpenAI Responses 正确性首批（OAI-001～OAI-009）已落地：`store:false` reasoning replay、transcript planner、可中断 HTTP/SSE、incomplete 分 reason 映射、stream/event fidelity。方案见 `docs/plans/archived/openai-responses-correctness-first-batch.md`。`Content.ToolCall` 仍走 `oai1:` id 编码，text/thinking 走 `ModelReplayState`；统一到 content replayState 须在引入第二个 provider 前完成。
 
 ## Must Do After Change
 

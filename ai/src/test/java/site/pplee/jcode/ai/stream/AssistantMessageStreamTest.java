@@ -95,6 +95,57 @@ class AssistantMessageStreamTest {
     }
 
     @Test
+    void concurrentTerminalsAdmitExactlyOneAndMatchResult() throws Exception {
+        var stream = new AssistantMessageStream();
+        var done = assistant("done");
+        var error = new Message.Assistant(List.of(),
+                StopReason.ERROR, "boom", site.pplee.jcode.ai.message.Usage.zero(), T1);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var finished = new java.util.concurrent.CountDownLatch(2);
+        Thread.startVirtualThread(() -> {
+            try {
+                start.await();
+                stream.push(new AssistantMessageEvent.Done(StopReason.STOP, done));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                finished.countDown();
+            }
+        });
+        Thread.startVirtualThread(() -> {
+            try {
+                start.await();
+                stream.push(new AssistantMessageEvent.Error(StopReason.ERROR, error));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                finished.countDown();
+            }
+        });
+        start.countDown();
+        assertTrue(finished.await(5, java.util.concurrent.TimeUnit.SECONDS));
+
+        var terminal = stream.take();
+        assertTrue(terminal instanceof AssistantMessageEvent.Done
+                || terminal instanceof AssistantMessageEvent.Error);
+        assertNull(stream.take());
+        assertEquals(terminal.partial(), stream.result());
+    }
+
+    @Test
+    void deltaAfterTerminalIsIgnored() throws InterruptedException {
+        var stream = new AssistantMessageStream();
+        var msg = assistant("hi");
+        stream.push(new AssistantMessageEvent.Start(msg));
+        stream.push(new AssistantMessageEvent.Done(StopReason.STOP, msg));
+        stream.push(new AssistantMessageEvent.TextDelta(0, "later", msg));
+
+        assertInstanceOf(AssistantMessageEvent.Start.class, stream.take());
+        assertInstanceOf(AssistantMessageEvent.Done.class, stream.take());
+        assertNull(stream.take());
+    }
+
+    @Test
     void textDeltaAndThinkingDeltaRejectNullDelta() {
         var msg = assistant("hi");
         assertThrows(NullPointerException.class,

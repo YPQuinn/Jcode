@@ -130,6 +130,37 @@ final class OpenAiToolCallIds {
         return isSafe(itemId) ? itemId : null;
     }
 
+    /** True when {@code id} uses the versioned {@code oai1:} encoding prefix. */
+    static boolean isEncoded(String id) {
+        return id != null && id.startsWith(PREFIX);
+    }
+
+    /** True when {@code id} matches the OpenAI-safe charset and length. */
+    static boolean isSafeId(String id) {
+        return isSafe(id);
+    }
+
+    /**
+     * Deterministic OpenAI-safe call id for a foreign or unsafe raw id.
+     * The same original value always maps to the same 64-character-or-shorter id.
+     */
+    static String hashedForeignCallId(String original) {
+        Objects.requireNonNull(original, "original must not be null");
+        String hex = sha256Hex(original);
+        String hashed = "call_jcode_" + hex;
+        return hashed.length() <= MAX_ID_LENGTH ? hashed : hashed.substring(0, MAX_ID_LENGTH);
+    }
+
+    static String sha256Hex(String value) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(hash);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required", e);
+        }
+    }
+
     private static boolean isSafe(String id) {
         return id != null && SAFE_ID.matcher(id).matches();
     }

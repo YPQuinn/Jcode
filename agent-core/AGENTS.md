@@ -25,7 +25,7 @@
 | 事件投递 | `RunEventEmitter.java`（pkg-private per-run adapter：`void emit(AgentEvent)` 等待 sink 的 `CompletionStage` 完成后再返回；loop 和 `LoopToolUpdateSink` 唯一的事件投递出口） |
 | 生命周期事件 | `event/AgentEvent.java`（sealed，10 个 record：AgentStarted/TurnStarted/MessageStarted/MessageUpdated/MessageCompleted/ToolStarted/ToolUpdate/ToolCompleted/TurnCompleted/AgentCompleted） |
 | steering/follow-up | `queue/PendingMessageQueue.java`（ConcurrentLinkedQueue，`QueueMode` volatile） |
-| 取消 | `concurrent/CancellationSource.java`（`signal()` 返回私有 `SignalView`，不可 cast 回） |
+| 取消 | `concurrent/CancellationSource.java`（`signal()` 返回私有 `SignalView`，不可 cast 回；`onCancellation` 在 `cancel()` 线程同步通知，listener 失败隔离） |
 | 消息桥接 | `message/StandardAgentMessage.java`（包装 `ai.Message` 进开放 `AgentMessage`） |
 | Context 投影 | `message/ContextTransformer.java`（异步 transform seam，默认 identity）→ `message/MessageProjector.java`（同步 project seam，默认 standard） |
 | turn 间更新 | `turn/PrepareNextTurn.java`（默认 noop）→ `turn/NextTurnUpdate.java`（Optional 补丁，替换 context/model/thinking） |
@@ -33,7 +33,7 @@
 | turn 快照 | `turn/TurnContext.java`（assistant + 源顺序 toolResults + context + newMessages） |
 | 工具管道契约测试 | `src/test/.../ToolPipelineTest`（schema/before/after/update/settle/ToolUpdate 阻塞语义）；`ParallelToolOrderingTest`（并行双排序/并发结算/失败状态机/取消） |
 | 流式事件契约测试 | `src/test/.../StreamingEventTest`（text/thinking/toolcall start-delta-end 顺序、状态归约、provider 错误） |
-| Context 投影契约测试 | `src/test/.../ContextProjectionTest`（transform-before-project、每轮重复、transcript 隔离、失败归一、取消） |
+| Context 投影契约测试 | `src/test/.../ContextProjectionTest`（transform-before-project、每轮重复、transcript 隔离、source/replayState 原样进入 ModelRequest、失败归一、取消） |
 
 ## CONVENTIONS
 
@@ -53,7 +53,7 @@
 - 工具参数用共享 `ObjectMapper.treeToValue(arguments, argumentType())`；转换失败转 error result。
 - 默认值：`toolExecution=PARALLEL`、`beforeToolCall=noop()`、`afterToolCall=noop()`、`contextTransformer=identity()`、`messageProjector=standard()`、`events=RunEventEmitter.noop()`、`steeringMode/followUpMode=ONE_AT_A_TIME`、`thinkingLevel=PROVIDER_DEFAULT`、`prepareNextTurn=noop()`、`shouldStopAfterTurn=never()`。
 - 消息事件序列：用户/toolResult 消息发 `MessageStarted → MessageCompleted`；assistant 消息发 `MessageStarted → MessageUpdated... → MessageCompleted`。
-- Context 投影：每次模型调用前在 `AgentLoop.invokeModelSafely()` 中依次执行 `ContextTransformer`（异步，`.toCompletableFuture().join()` 等待）→ `List.copyOf` 校验 → 取消检查 → `MessageProjector`（同步）→ `List.copyOf` 校验 → 取消检查 → `ModelRequest`。投影输出是 request-only 局部变量，不写回 `LoopState`/`AgentContext`/`LoopResult.newMessages`/事件。transformer 裁剪/注入的消息只影响当前请求。回调失败（同步抛异常、exceptional stage、null 输出）归一为 terminal `ERROR`（取消时 `ABORTED`）assistant，model 不被调用，run future 正常完成。
+- Context 投影：每次模型调用前在 `AgentLoop.invokeModelSafely()` 中依次执行 `ContextTransformer`（异步，`.toCompletableFuture().join()` 等待）→ `List.copyOf` 校验 → 取消检查 → `MessageProjector`（同步）→ `List.copyOf` 校验 → 取消检查 → `ModelRequest`。投影输出是 request-only 局部变量，不写回 `LoopState`/`AgentContext`/`LoopResult.newMessages`/事件。transformer 裁剪/注入的消息只影响当前请求。默认 projector/`StandardAgentMessage` 原样传递 `sourceModel` 与 `ModelReplayState`，不解析。回调失败（同步抛异常、exceptional stage、null 输出）归一为 terminal `ERROR`（取消时 `ABORTED`）assistant，model 不被调用，run future 正常完成。
 - 下一 Turn 控制：严格顺序为 `TurnCompleted` → `PrepareNextTurn`（pre-update 快照）→ 校验 → 取消检查 → 原子应用 update 到 `LoopState` → `ShouldStopAfterTurn`（post-update 快照）→ 取消检查 → steering drain → follow-up drain。`NextTurnUpdate` 的 `Optional.empty()` 表示保持；thinking 三态为 KEEP / `PROVIDER_DEFAULT`（重置）/ 绝对级别。`STOP` 不 drain 队列、不改 assistant stop reason、不强制额外 model call；cancellation 优先于 STOP。`ModelRequest` 从 `LoopState` 读 model/thinkingLevel。hook 失败（同步抛/exceptional/null stage/result/decision）合成终止 turn：`TurnStarted → MessageStarted → MessageCompleted → TurnCompleted → AgentCompleted`，run future 正常完成；sink 异常仍传播。terminal model ERROR/ABORTED 跳过 turn hooks。
 
 ## ANTI-PATTERNS
@@ -65,4 +65,5 @@
 - Before hook 同步抛/failed stage/null stage/null decision → immediate failure；execute 同步抛/failed stage/null stage/null result → error result；After hook 同步抛/failed stage/null stage/null result → 保留原 result。
 - `ToolUpdateSink` settle 后的迟到 update 被静默丢弃。
 - `terminate` 不进入标准 LLM transcript。
+- 不解析 `ModelReplayState`，不按 provider 分支处理 `Assistant.sourceModel`。
 - 通用工具/取消/并行排序约束见根 AGENTS.md ANTI-PATTERNS。

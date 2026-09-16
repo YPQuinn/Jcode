@@ -3,9 +3,11 @@ package site.pplee.jcode.ai;
 import org.junit.jupiter.api.Test;
 import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.client.ModelRequest;
+import site.pplee.jcode.ai.concurrent.CancellationRegistration;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.ModelReplayState;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.Model;
@@ -130,6 +132,35 @@ class AiModuleTest {
     }
 
     @Test
+    void modelReplayStateRejectsBlankAndRedactsPayload() {
+        assertThrows(IllegalArgumentException.class, () -> new ModelReplayState(" ", "payload"));
+        assertThrows(IllegalArgumentException.class, () -> new ModelReplayState("fmt", " "));
+        assertThrows(NullPointerException.class, () -> new ModelReplayState(null, "payload"));
+        var state = new ModelReplayState("test-format/v1", "secret-payload");
+        assertEquals("test-format/v1", state.format());
+        assertEquals("secret-payload", state.payload());
+        assertFalse(state.toString().contains("secret-payload"));
+        assertTrue(state.toString().contains("test-format/v1"));
+    }
+
+    @Test
+    void textThinkingAndAssistantCompatibilityConstructorsLeaveReplayUnset() {
+        var text = new Content.Text("hello");
+        var thinking = new Content.Thinking("reason");
+        var assistant = new Message.Assistant(List.of(text), StopReason.STOP, null, Usage.zero(), T1);
+        var of = Message.Assistant.of(List.of(thinking), StopReason.STOP, T1);
+
+        assertEquals("hello", text.text());
+        assertEquals(null, text.replayState());
+        assertEquals("reason", thinking.text());
+        assertEquals(null, thinking.replayState());
+        assertEquals(null, assistant.sourceModel());
+        assertEquals(null, of.sourceModel());
+        assertEquals(text, new Content.Text("hello", null));
+        assertEquals(thinking, new Content.Thinking("reason", null));
+    }
+
+    @Test
     void usageZeroAndInvariants() {
         var z = Usage.zero();
         assertEquals(0, z.totalTokens());
@@ -149,6 +180,9 @@ class AiModuleTest {
         var stream = client.stream(req, new CancellationSignal() {
             @Override public boolean isCancelled() { return false; }
             @Override public void throwIfCancelled() { }
+            @Override public CancellationRegistration onCancellation(Runnable listener) {
+                return () -> { };
+            }
         });
         var result = stream.result();
         assertEquals(StopReason.STOP, result.stopReason());
@@ -157,6 +191,9 @@ class AiModuleTest {
             var ignored = new CancellationSignal() {
                 @Override public boolean isCancelled() { return false; }
                 @Override public void throwIfCancelled() { }
+                @Override public CancellationRegistration onCancellation(Runnable listener) {
+                    return () -> { };
+                }
             };
         });
     }

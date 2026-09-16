@@ -16,7 +16,9 @@ import site.pplee.jcode.agentcore.support.RecordingEventSink;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.ModelReplayState;
 import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -277,6 +279,41 @@ class ContextProjectionTest {
                 e instanceof AgentEvent.MessageStarted ms && ms.message().equals(injected)));
         assertFalse(recorder.events().stream().anyMatch(e ->
                 e instanceof AgentEvent.MessageCompleted mc && mc.message().equals(injected)));
+    }
+
+    @Test
+    void projectorPreservesSourceModelAndReplayStateWithoutMutatingTranscript() {
+        var source = new ModelRef("openai", "openai-responses", "gpt-4o");
+        var textState = new ModelReplayState("test-format/v1", "opaque-text");
+        var thinkingState = new ModelReplayState("test-format/thinking-v1", "opaque-thinking");
+        var prior = new Message.Assistant(
+                List.of(
+                        new Content.Thinking("hidden", thinkingState),
+                        new Content.Text("visible", textState)
+                ),
+                StopReason.STOP,
+                null,
+                Usage.zero(),
+                T1,
+                source
+        );
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("ok", StopReason.STOP));
+        var ctx = contextWithMessages(StandardAgentMessage.of(prior));
+
+        var result = runPrompt(client, ctx, new RecordingEventSink(),
+                ContextTransformer.identity(), MessageProjector.standard());
+
+        var req = client.receivedRequests().get(0);
+        var replayed = assertInstanceOf(Message.Assistant.class, req.messages().get(0));
+        assertEquals(source, replayed.sourceModel());
+        assertEquals(thinkingState, ((Content.Thinking) replayed.content().get(0)).replayState());
+        assertEquals(textState, ((Content.Text) replayed.content().get(1)).replayState());
+        assertSame(prior, replayed);
+
+        var transcriptPrior = ((StandardAgentMessage) result.context().messages().get(0)).message();
+        assertSame(prior, transcriptPrior);
+        assertEquals(source, ((Message.Assistant) transcriptPrior).sourceModel());
     }
 
     // --- async waiting ---

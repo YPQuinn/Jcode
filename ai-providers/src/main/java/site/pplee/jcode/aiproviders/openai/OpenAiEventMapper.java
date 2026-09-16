@@ -5,15 +5,20 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.ModelReplayState;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
+import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * Maps OpenAI Responses API stream events to {@link AssistantMessageEvent}s.
@@ -23,16 +28,25 @@ import java.util.Map;
  * block values. Terminal events ({@code response.completed},
  * {@code response.incomplete}, {@code response.failed}, {@code error}) return
  * the final {@code Done}/{@code Error} event exactly once.
+ * {@code response.incomplete} maps {@code max_output_tokens} to {@code Done(LENGTH)}
+ * and every other or missing incomplete reason to {@code Error(ERROR)}.
  */
 final class OpenAiEventMapper {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final JsonNode EMPTY_OBJECT = MAPPER.createObjectNode();
 
+    private final ModelRef sourceModel;
     private final List<Content> content = new ArrayList<>();
     private final Map<Integer, Slot> slots = new HashMap<>();
+    private final Set<Integer> completedIndexes = new HashSet<>();
+    private final Map<String, Integer> reasoningIndexById = new HashMap<>();
     private Usage usage = Usage.zero();
     private boolean sawTerminal;
     private boolean toolCallSeen;
+
+    OpenAiEventMapper(ModelRef sourceModel) {
+        this.sourceModel = Objects.requireNonNull(sourceModel, "sourceModel must not be null");
+    }
 
     /** Process one provider event; returns the Jcode events to push (possibly empty). */
     List<AssistantMessageEvent> onEvent(String eventName, JsonNode data) {
@@ -43,6 +57,7 @@ final class OpenAiEventMapper {
                  "response.reasoning_text.delta",
                  "response.reasoning_summary_text.delta",
                  "response.function_call_arguments.delta" -> handleDelta(eventName, data);
+            case "response.reasoning_summary_part.done" -> handleSummaryPartDone(data);
             case "response.function_call_arguments.done" -> handleArgumentsDone(data);
             case "response.output_item.done" -> handleItemDone(data);
             case "response.completed",
@@ -59,30 +74,53 @@ final class OpenAiEventMapper {
         if (item == null || !item.isObject() || index < 0) {
             return List.of();
         }
-        Slot slot = createSlot(item, content.size());
-        if (slot == null) {
+        Slot existing = slots.get(index);
+        if (existing != null) {
+            if (!existing.matches(item)) {
+                throw new IllegalStateException("output item type conflict at index " + index);
+            }
             return List.of();
         }
+        if (completedIndexes.contains(index)) {
+            return List.of();
+        }
+        Slot slot = openSlot(index, item);
+        return slot == null ? List.of() : List.of(slot.createStartEvent());
+    }
+
+    private Slot openSlot(int outputIndex, JsonNode item) {
+        Slot slot = createSlot(item, content.size());
+        if (slot == null) {
+            return null;
+        }
         content.add(slot.initialContent());
-        slots.put(index, slot);
+        slots.put(outputIndex, slot);
         if (slot instanceof ToolCallSlot) {
             toolCallSeen = true;
         }
-        return List.of(slot.createStartEvent());
+        return slot;
     }
 
     private Slot createSlot(JsonNode item, int contentIndex) {
         String type = item.path("type").asText("");
         return switch (type) {
             case "message" -> new TextSlot(contentIndex);
-            case "reasoning" -> new ThinkingSlot(contentIndex);
+            case "reasoning" -> {
+                var slot = new ThinkingSlot(contentIndex);
+                String id = item.path("id").asText("");
+                if (!id.isBlank()) {
+                    reasoningIndexById.put(id, contentIndex);
+                }
+                yield slot;
+            }
             case "function_call" -> {
                 String callId = item.path("call_id").asText("");
                 String itemId = item.path("id").isTextual() ? item.path("id").asText() : null;
                 String name = item.path("name").asText("");
                 String encoded = OpenAiToolCallIds.encode(callId, itemId);
-                JsonNode arguments = parseArguments(item.path("arguments").asText(""));
-                yield new ToolCallSlot(contentIndex, encoded, name, arguments);
+                String rawArguments = item.path("arguments").asText("");
+                JsonNode arguments = OpenAiPartialJsonParser.parse(rawArguments, EMPTY_OBJECT);
+                yield new ToolCallSlot(contentIndex, encoded, name, arguments, rawArguments);
             }
             default -> null;
         };
@@ -109,6 +147,17 @@ final class OpenAiEventMapper {
         };
     }
 
+    private List<AssistantMessageEvent> handleSummaryPartDone(JsonNode data) {
+        int index = data.path("output_index").asInt(-1);
+        if (index < 0) {
+            return List.of();
+        }
+        if (slots.get(index) instanceof ThinkingSlot thinkingSlot) {
+            return thinkingSlot.onSummaryPartDone();
+        }
+        return List.of();
+    }
+
     private List<AssistantMessageEvent> handleArgumentsDone(JsonNode data) {
         int index = data.path("output_index").asInt(-1);
         if (index < 0) {
@@ -127,26 +176,49 @@ final class OpenAiEventMapper {
         if (item == null || !item.isObject() || index < 0) {
             return List.of();
         }
-        Slot slot = slots.remove(index);
-        if (slot == null) {
+        if (completedIndexes.contains(index)) {
             return List.of();
         }
-        AssistantMessageEvent endEvent = slot.onDone(item);
-        return endEvent != null ? List.of(endEvent) : List.of();
+        Slot slot = slots.get(index);
+        if (slot == null) {
+            slot = openSlot(index, item);
+            if (slot == null) {
+                return List.of();
+            }
+            AssistantMessageEvent start = slot.createStartEvent();
+            AssistantMessageEvent end = finalizeSlot(index, slot, item);
+            return end == null ? List.of(start) : List.of(start, end);
+        }
+        if (!slot.matches(item)) {
+            throw new IllegalStateException("output item type conflict at index " + index);
+        }
+        AssistantMessageEvent end = finalizeSlot(index, slot, item);
+        return end == null ? List.of() : List.of(end);
+    }
+
+    private AssistantMessageEvent finalizeSlot(int index, Slot slot, JsonNode item) {
+        slots.remove(index);
+        completedIndexes.add(index);
+        return slot.onDone(item);
     }
 
     private List<AssistantMessageEvent> handleTerminal(String eventName, JsonNode data) {
         sawTerminal = true;
         return switch (eventName) {
-            case "response.completed", "response.incomplete" -> {
+            case "response.completed" -> {
                 usage = mapUsage(data.get("response"));
-                StopReason reason = eventName.equals("response.incomplete")
-                        ? StopReason.LENGTH
-                        : (toolCallSeen ? StopReason.TOOL_CALL : StopReason.STOP);
+                backfillEncryptedReasoning(data.get("response"));
+                StopReason reason = toolCallSeen ? StopReason.TOOL_CALL : StopReason.STOP;
                 yield List.of(new AssistantMessageEvent.Done(reason, finalMessage(reason)));
+            }
+            case "response.incomplete" -> {
+                usage = mapUsage(data.get("response"));
+                backfillEncryptedReasoning(data.get("response"));
+                yield List.of(mapIncomplete(data.get("response")));
             }
             case "response.failed" -> {
                 usage = mapUsage(data.get("response"));
+                backfillEncryptedReasoning(data.get("response"));
                 var error = data.path("response").path("error");
                 String message = error.isMissingNode() || !error.isObject()
                         ? "provider response failed"
@@ -162,6 +234,93 @@ final class OpenAiEventMapper {
         };
     }
 
+    private AssistantMessageEvent mapIncomplete(JsonNode response) {
+        String reason = incompleteReason(response);
+        if ("max_output_tokens".equals(reason)) {
+            return new AssistantMessageEvent.Done(StopReason.LENGTH, finalMessage(StopReason.LENGTH));
+        }
+        String message = reason == null
+                ? "response incomplete: provider did not report a reason"
+                : "response incomplete: " + reason;
+        return new AssistantMessageEvent.Error(StopReason.ERROR, errorMessage(message));
+    }
+
+    private void backfillEncryptedReasoning(JsonNode response) {
+        if (response == null || !response.isObject()) {
+            return;
+        }
+        JsonNode output = response.get("output");
+        if (output == null || !output.isArray()) {
+            return;
+        }
+        for (JsonNode item : output) {
+            if (!"reasoning".equals(item.path("type").asText(""))) {
+                continue;
+            }
+            JsonNode encrypted = item.get("encrypted_content");
+            if (encrypted == null || !encrypted.isTextual() || encrypted.asText().isBlank()) {
+                continue;
+            }
+            Integer index = indexForReasoningItem(item);
+            if (index == null || index < 0 || index >= content.size()) {
+                continue;
+            }
+            if (!(content.get(index) instanceof Content.Thinking thinking)) {
+                continue;
+            }
+            var stored = OpenAiReplayStateCodec.decodeReasoning(thinking.replayState(), thinking.text());
+            if (stored.isPresent() && OpenAiReplayStateCodec.hasEncryptedContent(stored.get())) {
+                continue;
+            }
+            var merged = stored.isPresent()
+                    ? stored.get().deepCopy()
+                    : item.deepCopy();
+            if (merged instanceof com.fasterxml.jackson.databind.node.ObjectNode object) {
+                if (!OpenAiReplayStateCodec.hasEncryptedContent(object)) {
+                    object.put("encrypted_content", encrypted.asText());
+                }
+                content.set(index, new Content.Thinking(
+                        thinking.text(),
+                        OpenAiReplayStateCodec.encodeReasoning(thinking.text(), object)));
+            }
+        }
+    }
+
+    private Integer indexForReasoningItem(JsonNode item) {
+        String id = item.path("id").asText("");
+        if (!id.isBlank() && reasoningIndexById.containsKey(id)) {
+            return reasoningIndexById.get(id);
+        }
+        for (int i = 0; i < content.size(); i++) {
+            if (content.get(i) instanceof Content.Thinking thinking
+                    && !hasEncryptedReplay(thinking)) {
+                if (!id.isBlank()) {
+                    reasoningIndexById.put(id, i);
+                }
+                return i;
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasEncryptedReplay(Content.Thinking thinking) {
+        return OpenAiReplayStateCodec.decodeReasoning(thinking.replayState(), thinking.text())
+                .filter(OpenAiReplayStateCodec::hasEncryptedContent)
+                .isPresent();
+    }
+
+    private static String incompleteReason(JsonNode response) {
+        if (response == null || !response.isObject()) {
+            return null;
+        }
+        JsonNode reason = response.path("incomplete_details").path("reason");
+        if (!reason.isTextual()) {
+            return null;
+        }
+        String value = reason.asText();
+        return value.isBlank() ? null : value;
+    }
+
     /** True once a terminal provider event has been seen. */
     boolean terminalHandled() {
         return sawTerminal;
@@ -172,21 +331,58 @@ final class OpenAiEventMapper {
         return List.copyOf(content);
     }
 
-    private static String contentText(JsonNode array) {
+    private static String canonicalMessageText(JsonNode array) {
         if (array == null || !array.isArray()) {
             return null;
         }
         var sb = new StringBuilder();
+        boolean any = false;
         for (JsonNode block : array) {
             String type = block.path("type").asText("");
-            if (type.equals("output_text") || type.equals("refusal") || type.equals("reasoning_text")) {
-                if (!sb.isEmpty()) {
-                    sb.append('\n');
-                }
-                sb.append(block.path("text").asText(""));
+            String value = switch (type) {
+                case "output_text" -> block.has("text") ? block.path("text").asText("") : null;
+                case "refusal" -> block.has("refusal")
+                        ? block.path("refusal").asText("")
+                        : (block.has("text") ? block.path("text").asText("") : null);
+                default -> null;
+            };
+            if (value != null) {
+                sb.append(value);
+                any = true;
             }
         }
-        return sb.isEmpty() ? null : sb.toString();
+        return any ? sb.toString() : null;
+    }
+
+    private static String canonicalThinkingText(JsonNode item, String accumulated) {
+        String summary = joinTypedText(item.get("summary"), "summary_text", "text", "\n\n");
+        if (summary != null) {
+            return summary;
+        }
+        String body = joinTypedText(item.get("content"), "reasoning_text", "text", "");
+        return body != null ? body : accumulated;
+    }
+
+    private static String joinTypedText(JsonNode array, String type, String field, String separator) {
+        if (array == null || !array.isArray()) {
+            return null;
+        }
+        var sb = new StringBuilder();
+        boolean any = false;
+        for (JsonNode block : array) {
+            if (!type.equals(block.path("type").asText(""))) {
+                continue;
+            }
+            if (!block.has(field)) {
+                continue;
+            }
+            if (any && !separator.isEmpty()) {
+                sb.append(separator);
+            }
+            sb.append(block.path(field).asText(""));
+            any = true;
+        }
+        return any ? sb.toString() : null;
     }
 
     private static JsonNode parseArguments(String raw) {
@@ -223,15 +419,15 @@ final class OpenAiEventMapper {
     }
 
     private Message.Assistant partial() {
-        return new Message.Assistant(List.copyOf(content), StopReason.STOP, null, Usage.zero(), Instant.now());
+        return new Message.Assistant(List.copyOf(content), StopReason.STOP, null, Usage.zero(), Instant.now(), sourceModel);
     }
 
     private Message.Assistant finalMessage(StopReason reason) {
-        return new Message.Assistant(List.copyOf(content), reason, null, usage, Instant.now());
+        return new Message.Assistant(List.copyOf(content), reason, null, usage, Instant.now(), sourceModel);
     }
 
     private Message.Assistant errorMessage(String message) {
-        return new Message.Assistant(List.copyOf(content), StopReason.ERROR, message, usage, Instant.now());
+        return new Message.Assistant(List.copyOf(content), StopReason.ERROR, message, usage, Instant.now(), sourceModel);
     }
 
     private abstract static class Slot {
@@ -246,6 +442,8 @@ final class OpenAiEventMapper {
         abstract AssistantMessageEvent createStartEvent();
 
         abstract AssistantMessageEvent onDone(JsonNode item);
+
+        abstract boolean matches(JsonNode item);
     }
 
     private final class TextSlot extends Slot {
@@ -276,14 +474,22 @@ final class OpenAiEventMapper {
             if (!"message".equals(item.path("type").asText(""))) {
                 return null;
             }
-            String confirmed = contentText(item.get("content"));
+            String confirmed = canonicalMessageText(item.get("content"));
             if (confirmed == null) {
                 confirmed = text.toString();
             }
             text.setLength(0);
             text.append(confirmed);
-            content.set(contentIndex, new Content.Text(confirmed));
+            String itemId = item.path("id").isTextual() ? item.path("id").asText() : null;
+            String phase = item.path("phase").isTextual() ? item.path("phase").asText() : null;
+            ModelReplayState replayState = OpenAiReplayStateCodec.encodeMessage(confirmed, itemId, phase);
+            content.set(contentIndex, new Content.Text(confirmed, replayState));
             return new AssistantMessageEvent.TextEnd(contentIndex, confirmed, partial());
+        }
+
+        @Override
+        boolean matches(JsonNode item) {
+            return "message".equals(item.path("type").asText(""));
         }
     }
 
@@ -310,19 +516,33 @@ final class OpenAiEventMapper {
             return new AssistantMessageEvent.ThinkingDelta(contentIndex, delta, partial());
         }
 
+        List<AssistantMessageEvent> onSummaryPartDone() {
+            if (text.isEmpty() || text.toString().endsWith("\n\n")) {
+                return List.of();
+            }
+            return List.of(onDelta("\n\n"));
+        }
+
         @Override
         AssistantMessageEvent onDone(JsonNode item) {
             if (!"reasoning".equals(item.path("type").asText(""))) {
                 return null;
             }
-            String confirmed = contentText(item.get("content"));
-            if (confirmed == null) {
-                confirmed = text.toString();
-            }
+            String confirmed = canonicalThinkingText(item, text.toString());
             text.setLength(0);
             text.append(confirmed);
-            content.set(contentIndex, new Content.Thinking(confirmed));
+            String id = item.path("id").asText("");
+            if (!id.isBlank()) {
+                reasoningIndexById.put(id, contentIndex);
+            }
+            content.set(contentIndex, new Content.Thinking(
+                    confirmed, OpenAiReplayStateCodec.encodeReasoning(confirmed, item)));
             return new AssistantMessageEvent.ThinkingEnd(contentIndex, confirmed, partial());
+        }
+
+        @Override
+        boolean matches(JsonNode item) {
+            return "reasoning".equals(item.path("type").asText(""));
         }
     }
 
@@ -332,11 +552,14 @@ final class OpenAiEventMapper {
         final StringBuilder buffer = new StringBuilder();
         JsonNode argumentsNode;
 
-        ToolCallSlot(int contentIndex, String id, String name, JsonNode argumentsNode) {
+        ToolCallSlot(int contentIndex, String id, String name, JsonNode argumentsNode, String initialArguments) {
             super(contentIndex);
             this.id = id;
             this.name = name;
             this.argumentsNode = argumentsNode;
+            if (initialArguments != null && !initialArguments.isEmpty()) {
+                buffer.append(initialArguments);
+            }
         }
 
         @Override
@@ -351,7 +574,7 @@ final class OpenAiEventMapper {
 
         AssistantMessageEvent onDelta(String delta) {
             buffer.append(delta);
-            JsonNode parsed = tryParse(buffer.toString());
+            JsonNode parsed = OpenAiPartialJsonParser.parse(buffer.toString(), argumentsNode);
             if (parsed != null) {
                 argumentsNode = parsed;
                 content.set(contentIndex, new Content.ToolCall(id, name, argumentsNode));
@@ -386,6 +609,11 @@ final class OpenAiEventMapper {
             var toolCall = new Content.ToolCall(id, name, argumentsNode);
             content.set(contentIndex, toolCall);
             return new AssistantMessageEvent.ToolCallEnd(contentIndex, toolCall, partial());
+        }
+
+        @Override
+        boolean matches(JsonNode item) {
+            return "function_call".equals(item.path("type").asText(""));
         }
     }
 }

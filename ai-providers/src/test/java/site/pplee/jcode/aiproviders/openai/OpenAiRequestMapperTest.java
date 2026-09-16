@@ -82,7 +82,7 @@ class OpenAiRequestMapperTest {
         assertEquals("function_call", functionCall.get("type").asText());
         assertEquals("call_abc", functionCall.get("call_id").asText());
         assertEquals("get_weather", functionCall.get("name").asText());
-        assertEquals("fc_123", functionCall.get("id").asText());
+        assertFalse(functionCall.has("id"), "unknown source must omit function-call item id");
         assertTrue(functionCall.get("arguments").asText().contains("London"));
 
         var output = input.get(3);
@@ -115,6 +115,16 @@ class OpenAiRequestMapperTest {
         var request = new ModelRequest(REF, "", List.of(), List.of());
         var payload = mapper.map(request, null);
         assertFalse(payload.has("reasoning"));
+        assertFalse(payload.has("include"));
+    }
+
+    @Test
+    void defaultThinkingWithReasoningCapabilitiesSendsIncludeOnly() {
+        var capabilities = new OpenAiModelCapabilities(true, Map.of(ThinkingLevel.MEDIUM, "medium"));
+        var request = new ModelRequest(REF, "", List.of(), List.of());
+        var payload = mapper.map(request, capabilities);
+        assertFalse(payload.has("reasoning"));
+        assertEquals("reasoning.encrypted_content", payload.get("include").get(0).asText());
     }
 
     @Test
@@ -145,6 +155,8 @@ class OpenAiRequestMapperTest {
         var request = new ModelRequest(REF, "", List.of(), List.of(), ThinkingLevel.OFF);
         var payload = mapper.map(request, capabilities);
         assertEquals("none", payload.get("reasoning").get("effort").asText());
+        assertFalse(payload.get("reasoning").has("summary"));
+        assertFalse(payload.has("include"));
     }
 
     @Test
@@ -153,6 +165,8 @@ class OpenAiRequestMapperTest {
         var request = new ModelRequest(REF, "", List.of(), List.of(), ThinkingLevel.MEDIUM);
         var payload = mapper.map(request, capabilities);
         assertEquals("medium", payload.get("reasoning").get("effort").asText());
+        assertEquals("auto", payload.get("reasoning").get("summary").asText());
+        assertEquals("reasoning.encrypted_content", payload.get("include").get(0).asText());
     }
 
     @Test
@@ -164,13 +178,29 @@ class OpenAiRequestMapperTest {
     }
 
     @Test
-    void rawToolCallIdIsPassedThroughAsCallId() {
+    void rawToolCallIdIsPassedThroughAsCallIdWhenPaired() {
+        var request = new ModelRequest(REF, "",
+                List.of(
+                        new Message.Assistant(List.of(
+                                new Content.ToolCall("call_raw_1", "echo", MAPPER.createObjectNode())
+                        ), StopReason.TOOL_CALL, null, Usage.zero(), T1),
+                        new Message.ToolResultMessage("call_raw_1", "echo",
+                                List.of(new Content.Text("ok")), false, T1)
+                ),
+                List.of());
+        var payload = mapper.map(request, null);
+        assertEquals("call_raw_1", payload.get("input").get(0).get("call_id").asText());
+        assertEquals("call_raw_1", payload.get("input").get(1).get("call_id").asText());
+    }
+
+    @Test
+    void orphanToolResultIsDropped() {
         var request = new ModelRequest(REF, "",
                 List.of(new Message.ToolResultMessage("call_raw_1", "echo",
                         List.of(new Content.Text("ok")), false, T1)),
                 List.of());
         var payload = mapper.map(request, null);
-        assertEquals("call_raw_1", payload.get("input").get(0).get("call_id").asText());
+        assertEquals(0, payload.get("input").size());
     }
 
     @Test
@@ -183,12 +213,22 @@ class OpenAiRequestMapperTest {
     }
 
     @Test
-    void unsafeRawToolCallIdFailsMapping() {
+    void unsafeRawToolCallIdIsHashedAndPaired() {
+        var unsafe = "bad id with spaces";
         var request = new ModelRequest(REF, "",
-                List.of(new Message.ToolResultMessage("bad id with spaces", "echo",
-                        List.of(new Content.Text("ok")), false, T1)),
+                List.of(
+                        new Message.Assistant(List.of(
+                                new Content.ToolCall(unsafe, "echo", MAPPER.createObjectNode())
+                        ), StopReason.TOOL_CALL, null, Usage.zero(), T1),
+                        new Message.ToolResultMessage(unsafe, "echo",
+                                List.of(new Content.Text("ok")), false, T1)
+                ),
                 List.of());
-        assertThrows(IllegalArgumentException.class, () -> mapper.map(request, null));
+        var payload = mapper.map(request, null);
+        String hashed = OpenAiToolCallIds.hashedForeignCallId(unsafe);
+        assertEquals(hashed, payload.get("input").get(0).get("call_id").asText());
+        assertEquals(hashed, payload.get("input").get(1).get("call_id").asText());
+        assertTrue(hashed.length() <= 64);
     }
 
     @Test
