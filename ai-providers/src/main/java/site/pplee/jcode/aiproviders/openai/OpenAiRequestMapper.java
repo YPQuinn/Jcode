@@ -31,84 +31,101 @@ final class OpenAiRequestMapper {
     ObjectNode map(ModelRequest request, OpenAiModelCapabilities capabilities) {
         Objects.requireNonNull(request, "request must not be null");
         ObjectNode root = objectMapper.createObjectNode();
-        root.put("model", request.model().modelId());
 
-        ArrayNode input = root.putArray("input");
-        if (request.systemPrompt() != null && !request.systemPrompt().isBlank()) {
-            var item = input.addObject();
-            item.put("role", "system");
-            item.putArray("content").addObject().put("type", "input_text").put("text", request.systemPrompt());
-        }
-        int[] nextItemIndex = {0};
-        for (Message message : request.messages()) {
-            appendMessage(input, message, nextItemIndex);
-        }
-
-        if (!request.tools().isEmpty()) {
-            ArrayNode tools = root.putArray("tools");
-            for (ToolSpec spec : request.tools()) {
-                tools.add(mapTool(spec));
-            }
-        }
-
-        root.put("stream", true);
-        root.put("store", false);
+        appendMetadata(root, request.model().modelId());
+        appendTranscript(root, request.systemPrompt(), request.messages());
+        appendTools(root, request.tools());
         applyThinking(root, request.thinkingLevel(), capabilities);
+
         return root;
     }
 
-    private void appendMessage(ArrayNode input, Message message, int[] nextItemIndex) {
-        switch (message) {
-            case Message.User user -> {
-                String text = joinText(user.content());
-                if (text.isEmpty()) {
-                    return;
-                }
-                var item = input.addObject();
-                item.put("role", "user");
-                item.putArray("content").addObject().put("type", "input_text").put("text", text);
-            }
-            case Message.Assistant assistant -> {
-                boolean appended = false;
-                for (Content block : assistant.content()) {
-                    if (block instanceof Content.Text textBlock) {
-                        var item = input.addObject();
-                        item.put("type", "message");
-                        item.put("role", "assistant");
-                        item.put("status", "completed");
-                        item.put("id", assistantItemId(nextItemIndex[0]++));
-                        item.putArray("content").addObject().put("type", "output_text").put("text", textBlock.text());
-                        appended = true;
-                    } else if (block instanceof Content.ToolCall toolCall) {
-                        var item = input.addObject();
-                        item.put("type", "function_call");
-                        item.put("call_id", OpenAiToolCallIds.callId(toolCall.id()));
-                        item.put("name", toolCall.name());
-                        item.put("arguments", toolCall.arguments().toString());
-                        String itemId = OpenAiToolCallIds.validItemId(OpenAiToolCallIds.itemId(toolCall.id()));
-                        if (itemId != null) {
-                            item.put("id", itemId);
-                        }
-                        appended = true;
-                    }
-                    // Thinking blocks are not replayable in v1 and are skipped.
-                }
-                if (!appended) {
-                    return;
-                }
-            }
-            case Message.ToolResultMessage toolResult -> {
-                var item = input.addObject();
-                item.put("type", "function_call_output");
-                item.put("call_id", OpenAiToolCallIds.callId(toolResult.toolCallId()));
-                item.put("output", joinText(toolResult.content()));
+    private void appendMetadata(ObjectNode root, String modelId) {
+        root.put("model", modelId);
+        root.put("stream", true);
+        root.put("store", false);
+    }
+
+    private void appendTranscript(ObjectNode root, String systemPrompt, java.util.List<Message> messages) {
+        ArrayNode input = root.putArray("input");
+        if (systemPrompt != null && !systemPrompt.isBlank()) {
+            var item = input.addObject();
+            item.put("role", "system");
+            item.putArray("content").addObject().put("type", "input_text").put("text", systemPrompt);
+        }
+        var context = new ReplayContext();
+        for (Message message : messages) {
+            appendMessage(input, message, context);
+        }
+    }
+
+    private void appendTools(ObjectNode root, java.util.List<ToolSpec> tools) {
+        if (!tools.isEmpty()) {
+            ArrayNode toolsArray = root.putArray("tools");
+            for (ToolSpec spec : tools) {
+                toolsArray.add(mapTool(spec));
             }
         }
     }
 
-    /** Stable, OpenAI-safe item id for a replayed assistant output message. */
-    private static String assistantItemId(int index) {
-        return "msg_jcode_" + index;
+    private void appendMessage(ArrayNode input, Message message, ReplayContext context) {
+        switch (message) {
+            case Message.User user -> appendUserMessage(input, user);
+            case Message.Assistant assistant -> appendAssistantMessage(input, assistant, context);
+            case Message.ToolResultMessage toolResult -> appendToolResultMessage(input, toolResult);
+        }
+    }
+
+    private void appendUserMessage(ArrayNode input, Message.User user) {
+        String text = joinText(user.content());
+        if (text.isEmpty()) {
+            return;
+        }
+        var item = input.addObject();
+        item.put("role", "user");
+        item.putArray("content").addObject().put("type", "input_text").put("text", text);
+    }
+
+    private void appendAssistantMessage(ArrayNode input, Message.Assistant assistant, ReplayContext context) {
+        for (Content block : assistant.content()) {
+            switch (block) {
+                case Content.Text textBlock ->
+                        appendAssistantText(input, textBlock.text(), context.nextAssistantItemId());
+                case Content.ToolCall toolCall ->
+                        appendFunctionCall(input, toolCall);
+                case Content.Thinking ignored -> {
+                    // Thinking blocks are not replayable in v1 and are skipped.
+                }
+            }
+        }
+    }
+
+    private void appendAssistantText(ArrayNode input, String text, String itemId) {
+        var item = input.addObject();
+        item.put("type", "message");
+        item.put("role", "assistant");
+        item.put("status", "completed");
+        item.put("id", itemId);
+        item.putArray("content").addObject().put("type", "output_text").put("text", text);
+    }
+
+    private void appendFunctionCall(ArrayNode input, Content.ToolCall toolCall) {
+        var item = input.addObject();
+        item.put("type", "function_call");
+        item.put("call_id", OpenAiToolCallIds.callId(toolCall.id()));
+        item.put("name", toolCall.name());
+        item.put("arguments", toolCall.arguments().toString());
+        String itemId = OpenAiToolCallIds.validItemId(OpenAiToolCallIds.itemId(toolCall.id()));
+        if (itemId != null) {
+            item.put("id", itemId);
+        }
+    }
+
+    private void appendToolResultMessage(ArrayNode input, Message.ToolResultMessage toolResult) {
+        var item = input.addObject();
+        item.put("type", "function_call_output");
+        item.put("call_id", OpenAiToolCallIds.callId(toolResult.toolCallId()));
+        item.put("output", joinText(toolResult.content()));
     }
 
     private static String joinText(java.util.List<Content> blocks) {
@@ -143,10 +160,15 @@ final class OpenAiRequestMapper {
     }
 
     private void applyThinking(ObjectNode root, ThinkingLevel level, OpenAiModelCapabilities capabilities) {
-        switch (level) {
-            case PROVIDER_DEFAULT -> {
-                // No explicit reasoning preference.
-            }
+        String effort = resolveReasoningEffort(level, capabilities);
+        if (effort != null) {
+            root.putObject("reasoning").put("effort", effort);
+        }
+    }
+
+    private String resolveReasoningEffort(ThinkingLevel level, OpenAiModelCapabilities capabilities) {
+        return switch (level) {
+            case PROVIDER_DEFAULT -> null;
             case OFF -> {
                 if (capabilities != null && capabilities.reasoning()) {
                     String effort = capabilities.reasoningEfforts().get(ThinkingLevel.OFF);
@@ -154,12 +176,14 @@ final class OpenAiRequestMapper {
                         throw new IllegalArgumentException(
                                 "thinking level OFF is not explicitly supported for this reasoning model");
                     }
-                    root.putObject("reasoning").put("effort", effort);
-                } else if (capabilities == null) {
+                    yield effort;
+                }
+                if (capabilities == null) {
                     throw new IllegalArgumentException(
                             "thinking level OFF cannot be satisfied: model capabilities are unknown");
                 }
                 // Capabilities explicitly say the model does not reason: no reasoning params needed.
+                yield null;
             }
             default -> {
                 if (capabilities == null || !capabilities.reasoning()) {
@@ -171,8 +195,20 @@ final class OpenAiRequestMapper {
                     throw new IllegalArgumentException(
                             "thinking level " + level + " has no reasoning effort mapping for this model");
                 }
-                root.putObject("reasoning").put("effort", effort);
+                yield effort;
             }
+        };
+    }
+
+    /**
+     * Local replay context for generating sequential, OpenAI-safe item ids
+     * across replayed assistant output messages.
+     */
+    private static final class ReplayContext {
+        private int assistantItemIndex = 0;
+
+        String nextAssistantItemId() {
+            return "msg_jcode_" + (assistantItemIndex++);
         }
     }
 }
