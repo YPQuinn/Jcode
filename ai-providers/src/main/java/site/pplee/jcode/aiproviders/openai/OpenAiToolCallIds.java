@@ -24,10 +24,11 @@ import java.util.regex.Pattern;
  * decode cleanly; malformed encoded ids fail with
  * {@link IllegalArgumentException} so callers fail safe instead of
  * misinterpreting corrupt data as a raw id. Raw ids are accepted only when
- * they satisfy the OpenAI-safe charset and length constraints. Replayed item
- * ids are included only when already OpenAI-valid ({@code fc_} prefix, safe
- * charset, max 64 chars); otherwise they are omitted rather than sanitized
- * into a different id.
+ * they satisfy the OpenAI-safe charset and length constraints. Replayed
+ * function-call item ids are included only when already OpenAI-valid
+ * ({@code fc_} prefix, safe charset, max 64 chars); custom-tool item ids
+ * use the {@code ctc_} prefix. Otherwise they are omitted rather than
+ * sanitized into a different id.
  */
 final class OpenAiToolCallIds {
     private static final String PREFIX = "oai1:";
@@ -119,12 +120,30 @@ final class OpenAiToolCallIds {
     }
 
     /**
-     * The item id usable for replay, or null when the decoded item id is not
-     * already OpenAI-valid ({@code fc_} prefix, safe charset, max 64 chars).
-     * Never fabricates or sanitizes a different id.
+     * The function-call item id usable for replay, or null when the decoded
+     * item id is not already OpenAI-valid ({@code fc_} prefix, safe charset,
+     * max 64 chars). Never fabricates or sanitizes a different id.
      */
     static String validItemId(String itemId) {
-        if (itemId == null || !itemId.startsWith("fc_")) {
+        return validPrefixedItemId(itemId, "fc_");
+    }
+
+    /** Same as {@link #validItemId(String)}; named for call sites that replay function calls. */
+    static String validFunctionItemId(String itemId) {
+        return validItemId(itemId);
+    }
+
+    /**
+     * The custom-tool item id usable for replay, or null when the decoded
+     * item id is not already OpenAI-valid ({@code ctc_} prefix, safe charset,
+     * max 64 chars).
+     */
+    static String validCustomItemId(String itemId) {
+        return validPrefixedItemId(itemId, "ctc_");
+    }
+
+    private static String validPrefixedItemId(String itemId, String prefix) {
+        if (itemId == null || !itemId.startsWith(prefix)) {
             return null;
         }
         return isSafe(itemId) ? itemId : null;

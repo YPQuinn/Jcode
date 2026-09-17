@@ -18,7 +18,10 @@ import java.util.Objects;
 public sealed interface Message
         permits Message.User, Message.Assistant, Message.ToolResultMessage {
 
-    /** A user-authored message (prompt or injected steering/follow-up). */
+    /**
+     * A user-authored message (prompt or injected steering/follow-up).
+     * Content may include {@link Content.Text} and {@link Content.Image}.
+     */
     record User(
             List<Content> content,
             Instant timestamp
@@ -36,6 +39,8 @@ public sealed interface Message
      * use {@link Usage#zero()} when no usage is reported.
      * {@code sourceModel} is the provider-neutral model that produced this
      * message; {@code null} means synthetic, legacy, or unknown origin.
+     * {@code metadata} is bounded correlation data; OpenAI output message
+     * id/phase stay in {@link ModelReplayState}, not here.
      */
     record Assistant(
             List<Content> content,
@@ -43,13 +48,15 @@ public sealed interface Message
             String errorMessage,
             Usage usage,
             Instant timestamp,
-            ModelRef sourceModel
+            ModelRef sourceModel,
+            ResponseMetadata metadata
     ) implements Message {
         public Assistant {
             content = List.copyOf(Objects.requireNonNull(content, "content must not be null"));
             Objects.requireNonNull(stopReason, "stopReason must not be null");
             Objects.requireNonNull(usage, "usage must not be null");
             Objects.requireNonNull(timestamp, "timestamp must not be null");
+            Objects.requireNonNull(metadata, "metadata must not be null");
 
             if (errorMessage != null && !stopReason.isTerminalFailure()) {
                 throw new IllegalArgumentException(
@@ -57,7 +64,22 @@ public sealed interface Message
             }
         }
 
-        /** Compatibility constructor: assistant with unknown source model. */
+        /**
+         * Compatibility constructor: assistant with a source model and empty
+         * metadata.
+         */
+        public Assistant(
+                List<Content> content,
+                StopReason stopReason,
+                String errorMessage,
+                Usage usage,
+                Instant timestamp,
+                ModelRef sourceModel
+        ) {
+            this(content, stopReason, errorMessage, usage, timestamp, sourceModel, ResponseMetadata.empty());
+        }
+
+        /** Compatibility constructor: assistant with unknown source model and empty metadata. */
         public Assistant(
                 List<Content> content,
                 StopReason stopReason,
@@ -65,17 +87,18 @@ public sealed interface Message
                 Usage usage,
                 Instant timestamp
         ) {
-            this(content, stopReason, errorMessage, usage, timestamp, null);
+            this(content, stopReason, errorMessage, usage, timestamp, null, ResponseMetadata.empty());
         }
 
         /** Convenience: an assistant result terminated by {@code stopReason} with no error and zero usage. */
         public static Assistant of(List<Content> content, StopReason stopReason, Instant timestamp) {
-            return new Assistant(content, stopReason, null, Usage.zero(), timestamp, null);
+            return new Assistant(content, stopReason, null, Usage.zero(), timestamp, null, ResponseMetadata.empty());
         }
     }
 
     /**
      * Outcome of a single tool execution, written back for the model to read.
+     * Content may include {@link Content.Text} and {@link Content.Image}.
      * {@code error} marks a failure the model can react to. The runtime-only
      * {@code terminate} flag (requesting chain stop) is not part of the
      * standard LLM transcript; it lives on the agent-runtime execution result.

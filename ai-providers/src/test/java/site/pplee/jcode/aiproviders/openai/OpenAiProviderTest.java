@@ -11,6 +11,7 @@ import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 import site.pplee.jcode.aiproviders.openai.support.MutableCancellationSignal;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -68,6 +69,32 @@ class OpenAiProviderTest {
     }
 
     @Test
+    void defaultCompatibilityAcceptsDeveloperButLegacyCapabilitiesStayOnSystem() {
+        var config = config();
+        assertTrue(config.compatibility().developerRole());
+        assertEquals(OpenAiEndpointProfile.OPENAI, config.compatibility().endpointProfile());
+        assertTrue(config.compatibility().maxOutputTokens());
+        assertTrue(config.compatibility().promptCacheKey());
+        assertTrue(config.compatibility().longCacheRetention());
+        assertTrue(config.compatibility().strictTools());
+        assertTrue(config.compatibility().grammarTools());
+        var conservative = new OpenAiResponsesCompatibility(true);
+        assertFalse(conservative.maxOutputTokens());
+        assertFalse(conservative.promptCacheKey());
+        assertFalse(conservative.longCacheRetention());
+        assertFalse(conservative.strictTools());
+        assertFalse(conservative.grammarTools());
+        assertFalse(OpenAiResponsesCompatibility.openRouter().strictTools());
+        assertFalse(OpenAiResponsesCompatibility.openRouter().grammarTools());
+        var legacy = new OpenAiModelCapabilities(false, Map.of());
+        assertFalse(legacy.imageInput());
+        assertFalse(legacy.developerRolePreferred());
+        assertFalse(legacy.temperature());
+        assertFalse(legacy.toolChoice());
+        assertEquals(OpenAiModelCapabilities.noReasoning(), legacy);
+    }
+
+    @Test
     void credentialsAndConfigToStringAreRedacted() {
         var credentials = OpenAiCredentials.apiKey(API_KEY);
         var config = config();
@@ -75,6 +102,26 @@ class OpenAiProviderTest {
         assertFalse(config.toString().contains(API_KEY));
         assertTrue(credentials.toString().contains("redacted"));
         assertTrue(config.toString().contains("redacted"));
+        assertTrue(config.pricing().isEmpty());
+    }
+
+    @Test
+    void pricingIsExplicitAndDoesNotLeakCredentials() {
+        var pricing = OpenAiPricing.of("USD", Map.of(GPT.modelId(), new OpenAiPricing.ModelPrice(
+                new OpenAiPricing.TokenRates(
+                        java.math.BigDecimal.ONE,
+                        java.math.BigDecimal.ONE,
+                        java.math.BigDecimal.ZERO,
+                        java.math.BigDecimal.ZERO))));
+        var config = OpenAiProviderConfig.builder()
+                .credentials(OpenAiCredentials.apiKey(API_KEY))
+                .models(List.of(GPT))
+                .pricing(pricing)
+                .build();
+        assertEquals(pricing, config.pricing().orElseThrow());
+        assertFalse(config.toString().contains(API_KEY));
+        assertTrue(config.toString().contains("USD"));
+        assertTrue(config.toString().contains("gpt-4o-mini"));
     }
 
     @Test
@@ -86,6 +133,20 @@ class OpenAiProviderTest {
     @Test
     void providerIsNotAModelClient() {
         assertFalse(ModelClient.class.isAssignableFrom(OpenAiProvider.class));
+    }
+
+    @Test
+    void streamForMalformedModelIdentityReturnsStartErrorWithoutLeakingValue() throws Exception {
+        var provider = new OpenAiProvider(config());
+        String dirty = "gpt-4o-mini\uD83D";
+        var stream = provider.stream(
+                request(new ModelRef("openai", "openai-responses", dirty)),
+                new MutableCancellationSignal());
+        assertInstanceOf(AssistantMessageEvent.Start.class, stream.take());
+        var error = assertInstanceOf(AssistantMessageEvent.Error.class, stream.take());
+        assertEquals(StopReason.ERROR, error.reason());
+        assertEquals("malformed UTF-16 in model id", error.error().errorMessage());
+        assertFalse(error.error().errorMessage().contains(dirty));
     }
 
     @Test
@@ -148,7 +209,7 @@ class OpenAiProviderTest {
         assertInstanceOf(AssistantMessageEvent.Start.class, stream.take());
         var error = assertInstanceOf(AssistantMessageEvent.Error.class, stream.take());
         assertEquals(StopReason.ERROR, error.reason());
-        assertTrue(error.error().errorMessage().contains("mapping failed"));
+        assertEquals("request mapping failed", error.error().errorMessage());
     }
 
     @Test

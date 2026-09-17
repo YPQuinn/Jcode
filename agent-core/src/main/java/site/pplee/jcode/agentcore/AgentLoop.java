@@ -286,7 +286,8 @@ final class AgentLoop {
                 state.context().systemPrompt(),
                 projected,
                 toolSpecs(state.context().tools()),
-                state.thinkingLevel()
+                state.thinkingLevel(),
+                config.modelRequestOptions()
         );
         try {
             var stream = config.modelClient().stream(request, cancellation);

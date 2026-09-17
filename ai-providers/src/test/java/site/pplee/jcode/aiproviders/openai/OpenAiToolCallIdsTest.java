@@ -98,6 +98,9 @@ class OpenAiToolCallIdsTest {
         assertNull(OpenAiToolCallIds.validItemId("fc_" + "x".repeat(100)));
         assertNull(OpenAiToolCallIds.validItemId(" "));
         assertNull(OpenAiToolCallIds.validItemId(null));
+        assertEquals("ctc_1", OpenAiToolCallIds.validCustomItemId("ctc_1"));
+        assertNull(OpenAiToolCallIds.validCustomItemId("fc_1"));
+        assertNull(OpenAiToolCallIds.validFunctionItemId("ctc_1"));
     }
 
     @Test

@@ -21,6 +21,9 @@ import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.model.ModelRef;
+import site.pplee.jcode.ai.tool.GrammarSyntax;
+import site.pplee.jcode.ai.tool.Requirement;
+import site.pplee.jcode.ai.tool.ToolInputConstraint;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -476,6 +479,47 @@ class ToolPipelineTest {
         var text = (Content.Text) toolCompleted.content().get(0);
         assertEquals("default", text.text(), "execute must see the injected default");
     }
+
+    @Test
+    void grammarShapedArgumentsPassSchemaValidationAndTreeToValue() {
+        var execCount = new AtomicInteger();
+        var captured = new AtomicReference<String>();
+        var grammarSchema = parseSchema(
+                "{\"type\":\"object\",\"properties\":{\"payload\":{\"type\":\"string\"}},\"required\":[\"payload\"]}");
+        var constraint = new ToolInputConstraint.Grammar(
+                java.util.Map.of(GrammarSyntax.LARK, "start: /[a-z]+/"), Requirement.PREFER);
+        var tool = new AgentTool<PayloadArgs>() {
+            @Override public String name() { return "sample_tool"; }
+            @Override public Class<PayloadArgs> argumentType() { return PayloadArgs.class; }
+            @Override public JsonNode parametersSchema() { return grammarSchema; }
+            @Override public ToolInputConstraint constraint() { return constraint; }
+            @Override
+            public CompletionStage<ToolExecutionResult> execute(
+                    String id, PayloadArgs arguments, ToolUpdateSink updates, CancellationSignal c) {
+                execCount.incrementAndGet();
+                captured.set(arguments.payload());
+                return CompletableFuture.completedFuture(
+                        ToolExecutionResult.success(List.of(new Content.Text(arguments.payload()))));
+            }
+        };
+        var args = MAPPER.createObjectNode().put("payload", "abc");
+        var client = new ScriptedModelClient(
+                Message.Assistant.of(List.of(toolCall("c1", "sample_tool", args)), StopReason.TOOL_CALL, T1),
+                assistantText("done", StopReason.STOP));
+        var run = run(client, contextWithTools(tool));
+
+        assertEquals(1, execCount.get());
+        assertEquals("abc", captured.get());
+        assertEquals(constraint, tool.spec().constraint());
+        var toolCompleted = run.sink().events().stream()
+                .filter(e -> e instanceof AgentEvent.ToolCompleted)
+                .map(e -> ((AgentEvent.ToolCompleted) e).result())
+                .findFirst().orElseThrow();
+        assertFalse(toolCompleted.error());
+        assertEquals("abc", ((Content.Text) toolCompleted.content().get(0)).text());
+    }
+
+    private record PayloadArgs(String payload) {}
 
     private static int indexOf(List<AgentEvent> events, java.util.function.Predicate<AgentEvent> test) {
         for (int i = 0; i < events.size(); i++) {

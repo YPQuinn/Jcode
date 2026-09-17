@@ -12,8 +12,9 @@ import java.util.Objects;
  * Provider-neutral request boundary from a caller to a {@link ModelClient}:
  * which model (by stable {@link ModelRef}), the system prompt, the
  * <em>standard</em> {@link Message} history (already projected from any
- * caller-specific transcript shape), the declarable {@link ToolSpec}s, and an
- * absolute provider-neutral {@link ThinkingLevel}.
+ * caller-specific transcript shape), the declarable {@link ToolSpec}s, an
+ * absolute provider-neutral {@link ThinkingLevel}, and optional
+ * {@link ModelRequestOptions}.
  *
  * <p>Carries only {@code ai} types — never {@code AgentMessage} or executable
  * tools — so the model-call seam stays provider-neutral and free of
@@ -24,7 +25,8 @@ public record ModelRequest(
         String systemPrompt,
         List<Message> messages,
         List<ToolSpec> tools,
-        ThinkingLevel thinkingLevel
+        ThinkingLevel thinkingLevel,
+        ModelRequestOptions options
 ) {
     public ModelRequest {
         Objects.requireNonNull(model, "model must not be null");
@@ -32,6 +34,21 @@ public record ModelRequest(
         messages = List.copyOf(Objects.requireNonNull(messages, "messages must not be null"));
         tools = List.copyOf(Objects.requireNonNull(tools, "tools must not be null"));
         Objects.requireNonNull(thinkingLevel, "thinkingLevel must not be null");
+        options = (options == null) ? ModelRequestOptions.defaults() : options;
+    }
+
+    /**
+     * Compatibility constructor: thinking level only. Request options default
+     * to {@link ModelRequestOptions#defaults()}.
+     */
+    public ModelRequest(
+            ModelRef model,
+            String systemPrompt,
+            List<Message> messages,
+            List<ToolSpec> tools,
+            ThinkingLevel thinkingLevel
+    ) {
+        this(model, systemPrompt, messages, tools, thinkingLevel, ModelRequestOptions.defaults());
     }
 
     /**
@@ -44,6 +61,6 @@ public record ModelRequest(
             List<Message> messages,
             List<ToolSpec> tools
     ) {
-        this(model, systemPrompt, messages, tools, ThinkingLevel.PROVIDER_DEFAULT);
+        this(model, systemPrompt, messages, tools, ThinkingLevel.PROVIDER_DEFAULT, ModelRequestOptions.defaults());
     }
 }

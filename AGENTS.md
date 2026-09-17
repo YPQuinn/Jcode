@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-09-16 00:33 PDT
+**Generated:** 2026-09-17 02:55 PDT
 **Branch:** master
 
 ## OVERVIEW
@@ -15,19 +15,25 @@ Jcode/
 ├── .mvn/jvm.config      # -Djava.io.tmpdir=C:/Temp/maven (会副作用创建根目录 C:/)
 ├── ai/                  # 模型调用协议层 (零 Jcode 内部依赖)
 │   └── src/main/java/site/pplee/jcode/ai/
-│       ├── client/      # ModelClient SPI + ModelRequest 边界
+│       ├── client/      # ModelClient SPI + ModelRequest / ModelRequestOptions / ToolChoice / PromptCacheOptions
 │       ├── concurrent/  # CancellationSignal 只读取消协议 + CancellationRegistration
-│       ├── message/     # Message/Content/StopReason/Usage/ModelReplayState 标准 LLM 类型
+│       ├── message/     # Message/Content/StopReason/Usage/CostEstimate/ResponseMetadata/ModelReplayState 标准 LLM 类型
 │       ├── model/       # Model/ModelRef 模型身份 (provider/api/modelId)
 │       ├── provider/    # ModelProvider/Models/DefaultModels/CopyOnWriteModels provider runtime 抽象
 │       ├── stream/     # AssistantMessageEvent (sealed 12 variants) + AssistantMessageStream (push-pull) + AssistantMessageStreams (合成失败流)
-│       └── tool/        # ToolSpec 可声明工具规范
+│       ├── tool/        # ToolSpec + ToolInputConstraint 可声明工具规范
+│       └── util/        # UnicodeSanitizer（无状态 UTF-16 well-formedness / unpaired surrogate 删除）
 ├── ai-providers/       # 共享的具体 provider 模块 (唯一依赖: ai; 每 provider 一子包, 当前含 openai)
 │   └── src/main/java/site/pplee/jcode/aiproviders/openai/
 │       ├── OpenAiProvider.java            # public provider runtime (implements ai.provider.ModelProvider)
-│       ├── OpenAiProviderConfig.java      # 显式配置 (redacted toString) + OpenAiCredentials/OpenAiModelCapabilities
-│       ├── OpenAiResponsesAdapter.java    # package-private Responses HTTP/SSE 流 adapter（可中断 ActiveExchange）
-│       ├── OpenAiTranscriptPlanner.java   # package-private transcript 规划（reasoning replay / pairing）
+│       ├── OpenAiProviderConfig.java      # 显式配置 (redacted toString) + credentials/capabilities/compatibility/serviceTier/OpenAiHeaders/OpenAiPricing/OpenAiRetryPolicy
+│       ├── OpenAiHeaders.java             # 安全 custom header builder（redacted toString，reserved 头不可覆盖）
+│       ├── OpenAiPricing.java             # 显式价格表（按 model id，DECIMAL128，默认 absent）
+│       ├── OpenAiRetryPolicy.java         # 显式 opt-in 重试（maxRetries 默认 0，有界 delay/jitter/budget）
+│       ├── OpenAiSecretRedactor.java      # package-private 请求本地敏感值清洗（terminal Error 统一 redacted）
+│       ├── OpenAiResponsesAdapter.java    # package-private Responses HTTP/SSE 流 adapter（可中断 ActiveExchange + 可取消 backoff）
+│       ├── OpenAiTranscriptPlanner.java   # package-private transcript 规划（reasoning replay / pairing / custom tools）
+│       ├── OpenAiConstrainedSampling.java # package-private strict/grammar 映射与 custom-tool JSON delta
 │       ├── OpenAiReplayStateCodec.java    # package-private opaque replay envelope
 │       └── OpenAiPartialJsonParser.java   # package-private 有界 partial JSON 预览
 ├── agent-core/          # 通用 Agent Runtime (唯一内部依赖: ai)
@@ -69,7 +75,7 @@ Jcode/
 - `Agent` 内部包装用户 `AgentEventSink` 为归约 sink：先以 `AtomicReference<AgentState>` + CAS 更新 AgentState，再委托用户 sink。用户 sink 看到事件时状态已完成归约。
 - 流式消费：`AgentLoop.consumeStream()` 在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终消息。partial 不进入 context。
 - Context 投影：每次模型调用前依次执行 `ContextTransformer`（异步、取消感知）→ `MessageProjector`（同步），只生成本次请求视图，不修改 transcript。transformer 裁剪/注入的消息不进入 context、`LoopResult.newMessages` 或事件。回调失败归一为 terminal `ERROR`/`ABORTED` assistant，不使 run future 异常失败。取消在 transform 后和 project 后各检查一次。
-- 下一 Turn 控制：每个正常 turn 的 `TurnCompleted` 之后依次执行 `PrepareNextTurn`（替换 context/model/thinking，Optional 空值表示保持）→ 原子应用 → `ShouldStopAfterTurn`（STOP 优雅停止，不改 stop reason、不 drain steering/follow-up）→ steering drain → follow-up drain。hook 失败归一为 terminal `ERROR`/`ABORTED` assistant；terminal model failure 跳过 hook；model/thinking 更新仅影响当前 run 后续 turn，context 替换持久到 `Agent.context()`。`ModelRequest` 携带绝对 `ThinkingLevel`（`PROVIDER_DEFAULT` 表示 adapter 不主动指定）。
+- 下一 Turn 控制：每个正常 turn 的 `TurnCompleted` 之后依次执行 `PrepareNextTurn`（替换 context/model/thinking，Optional 空值表示保持）→ 原子应用 → `ShouldStopAfterTurn`（STOP 优雅停止，不改 stop reason、不 drain steering/follow-up）→ steering drain → follow-up drain。hook 失败归一为 terminal `ERROR`/`ABORTED` assistant；terminal model failure 跳过 hook；model/thinking 更新仅影响当前 run 后续 turn，context 替换持久到 `Agent.context()`。`ModelRequest` 携带绝对 `ThinkingLevel`（`PROVIDER_DEFAULT` 表示 adapter 不主动指定）和固定的 `ModelRequestOptions`（本批 `PrepareNextTurn` 不可改）。
 - 消息事件序列：用户/toolResult 发 `MessageStarted → MessageCompleted`；assistant 发 `MessageStarted → MessageUpdated... → MessageCompleted`。
 - 工具三阶段管道（prepare/execute/finalize）由 `ToolCallExecutor` 统一保证顺序；具体工具只实现 `AgentTool<A>`。
   - prepare：`prepareArguments` → `ToolSchemaValidator` → `BeforeToolCall` → `treeToValue`
@@ -165,6 +171,13 @@ mdbook serve docs/architecture --open
 - 未来模块（未创建）：`coding-agent`、`server`、`tui`。仅在出现真实独立使用者或产品入口时创建，不预建空模块。未来 provider 实现（anthropic/google 等）不再新建 Maven 模块，而是放入共享模块 `ai-providers` 的子包。
 - `agent-core` 核心基线已包含模块 seam、流式协议、工具三阶段执行、Context 投影、下一 Turn 控制与并行工具双排序；对应实施方案均已归档。
 - OpenAI Responses 正确性首批（OAI-001～OAI-009）已落地：`store:false` reasoning replay、transcript planner、可中断 HTTP/SSE、incomplete 分 reason 映射、stream/event fidelity。方案见 `docs/plans/archived/openai-responses-correctness-first-batch.md`。`Content.ToolCall` 仍走 `oai1:` id 编码，text/thinking 走 `ModelReplayState`；统一到 content replayState 须在引入第二个 provider 前完成。
+- OpenAI Responses 第二批（OAI-010～OAI-018，OAI-014 不含 deferred tool loading）已落地。方案见 `docs/plans/archived/openai-responses-capabilities-resilience-second-batch.md`。
+- OpenAI Responses 第二批 PR 1（OAI-010/OAI-011）已落地：`Content.Image`（base64-only，`toString()` redacted）、空工具结果 `"(no tool output)"`、vision/non-vision 图片占位与 `function_call_output` 内保留、`developer`/`system` 由 model capability × endpoint compatibility 共同决定。老 `OpenAiModelCapabilities` 两参数构造默认无 image、不优先 developer。
+- OpenAI Responses 第二批 PR 2（OAI-012/OAI-013）已落地：provider-neutral `ModelRequestOptions`（`maxOutputTokens`/`temperature`/`ToolChoice`/`PromptCacheOptions`）、`AgentConfig` 固定透传；OpenAI max token clamp（1–15→16）、temperature/tool-choice capability、显式 `OpenAiServiceTier`；四种 cache retention、cache key 按 Unicode code point 截断 64；显式 `OpenAiEndpointProfile`/`OpenAiHeaders`（敏感值与 reserved 头不可覆盖，不按 URL 推断）。不支持的显式选项走 terminal mapping error。
+- OpenAI Responses 第二批 PR 3（OAI-014 的 strict/grammar/custom-tool 部分，不含 deferred tool loading）已落地：`ai.tool.ToolInputConstraint`（`None`/`JsonSchema`/`Grammar` + `Requirement` PREFER/REQUIRE + `GrammarSyntax` LARK/REGEX，无 wire 映射）；`ToolSpec` 四参数 + 三参数默认 `None`；endpoint `strictTools`/`grammarTools` 显式配置、旧构造默认关闭、不从 URL 推断。普通 function payload 不变；strict 可转则发 `strict: true`，`PREFER` 安全降级、`REQUIRE` mapping error；grammar 映射 custom tool（LARK 优先，`lark`/`regex` 仅 provider 内翻译），Specific tool_choice 跟随同一 `resolveGrammar` 事实；stream 归一为标准 ToolCall 事件（JSON string field 正确转义；terminal `response.output` 权威 finalize 仍 open 的 custom slot），replay 走 `custom_tool_call`/`custom_tool_call_output`。
+- OpenAI Responses 第二批 PR 4（OAI-015）已落地：`ResponseMetadata`（bounded optional response/request id 与 raw terminal reason，`empty()`，`toString` redacted）；`Message.Assistant.metadata` 兼容旧构造默认 empty，partial empty，terminal success/error 保留安全 metadata；`Usage.reasoningTokens` + optional `CostEstimate`（DECIMAL128，未定价 absent）；OpenAI 从 `response.created`/`response.id` / `status[.reason]` / 响应头 `x-request-id` 提取（非 2xx 不读 error body），`correlationSnapshot` 在 mapper 处理后同步到 exchange 供 synthetic ERROR/ABORTED 沿用；非法/溢出 usage 与非 object details 为 mapping error；`OpenAiPricing` 显式注入、按 model id、可选 threshold（严格大于）与 service-tier multiplier（未知非空 tier 不套用 requested multiplier）。
+- OpenAI Responses 第二批 PR 5（OAI-016）已落地：`OpenAiRetryPolicy`（`maxRetries` 默认 0；`maxServerDelay`/`maxBackoff`/jitter 范围/可选 totalBudget 严格非负有界）；仅在 2xx SSE 被接受前重试；`x-should-retry` 覆盖 → 无 status transport → 408/409/429/500–599（不含 499/600+），其他 4xx 不重试；delay 优先 retry-after-ms / Retry-After 秒 / HTTP 日期 / 指数退避+jitter，非法 header 回退，负 delay 归零，超过 maxServerDelay 立即失败；`totalBudget` 从首次 attempt 起 wall-clock，wait 完成后与下一 attempt 发送前复查 deadline（clock 回拨视为 elapsed=0）；非 2xx body 纳入 ActiveExchange，bounded read 后立即 identity-safe close/detach，cancel/close 立即关闭，read IO 按 abort cause 归一且不重试；`OpenAiSecretRedactor` 请求本地清洗 credentials/org/project/全部 custom header values/原始与 clamp 后 cache key/session id，含外部文本的 terminal Error 统一清洗 message 与 metadata，`OpenAiHttpError` 生产路径 retained 文本即已清洗，内部异常与 SSE name/type conflict 用固定消息；`sendAsync` 同步 RuntimeException 固定 `request failed`，仅 `UncheckedIOException` 按 transport 重试。每次 attempt 重建 HttpRequest/BodyPublisher、复用请求 JSON bytes；provider-owned 有界 scheduler，取消/close 取消 timer，attempt 间不复用 EventMapper，全生命周期一次 Start 与一次 terminal。`OpenAiHttpError` 仅保留 retry allowlist 头、`x-request-id`、≤4KiB body 与标准 envelope；非 2xx body id 不进 metadata。
+- OpenAI Responses 第二批 PR 6（OAI-017/OAI-018）已落地：`ai.util.UnicodeSanitizer` 单次 UTF-16 扫描删除 unpaired high/low surrogate，合法 pair/组合序列不变，已合法字符串返回原实例，无 normalization。OpenAI 仅在请求序列化边界做 request-local 清洗（system/developer prompt、可见 message/tool-result 文本、tool description、schema/arguments 的 textual JsonNode、grammar/custom input）；image base64 与 opaque replay/encrypted payload 不清洗。身份字段失败而非改写：tool name（先于 constraint resolution）、tool-call id、model/provider/api id、header name/value（含 Authorization API key）、JSON object field name、prompt cache key、assistant replay item id/phase。诊断不含原值。请求期身份失败走既有 Start → Error；header builder / 配置校验保持原 early-fail 契约。第二批协议矩阵收口于 `OpenAiResponsesProtocolMatrixTest`。deferred tool loading 未交付。
 
 ## Must Do After Change
 

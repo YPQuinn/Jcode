@@ -1,18 +1,26 @@
 package site.pplee.jcode.ai;
 
 import org.junit.jupiter.api.Test;
+import site.pplee.jcode.ai.client.CacheRetention;
 import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.client.ModelRequest;
+import site.pplee.jcode.ai.client.ModelRequestOptions;
+import site.pplee.jcode.ai.client.PromptCacheOptions;
+import site.pplee.jcode.ai.client.ToolChoice;
 import site.pplee.jcode.ai.concurrent.CancellationRegistration;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.ModelReplayState;
+import site.pplee.jcode.ai.message.ResponseMetadata;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.Model;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
+import site.pplee.jcode.ai.tool.GrammarSyntax;
+import site.pplee.jcode.ai.tool.Requirement;
+import site.pplee.jcode.ai.tool.ToolInputConstraint;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -105,6 +113,28 @@ class AiModuleTest {
     }
 
     @Test
+    void toolSpecThreeArgumentConstructorDefaultsToNoneConstraint() {
+        var spec = new ToolSpec("echo", "desc", NullNode.getInstance());
+        assertEquals(ToolInputConstraint.none(), spec.constraint());
+        assertEquals(new ToolInputConstraint.None(), ToolSpec.minimal("echo").constraint());
+    }
+
+    @Test
+    void toolInputConstraintRejectsBlankGrammarVariantsAndNullRequirement() {
+        assertThrows(NullPointerException.class, () -> new ToolInputConstraint.JsonSchema(null));
+        assertThrows(NullPointerException.class,
+                () -> new ToolInputConstraint.Grammar(null, Requirement.PREFER));
+        assertThrows(IllegalArgumentException.class, () -> new ToolInputConstraint.Grammar(
+                java.util.Map.of(GrammarSyntax.LARK, "   "), Requirement.REQUIRE));
+        var grammar = new ToolInputConstraint.Grammar(
+                new java.util.LinkedHashMap<>(java.util.Map.of(GrammarSyntax.REGEX, "a+")),
+                Requirement.PREFER);
+        assertEquals("a+", grammar.variants().get(GrammarSyntax.REGEX));
+        assertThrows(UnsupportedOperationException.class,
+                () -> grammar.variants().put(GrammarSyntax.LARK, "start: /x/"));
+    }
+
+    @Test
     void modelRequestCopiesAndFreezesMessagesAndTools() {
         var mapper = new ObjectMapper();
         var messages = new java.util.ArrayList<>(List.<Message>of(new Message.User(List.of(new Content.Text("a")), T1)));
@@ -127,8 +157,68 @@ class AiModuleTest {
 
         assertEquals(ThinkingLevel.PROVIDER_DEFAULT, defaultRequest.thinkingLevel());
         assertEquals(ThinkingLevel.HIGH, highRequest.thinkingLevel());
+        assertEquals(ModelRequestOptions.defaults(), defaultRequest.options());
+        assertEquals(ModelRequestOptions.defaults(), highRequest.options());
         assertThrows(NullPointerException.class,
                 () -> new ModelRequest(REF, "sys", List.of(), List.of(), null));
+    }
+
+    @Test
+    void modelRequestOptionsValidateAndDefault() {
+        var options = ModelRequestOptions.defaults()
+                .withMaxOutputTokens(32)
+                .withTemperature(0.0d)
+                .withToolChoice(ToolChoice.required())
+                .withPromptCache(PromptCacheOptions.defaults()
+                        .withRetention(CacheRetention.SHORT)
+                        .withCacheKey("cache-a")
+                        .withSessionAffinityId("session-a"));
+        var request = new ModelRequest(REF, "sys", List.of(), List.of(), ThinkingLevel.LOW, options);
+
+        assertEquals(32, request.options().maxOutputTokens());
+        assertEquals(0.0d, request.options().temperature());
+        assertEquals(ToolChoice.required(), request.options().toolChoice());
+        assertEquals(CacheRetention.SHORT, request.options().promptCache().retention());
+        assertEquals("cache-a", request.options().promptCache().cacheKey());
+        assertEquals("session-a", request.options().promptCache().sessionAffinityId());
+        assertEquals(ToolChoice.Mode.AUTO, ModelRequestOptions.defaults().toolChoice());
+        assertEquals(CacheRetention.PROVIDER_DEFAULT, PromptCacheOptions.defaults().retention());
+        assertEquals(CacheRetention.NONE, PromptCacheOptions.none().retention());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ModelRequestOptions.defaults().withMaxOutputTokens(0));
+        assertThrows(IllegalArgumentException.class,
+                () -> ModelRequestOptions.defaults().withMaxOutputTokens(-1));
+        assertThrows(IllegalArgumentException.class,
+                () -> ModelRequestOptions.defaults().withTemperature(-0.1d));
+        assertThrows(IllegalArgumentException.class,
+                () -> ModelRequestOptions.defaults().withTemperature(Double.NaN));
+        assertThrows(IllegalArgumentException.class,
+                () -> ModelRequestOptions.defaults().withTemperature(Double.POSITIVE_INFINITY));
+        assertThrows(IllegalArgumentException.class, () -> ToolChoice.specific(" "));
+        assertEquals(null, new PromptCacheOptions(CacheRetention.SHORT, "  ", "  ").cacheKey());
+        assertEquals(null, new PromptCacheOptions(CacheRetention.SHORT, "  ", "  ").sessionAffinityId());
+    }
+
+    @Test
+    void promptCacheOptionsToStringHidesValuesAndCascades() {
+        var cache = new PromptCacheOptions(CacheRetention.SHORT, "cache-secret-value", "session-secret-value");
+        assertEquals("cache-secret-value", cache.cacheKey());
+        assertEquals("session-secret-value", cache.sessionAffinityId());
+        assertTrue(cache.toString().contains("SHORT"));
+        assertTrue(cache.toString().contains("cacheKey=present"));
+        assertTrue(cache.toString().contains("sessionAffinityId=present"));
+        assertFalse(cache.toString().contains("cache-secret-value"));
+        assertFalse(cache.toString().contains("session-secret-value"));
+        assertEquals("PromptCacheOptions[retention=PROVIDER_DEFAULT, cacheKey=absent, sessionAffinityId=absent]",
+                PromptCacheOptions.defaults().toString());
+
+        var options = ModelRequestOptions.defaults().withPromptCache(cache);
+        var request = new ModelRequest(REF, "sys", List.of(), List.of(), ThinkingLevel.LOW, options);
+        assertFalse(options.toString().contains("cache-secret-value"));
+        assertFalse(options.toString().contains("session-secret-value"));
+        assertFalse(request.toString().contains("cache-secret-value"));
+        assertFalse(request.toString().contains("session-secret-value"));
     }
 
     @Test
@@ -144,6 +234,32 @@ class AiModuleTest {
     }
 
     @Test
+    void imageRejectsInvalidMediaTypeAndDataUrlAndRedactsPayload() {
+        var image = new Content.Image("IMAGE/PNG", "AA==");
+        assertEquals("image/png", image.mediaType());
+        assertEquals("AA==", image.base64Data());
+        assertFalse(image.toString().contains("AA=="));
+        assertTrue(image.toString().contains("image/png"));
+        assertTrue(image.toString().contains("encodedLength=4"));
+
+        assertThrows(IllegalArgumentException.class, () -> new Content.Image(" ", "AA=="));
+        assertThrows(IllegalArgumentException.class, () -> new Content.Image("text/plain", "AA=="));
+        assertThrows(IllegalArgumentException.class, () -> new Content.Image("image/", "AA=="));
+        assertThrows(IllegalArgumentException.class, () -> new Content.Image("image/png", " "));
+        assertThrows(IllegalArgumentException.class,
+                () -> new Content.Image("image/png", "data:image/png;base64,AA=="));
+        assertThrows(IllegalArgumentException.class, () -> new Content.Image("image/png", "@@@"));
+        assertThrows(IllegalArgumentException.class, () -> new Content.Image("image/png", "AA-="));
+        var label = switch ((Content) image) {
+            case Content.Text ignored -> "text";
+            case Content.Thinking ignored -> "thinking";
+            case Content.ToolCall ignored -> "tool";
+            case Content.Image ignored -> "image";
+        };
+        assertEquals("image", label);
+    }
+
+    @Test
     void textThinkingAndAssistantCompatibilityConstructorsLeaveReplayUnset() {
         var text = new Content.Text("hello");
         var thinking = new Content.Thinking("reason");
@@ -156,6 +272,8 @@ class AiModuleTest {
         assertEquals(null, thinking.replayState());
         assertEquals(null, assistant.sourceModel());
         assertEquals(null, of.sourceModel());
+        assertEquals(ResponseMetadata.empty(), assistant.metadata());
+        assertEquals(ResponseMetadata.empty(), of.metadata());
         assertEquals(text, new Content.Text("hello", null));
         assertEquals(thinking, new Content.Thinking("reason", null));
     }
@@ -164,6 +282,8 @@ class AiModuleTest {
     void usageZeroAndInvariants() {
         var z = Usage.zero();
         assertEquals(0, z.totalTokens());
+        assertEquals(0, z.reasoningTokens());
+        assertTrue(z.cost().isEmpty());
         assertThrows(IllegalArgumentException.class, () -> new Usage(-1, 0, 0, 0, 0));
     }
 

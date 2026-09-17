@@ -2,13 +2,20 @@ package site.pplee.jcode.aiproviders.openai;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import site.pplee.jcode.ai.client.CacheRetention;
 import site.pplee.jcode.ai.client.ModelRequest;
+import site.pplee.jcode.ai.client.ModelRequestOptions;
+import site.pplee.jcode.ai.client.PromptCacheOptions;
+import site.pplee.jcode.ai.client.ToolChoice;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
+import site.pplee.jcode.ai.tool.GrammarSyntax;
+import site.pplee.jcode.ai.tool.Requirement;
+import site.pplee.jcode.ai.tool.ToolInputConstraint;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
 import java.time.Instant;
@@ -49,6 +56,12 @@ class OpenAiRequestMapperTest {
         var user = payload.get("input").get(1);
         assertEquals("user", user.get("role").asText());
         assertEquals("hello", user.get("content").get(0).get("text").asText());
+        assertFalse(payload.has("max_output_tokens"));
+        assertFalse(payload.has("temperature"));
+        assertFalse(payload.has("tool_choice"));
+        assertFalse(payload.has("prompt_cache_key"));
+        assertFalse(payload.has("prompt_cache_retention"));
+        assertFalse(payload.has("service_tier"));
     }
 
     @Test
@@ -101,6 +114,8 @@ class OpenAiRequestMapperTest {
         assertEquals("echo", tool.get("name").asText());
         assertTrue(tool.get("parameters").isObject());
         assertEquals(0, tool.get("parameters").size());
+        assertFalse(tool.has("strict"));
+        assertFalse(tool.has("format"));
     }
 
     @Test
@@ -232,6 +247,73 @@ class OpenAiRequestMapperTest {
     }
 
     @Test
+    void twoArgCapabilitiesKeepSystemRoleAndOmitImages() {
+        var image = new Content.Image("image/png", "AA==");
+        var capabilities = new OpenAiModelCapabilities(true, Map.of(ThinkingLevel.MEDIUM, "medium"));
+        var request = new ModelRequest(REF, "sys prompt",
+                List.of(new Message.User(List.of(new Content.Text("look"), image), T1)),
+                List.of());
+        var payload = mapper.map(request, capabilities);
+
+        assertFalse(capabilities.imageInput());
+        assertFalse(capabilities.developerRolePreferred());
+        assertEquals("system", payload.get("input").get(0).get("role").asText());
+        assertEquals("look\n" + OpenAiTranscriptPlanner.omittedImage("image/png"),
+                payload.get("input").get(1).get("content").get(0).get("text").asText());
+    }
+
+    @Test
+    void developerRoleRequiresModelPreferenceAndEndpointSupport() {
+        var preferred = new OpenAiModelCapabilities(true, Map.of(), false, true);
+        var request = new ModelRequest(REF, "sys prompt", List.of(), List.of());
+
+        assertEquals("developer", mapper.map(request, preferred).get("input").get(0).get("role").asText());
+        assertEquals("system", mapper.map(request, preferred, OpenAiResponsesCompatibility.forceSystem())
+                .get("input").get(0).get("role").asText());
+        assertEquals("system", mapper.map(request, OpenAiModelCapabilities.noReasoning())
+                .get("input").get(0).get("role").asText());
+        assertEquals(0, mapper.map(new ModelRequest(REF, "  ", List.of(), List.of()), preferred)
+                .get("input").size());
+    }
+
+    @Test
+    void visionUserAndToolImagesStayOnTheirItems() {
+        var image = new Content.Image("image/png", "AA==");
+        var toolCallId = OpenAiToolCallIds.encode("call_abc", "fc_1");
+        var capabilities = new OpenAiModelCapabilities(false, Map.of(), true, false);
+        var request = new ModelRequest(REF, "sys",
+                List.of(
+                        new Message.User(List.of(new Content.Text("see"), image), T1),
+                        new Message.Assistant(List.of(
+                                new Content.ToolCall(toolCallId, "look", MAPPER.createObjectNode())
+                        ), StopReason.TOOL_CALL, null, Usage.zero(), T1),
+                        new Message.ToolResultMessage(toolCallId, "look",
+                                List.of(image), false, T1)
+                ),
+                List.of());
+        var input = mapper.map(request, capabilities).get("input");
+
+        assertEquals("system", input.get(0).get("role").asText());
+        assertEquals("input_image", input.get(1).get("content").get(1).get("type").asText());
+        assertEquals("data:image/png;base64,AA==",
+                input.get(1).get("content").get(1).get("image_url").asText());
+        assertEquals("function_call_output", input.get(3).get("type").asText());
+        assertEquals("input_image", input.get(3).get("output").get(0).get("type").asText());
+        assertEquals(4, input.size());
+    }
+
+    @Test
+    void assistantImageContentFailsMapping() {
+        var request = new ModelRequest(REF, "",
+                List.of(new Message.Assistant(List.of(new Content.Image("image/png", "AA==")),
+                        StopReason.STOP, null, Usage.zero(), T1)),
+                List.of());
+        var error = assertThrows(IllegalArgumentException.class,
+                () -> mapper.map(request, new OpenAiModelCapabilities(false, Map.of(), true, false)));
+        assertTrue(error.getMessage().contains("assistant image"));
+    }
+
+    @Test
     void replayOmitsUnusableDecodedItemId() {
         // Encoded id whose item id is not fc_-prefixed: the item id must be omitted, not sanitized.
         var toolCallId = OpenAiToolCallIds.encode("call_abc", "msg_123");
@@ -244,5 +326,280 @@ class OpenAiRequestMapperTest {
         var functionCall = payload.get("input").get(0);
         assertEquals("call_abc", functionCall.get("call_id").asText());
         assertFalse(functionCall.has("id"));
+    }
+
+    @Test
+    void maxOutputTokensClampAndOmitUnset() {
+        var unset = mapper.map(new ModelRequest(REF, "", List.of(), List.of()), null);
+        assertFalse(unset.has("max_output_tokens"));
+
+        assertEquals(16, mappedTokens(1));
+        assertEquals(16, mappedTokens(15));
+        assertEquals(16, mappedTokens(16));
+        assertEquals(128, mappedTokens(128));
+    }
+
+    @Test
+    void maxOutputTokensFailsWhenEndpointRejectsIt() {
+        var request = requestWith(ModelRequestOptions.defaults().withMaxOutputTokens(32));
+        var conservative = new OpenAiResponsesCompatibility(true);
+        var error = assertThrows(IllegalArgumentException.class,
+                () -> mapper.map(request, null, conservative));
+        assertTrue(error.getMessage().contains("maxOutputTokens"));
+    }
+
+    @Test
+    void temperatureRequiresModelCapability() {
+        var request = requestWith(ModelRequestOptions.defaults().withTemperature(0.4d));
+        var error = assertThrows(IllegalArgumentException.class, () -> mapper.map(request, null));
+        assertTrue(error.getMessage().contains("temperature"));
+
+        var payload = mapper.map(request, samplingCapabilities());
+        assertEquals(0.4d, payload.get("temperature").asDouble());
+        var omitted = mapper.map(new ModelRequest(REF, "", List.of(), List.of()), samplingCapabilities());
+        assertFalse(omitted.has("temperature"));
+    }
+
+    @Test
+    void toolChoiceModesAndUnknownTool() {
+        var echo = ToolSpec.minimal("echo");
+        var auto = new ModelRequest(REF, "", List.of(), List.of(echo), ThinkingLevel.PROVIDER_DEFAULT,
+                ModelRequestOptions.defaults().withToolChoice(ToolChoice.auto()));
+        assertFalse(mapper.map(auto, samplingCapabilities()).has("tool_choice"));
+
+        var none = new ModelRequest(REF, "", List.of(), List.of(), ThinkingLevel.PROVIDER_DEFAULT,
+                ModelRequestOptions.defaults().withToolChoice(ToolChoice.none()));
+        assertEquals("none", mapper.map(none, samplingCapabilities()).get("tool_choice").asText());
+
+        var required = new ModelRequest(REF, "", List.of(), List.of(echo), ThinkingLevel.PROVIDER_DEFAULT,
+                ModelRequestOptions.defaults().withToolChoice(ToolChoice.required()));
+        assertEquals("required", mapper.map(required, samplingCapabilities()).get("tool_choice").asText());
+
+        var specific = new ModelRequest(REF, "", List.of(), List.of(echo), ThinkingLevel.PROVIDER_DEFAULT,
+                ModelRequestOptions.defaults().withToolChoice(ToolChoice.specific("echo")));
+        var choice = mapper.map(specific, samplingCapabilities()).get("tool_choice");
+        assertEquals("function", choice.get("type").asText());
+        assertEquals("echo", choice.get("name").asText());
+
+        var missing = new ModelRequest(REF, "", List.of(), List.of(echo), ThinkingLevel.PROVIDER_DEFAULT,
+                ModelRequestOptions.defaults().withToolChoice(ToolChoice.specific("other")));
+        var missingError = assertThrows(IllegalArgumentException.class,
+                () -> mapper.map(missing, samplingCapabilities()));
+        assertTrue(missingError.getMessage().contains("not declared"));
+        assertFalse(missingError.getMessage().contains("other"));
+
+        var requiredEmpty = requestWith(ModelRequestOptions.defaults().withToolChoice(ToolChoice.required()));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(requiredEmpty, samplingCapabilities()));
+
+        var unsupported = requestWith(ModelRequestOptions.defaults().withToolChoice(ToolChoice.none()));
+        var unsupportedError = assertThrows(IllegalArgumentException.class, () -> mapper.map(unsupported, null));
+        assertTrue(unsupportedError.getMessage().contains("tool choice"));
+    }
+
+    @Test
+    void specificToolChoiceFollowsResolvedGrammarNotConstraintType() throws Exception {
+        var grammar = new ToolSpec("sample_tool", "Sample tool", grammarSchema("payload"),
+                new ToolInputConstraint.Grammar(Map.of(GrammarSyntax.LARK, "start: /x/"), Requirement.PREFER));
+        var request = new ModelRequest(REF, "", List.of(), List.of(grammar), ThinkingLevel.PROVIDER_DEFAULT,
+                ModelRequestOptions.defaults().withToolChoice(ToolChoice.specific("sample_tool")));
+
+        var custom = mapper.map(request, samplingCapabilities()).get("tool_choice");
+        assertEquals("custom", custom.get("type").asText());
+        assertEquals("sample_tool", custom.get("name").asText());
+
+        var fallback = mapper.map(request, samplingCapabilities(), new OpenAiResponsesCompatibility(true))
+                .get("tool_choice");
+        assertEquals("function", fallback.get("type").asText());
+        assertEquals("sample_tool", fallback.get("name").asText());
+    }
+
+    @Test
+    void promptCacheRetentionModesAndCodePointClamp() {
+        var defaultPayload = mapper.map(requestWith(ModelRequestOptions.defaults()), null);
+        assertFalse(defaultPayload.has("prompt_cache_key"));
+        assertFalse(defaultPayload.has("prompt_cache_retention"));
+
+        var none = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.none().withCacheKey("ignored").withSessionAffinityId("session")));
+        var nonePayload = mapper.map(none, null);
+        assertFalse(nonePayload.has("prompt_cache_key"));
+        assertFalse(nonePayload.has("prompt_cache_retention"));
+
+        var defaultWithKey = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.defaults().withCacheKey("cache-default")));
+        var defaultWithKeyPayload = mapper.map(defaultWithKey, null);
+        assertEquals("cache-default", defaultWithKeyPayload.get("prompt_cache_key").asText());
+        assertFalse(defaultWithKeyPayload.has("prompt_cache_retention"));
+
+        var shortKey = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.defaults().withRetention(CacheRetention.SHORT).withCacheKey("cache-short")));
+        assertEquals("cache-short", mapper.map(shortKey, null).get("prompt_cache_key").asText());
+        assertFalse(mapper.map(shortKey, null).has("prompt_cache_retention"));
+
+        var longKey = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.defaults().withRetention(CacheRetention.LONG).withCacheKey("cache-long")));
+        var longPayload = mapper.map(longKey, null);
+        assertEquals("cache-long", longPayload.get("prompt_cache_key").asText());
+        assertEquals("24h", longPayload.get("prompt_cache_retention").asText());
+
+        String emoji = "👍";
+        var oversize = "x".repeat(63) + emoji + "y";
+        var clamped = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.defaults().withRetention(CacheRetention.SHORT).withCacheKey(oversize)));
+        String sent = mapper.map(clamped, null).get("prompt_cache_key").asText();
+        assertEquals(64, sent.codePointCount(0, sent.length()));
+        assertTrue(sent.endsWith(emoji));
+        assertFalse(sent.contains("y"));
+        assertEquals(63 + emoji.length(), sent.length());
+
+        var conservative = new OpenAiResponsesCompatibility(true);
+        var defaultKeyUnsupported = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.defaults().withCacheKey("cache-default")));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(defaultKeyUnsupported, null, conservative));
+        var shortUnsupported = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.defaults().withRetention(CacheRetention.SHORT)));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(shortUnsupported, null, conservative));
+        var longUnsupported = requestWith(ModelRequestOptions.defaults().withPromptCache(
+                PromptCacheOptions.defaults().withRetention(CacheRetention.LONG)));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(longUnsupported, null, conservative));
+    }
+
+    @Test
+    void serviceTierIsWrittenWhenConfigured() {
+        var request = new ModelRequest(REF, "", List.of(), List.of());
+        assertFalse(mapper.map(request, null).has("service_tier"));
+        assertEquals("priority", mapper.map(request, null, OpenAiResponsesCompatibility.openai(),
+                OpenAiServiceTier.PRIORITY).get("service_tier").asText());
+    }
+
+    @Test
+    void jsonSchemaStrictIsEmittedWhenSupportedAndFallsBackWhenPreferred() throws Exception {
+        var schema = MAPPER.readTree("""
+                {"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"number"}},"required":["path"]}
+                """);
+        var prefer = new ToolSpec("read", "read file", schema,
+                new ToolInputConstraint.JsonSchema(Requirement.PREFER));
+        var require = new ToolSpec("read", "read file", schema,
+                new ToolInputConstraint.JsonSchema(Requirement.REQUIRE));
+
+        var supported = mapper.map(new ModelRequest(REF, "", List.of(), List.of(prefer)), null);
+        var tool = supported.get("tools").get(0);
+        assertEquals("function", tool.get("type").asText());
+        assertTrue(tool.get("strict").asBoolean());
+        assertEquals(false, tool.get("parameters").get("additionalProperties").asBoolean());
+        assertEquals("offset", tool.get("parameters").get("required").get(1).asText());
+        assertEquals("null", tool.get("parameters").get("properties").get("offset").get("anyOf").get(1).get("type").asText());
+        assertFalse(schema.has("additionalProperties"), "original schema must stay unchanged");
+
+        var conservative = new OpenAiResponsesCompatibility(true);
+        var fallback = mapper.map(new ModelRequest(REF, "", List.of(), List.of(prefer)), null, conservative)
+                .get("tools").get(0);
+        assertEquals("function", fallback.get("type").asText());
+        assertFalse(fallback.has("strict"));
+        assertEquals(schema, fallback.get("parameters"));
+
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(require)), null, conservative));
+    }
+
+    @Test
+    void jsonSchemaPreferFallsBackWhenSchemaCannotBeMadeStrict() throws Exception {
+        var unsupported = MAPPER.readTree("""
+                {"type":"object","properties":{"child":{"$ref":"https://example.com/child.json"}},"required":["child"]}
+                """);
+        var prefer = new ToolSpec("bad", "desc", unsupported,
+                new ToolInputConstraint.JsonSchema(Requirement.PREFER));
+        var require = new ToolSpec("bad", "desc", unsupported,
+                new ToolInputConstraint.JsonSchema(Requirement.REQUIRE));
+
+        var fallback = mapper.map(new ModelRequest(REF, "", List.of(), List.of(prefer)), null).get("tools").get(0);
+        assertFalse(fallback.has("strict"));
+        assertEquals(unsupported, fallback.get("parameters"));
+        var error = assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(require)), null));
+        assertTrue(error.getMessage().contains("$ref"));
+    }
+
+    @Test
+    void grammarSelectsLarkOverRegexAndFallsBackWhenUnsupported() throws Exception {
+        var schema = grammarSchema("payload");
+        var both = new ToolSpec("sample_tool", "Sample tool", schema,
+                new ToolInputConstraint.Grammar(Map.of(
+                        GrammarSyntax.LARK, "start: /[a-z]+/",
+                        GrammarSyntax.REGEX, "[0-9]+"
+                ), Requirement.PREFER));
+        var regexOnly = new ToolSpec("sample_tool", "Sample tool", schema,
+                new ToolInputConstraint.Grammar(Map.of(GrammarSyntax.REGEX, "[0-9]+"), Requirement.PREFER));
+        var require = new ToolSpec("sample_tool", "Sample tool", schema,
+                new ToolInputConstraint.Grammar(Map.of(GrammarSyntax.LARK, "start: /[a-z]+/"), Requirement.REQUIRE));
+
+        var lark = mapper.map(new ModelRequest(REF, "", List.of(), List.of(both)), null).get("tools").get(0);
+        assertEquals("custom", lark.get("type").asText());
+        assertEquals("lark", lark.get("format").get("syntax").asText());
+        assertEquals("start: /[a-z]+/", lark.get("format").get("definition").asText());
+        assertFalse(lark.has("parameters"));
+
+        var regex = mapper.map(new ModelRequest(REF, "", List.of(), List.of(regexOnly)), null).get("tools").get(0);
+        assertEquals("regex", regex.get("format").get("syntax").asText());
+
+        var conservative = new OpenAiResponsesCompatibility(true);
+        var fallback = mapper.map(new ModelRequest(REF, "", List.of(), List.of(both)), null, conservative)
+                .get("tools").get(0);
+        assertEquals("function", fallback.get("type").asText());
+        assertFalse(fallback.has("strict"));
+        assertEquals(schema, fallback.get("parameters"));
+
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(require)), null, conservative));
+    }
+
+    @Test
+    void grammarSupportedButMalformedOrMissingVariantFailsEvenWhenPreferred() throws Exception {
+        var preferEmpty = new ToolSpec("sample_tool", "Sample tool", grammarSchema("payload"),
+                new ToolInputConstraint.Grammar(Map.of(), Requirement.PREFER));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(preferEmpty)), null));
+
+        var notObject = new ToolSpec("sample_tool", "Sample tool", MAPPER.readTree("{\"type\":\"string\"}"),
+                new ToolInputConstraint.Grammar(Map.of(GrammarSyntax.LARK, "start: /x/"), Requirement.PREFER));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(notObject)), null));
+
+        var twoRequired = new ToolSpec("sample_tool", "Sample tool", MAPPER.readTree("""
+                {"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}},"required":["a","b"]}
+                """), new ToolInputConstraint.Grammar(Map.of(GrammarSyntax.LARK, "start: /x/"), Requirement.PREFER));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(twoRequired)), null));
+
+        var missingProperty = new ToolSpec("sample_tool", "Sample tool", MAPPER.readTree("""
+                {"type":"object","properties":{},"required":["payload"]}
+                """), new ToolInputConstraint.Grammar(Map.of(GrammarSyntax.LARK, "start: /x/"), Requirement.PREFER));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(missingProperty)), null));
+
+        var notString = new ToolSpec("sample_tool", "Sample tool", MAPPER.readTree("""
+                {"type":"object","properties":{"payload":{"type":"number"}},"required":["payload"]}
+                """), new ToolInputConstraint.Grammar(Map.of(GrammarSyntax.LARK, "start: /x/"), Requirement.PREFER));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(
+                new ModelRequest(REF, "", List.of(), List.of(notString)), null));
+    }
+
+    private static ModelRequest requestWith(ModelRequestOptions options) {
+        return new ModelRequest(REF, "", List.of(), List.of(), ThinkingLevel.PROVIDER_DEFAULT, options);
+    }
+
+    private int mappedTokens(int requested) {
+        var request = requestWith(ModelRequestOptions.defaults().withMaxOutputTokens(requested));
+        return mapper.map(request, null).get("max_output_tokens").asInt();
+    }
+
+    private static OpenAiModelCapabilities samplingCapabilities() {
+        return new OpenAiModelCapabilities(false, Map.of(), false, false, true, true);
+    }
+
+    private static com.fasterxml.jackson.databind.JsonNode grammarSchema(String property) throws Exception {
+        return MAPPER.readTree("""
+                {"type":"object","properties":{"%s":{"type":"string"}},"required":["%s"]}
+                """.formatted(property, property));
     }
 }

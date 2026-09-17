@@ -234,7 +234,8 @@ public final class Agent implements AutoCloseable {
                 new RunEventEmitter(reducerSink),
                 config.thinkingLevel(),
                 config.prepareNextTurn(),
-                config.shouldStopAfterTurn()
+                config.shouldStopAfterTurn(),
+                config.modelRequestOptions()
         );
     }
 

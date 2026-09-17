@@ -1,6 +1,7 @@
 package site.pplee.jcode.agentcore.tool;
 
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
+import site.pplee.jcode.ai.tool.ToolInputConstraint;
 import site.pplee.jcode.ai.tool.ToolSpec;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -52,6 +53,15 @@ public interface AgentTool<A> {
     }
 
     /**
+     * Constrained-sampling declaration copied into {@link #spec()}. Defaults
+     * to {@link ToolInputConstraint#none()}; override to request JSON-schema
+     * or grammar constraints without replacing {@link #spec()}.
+     */
+    default ToolInputConstraint constraint() {
+        return ToolInputConstraint.none();
+    }
+
+    /**
      * Preprocess raw arguments before schema validation and type conversion.
      * Default returns the arguments unchanged. Override to inject defaults,
      * normalize field names, or coerce types.
@@ -62,7 +72,7 @@ public interface AgentTool<A> {
 
     /** The declarable {@link ToolSpec} handed to the model. */
     default ToolSpec spec() {
-        return new ToolSpec(name(), description(), parametersSchema());
+        return new ToolSpec(name(), description(), parametersSchema(), constraint());
     }
 
     /** Default {@link ToolExecutionMode#PARALLEL}; override for sequential. */

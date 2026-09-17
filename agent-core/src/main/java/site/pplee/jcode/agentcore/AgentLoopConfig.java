@@ -10,6 +10,7 @@ import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 import site.pplee.jcode.agentcore.turn.PrepareNextTurn;
 import site.pplee.jcode.agentcore.turn.ShouldStopAfterTurn;
 import site.pplee.jcode.ai.client.ModelClient;
+import site.pplee.jcode.ai.client.ModelRequestOptions;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 
@@ -34,6 +35,8 @@ import java.util.Objects;
  * thinking preference, {@code prepareNextTurn} and {@code shouldStopAfterTurn}
  * are invoked between turns after {@code TurnCompleted}. The config stays
  * immutable; per-turn updates live in {@link LoopState}.
+ * {@code modelRequestOptions} are fixed for the run and forwarded on every
+ * {@code ModelRequest}.
  */
 record AgentLoopConfig(
         ModelRef model,
@@ -49,7 +52,8 @@ record AgentLoopConfig(
         RunEventEmitter events,
         ThinkingLevel thinkingLevel,
         PrepareNextTurn prepareNextTurn,
-        ShouldStopAfterTurn shouldStopAfterTurn
+        ShouldStopAfterTurn shouldStopAfterTurn,
+        ModelRequestOptions modelRequestOptions
 ) {
     AgentLoopConfig {
         Objects.requireNonNull(model, "model must not be null");
@@ -66,6 +70,33 @@ record AgentLoopConfig(
         thinkingLevel = (thinkingLevel == null) ? ThinkingLevel.PROVIDER_DEFAULT : thinkingLevel;
         prepareNextTurn = (prepareNextTurn == null) ? PrepareNextTurn.noop() : prepareNextTurn;
         shouldStopAfterTurn = (shouldStopAfterTurn == null) ? ShouldStopAfterTurn.never() : shouldStopAfterTurn;
+        modelRequestOptions = (modelRequestOptions == null) ? ModelRequestOptions.defaults() : modelRequestOptions;
+    }
+
+    /**
+     * Compatibility constructor without request options. Uses
+     * {@link ModelRequestOptions#defaults()}.
+     */
+    AgentLoopConfig(
+            ModelRef model,
+            ModelClient modelClient,
+            ObjectMapper objectMapper,
+            ContextTransformer contextTransformer,
+            MessageProjector messageProjector,
+            ToolExecutionMode toolExecution,
+            BeforeToolCall beforeToolCall,
+            AfterToolCall afterToolCall,
+            PendingMessageSource steeringMessages,
+            PendingMessageSource followUpMessages,
+            RunEventEmitter events,
+            ThinkingLevel thinkingLevel,
+            PrepareNextTurn prepareNextTurn,
+            ShouldStopAfterTurn shouldStopAfterTurn
+    ) {
+        this(model, modelClient, objectMapper, contextTransformer, messageProjector,
+                toolExecution, beforeToolCall, afterToolCall, steeringMessages, followUpMessages,
+                events, thinkingLevel, prepareNextTurn, shouldStopAfterTurn,
+                ModelRequestOptions.defaults());
     }
 
     /**
@@ -88,6 +119,7 @@ record AgentLoopConfig(
     ) {
         this(model, modelClient, objectMapper, contextTransformer, messageProjector,
                 toolExecution, beforeToolCall, afterToolCall, steeringMessages, followUpMessages,
-                events, ThinkingLevel.PROVIDER_DEFAULT, PrepareNextTurn.noop(), ShouldStopAfterTurn.never());
+                events, ThinkingLevel.PROVIDER_DEFAULT, PrepareNextTurn.noop(), ShouldStopAfterTurn.never(),
+                ModelRequestOptions.defaults());
     }
 }

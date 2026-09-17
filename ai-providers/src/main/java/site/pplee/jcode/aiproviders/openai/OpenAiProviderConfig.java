@@ -15,6 +15,8 @@ import java.util.Optional;
  * never reveals the API key. All values are fixed at construction; the static
  * {@link #responses(OpenAiCredentials, List)} factory builds the default
  * Responses-API configuration and {@link #builder()} allows customization.
+ * Optional {@link OpenAiPricing} is caller-supplied and absent by default.
+ * Optional {@link OpenAiRetryPolicy} defaults to a single attempt.
  */
 public final class OpenAiProviderConfig {
     private final URI baseUrl;
@@ -27,6 +29,11 @@ public final class OpenAiProviderConfig {
     private final String api;
     private final List<Model> models;
     private final Map<String, OpenAiModelCapabilities> capabilities;
+    private final OpenAiResponsesCompatibility compatibility;
+    private final Optional<OpenAiServiceTier> serviceTier;
+    private final OpenAiHeaders headers;
+    private final Optional<OpenAiPricing> pricing;
+    private final OpenAiRetryPolicy retryPolicy;
     private final boolean allowUnlistedModels;
 
     private OpenAiProviderConfig(Builder builder) {
@@ -40,6 +47,11 @@ public final class OpenAiProviderConfig {
         this.api = Objects.requireNonNull(builder.api, "api must not be null");
         this.models = List.copyOf(Objects.requireNonNull(builder.models, "models must not be null"));
         this.capabilities = Map.copyOf(Objects.requireNonNull(builder.capabilities, "capabilities must not be null"));
+        this.compatibility = Objects.requireNonNull(builder.compatibility, "compatibility must not be null");
+        this.serviceTier = Objects.requireNonNull(builder.serviceTier, "serviceTier must not be null");
+        this.headers = Objects.requireNonNull(builder.headers, "headers must not be null");
+        this.pricing = Objects.requireNonNull(builder.pricing, "pricing must not be null");
+        this.retryPolicy = Objects.requireNonNull(builder.retryPolicy, "retryPolicy must not be null");
         this.allowUnlistedModels = builder.allowUnlistedModels;
         validateCatalog();
     }
@@ -115,6 +127,44 @@ public final class OpenAiProviderConfig {
         return capabilities;
     }
 
+    /**
+     * Endpoint compatibility. Official OpenAI defaults accept developer
+     * role, cache keys, official session headers, and strict/grammar tools;
+     * custom endpoints set this explicitly and are never inferred from a URL.
+     */
+    public OpenAiResponsesCompatibility compatibility() {
+        return compatibility;
+    }
+
+    /** Explicit Responses service tier, or empty to omit the field. */
+    public Optional<OpenAiServiceTier> serviceTier() {
+        return serviceTier;
+    }
+
+    /**
+     * Additive custom headers. {@link OpenAiHeaders#toString()} reports
+     * names only; values never appear in diagnostics.
+     */
+    public OpenAiHeaders headers() {
+        return headers;
+    }
+
+    /**
+     * Explicit per-model price table. Absent by default; callers supply
+     * rates that match their account and time. Never inferred.
+     */
+    public Optional<OpenAiPricing> pricing() {
+        return pricing;
+    }
+
+    /**
+     * Opt-in retry bounds. Defaults to {@link OpenAiRetryPolicy#disabled()}
+     * (one attempt). The policy itself contains no credentials.
+     */
+    public OpenAiRetryPolicy retryPolicy() {
+        return retryPolicy;
+    }
+
     /** True when {@code supports} accepts provider/api matches outside the catalog. */
     public boolean allowUnlistedModels() {
         return allowUnlistedModels;
@@ -124,7 +174,10 @@ public final class OpenAiProviderConfig {
     public String toString() {
         return "OpenAiProviderConfig[providerId=" + providerId + ", providerName=" + providerName
                 + ", baseUrl=" + baseUrl + ", api=" + api + ", models=" + models.size()
-                + ", credentials=" + credentials + ", allowUnlistedModels=" + allowUnlistedModels + "]";
+                + ", credentials=" + credentials + ", compatibility=" + compatibility
+                + ", serviceTier=" + serviceTier + ", headers=" + headers
+                + ", pricing=" + pricing + ", retryPolicy=" + retryPolicy
+                + ", allowUnlistedModels=" + allowUnlistedModels + "]";
     }
 
     public static final class Builder {
@@ -138,6 +191,11 @@ public final class OpenAiProviderConfig {
         private String api = "openai-responses";
         private List<Model> models = List.of();
         private Map<String, OpenAiModelCapabilities> capabilities = Map.of();
+        private OpenAiResponsesCompatibility compatibility = OpenAiResponsesCompatibility.openai();
+        private Optional<OpenAiServiceTier> serviceTier = Optional.empty();
+        private OpenAiHeaders headers = OpenAiHeaders.empty();
+        private Optional<OpenAiPricing> pricing = Optional.empty();
+        private OpenAiRetryPolicy retryPolicy = OpenAiRetryPolicy.disabled();
         private boolean allowUnlistedModels;
 
         public Builder baseUrl(URI baseUrl) {
@@ -187,6 +245,31 @@ public final class OpenAiProviderConfig {
 
         public Builder capabilities(Map<String, OpenAiModelCapabilities> capabilities) {
             this.capabilities = capabilities;
+            return this;
+        }
+
+        public Builder compatibility(OpenAiResponsesCompatibility compatibility) {
+            this.compatibility = compatibility;
+            return this;
+        }
+
+        public Builder serviceTier(OpenAiServiceTier serviceTier) {
+            this.serviceTier = Optional.of(serviceTier);
+            return this;
+        }
+
+        public Builder headers(OpenAiHeaders headers) {
+            this.headers = (headers == null) ? OpenAiHeaders.empty() : headers;
+            return this;
+        }
+
+        public Builder pricing(OpenAiPricing pricing) {
+            this.pricing = Optional.ofNullable(pricing);
+            return this;
+        }
+
+        public Builder retryPolicy(OpenAiRetryPolicy retryPolicy) {
+            this.retryPolicy = retryPolicy == null ? OpenAiRetryPolicy.disabled() : retryPolicy;
             return this;
         }
 

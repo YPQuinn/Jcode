@@ -9,11 +9,16 @@ import site.pplee.jcode.agentcore.queue.QueueMode;
 import site.pplee.jcode.agentcore.support.RecordingEventSink;
 import site.pplee.jcode.agentcore.support.TestTools;
 
+import site.pplee.jcode.ai.client.CacheRetention;
 import site.pplee.jcode.ai.client.ModelClient;
 import site.pplee.jcode.ai.client.ModelRequest;
+import site.pplee.jcode.ai.client.ModelRequestOptions;
+import site.pplee.jcode.ai.client.PromptCacheOptions;
+import site.pplee.jcode.ai.client.ToolChoice;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.ResponseMetadata;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
@@ -59,6 +64,28 @@ class AgentTest {
     // --- basic run ---
 
     @Test
+    void assistantCompatibilityConstructorsStayEmptyAndMetadataSurvives() throws Exception {
+        var compat = Message.Assistant.of(List.of(new Content.Text("hi")), StopReason.STOP, T1);
+        assertEquals(ResponseMetadata.empty(), compat.metadata());
+        var metadata = ResponseMetadata.of("resp_1", "req_1", "completed");
+        var priced = new Message.Assistant(
+                List.of(new Content.Text("ok")),
+                StopReason.STOP,
+                null,
+                Usage.zero(),
+                T1,
+                MODEL,
+                metadata);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(priced);
+        try (var agent = new Agent(configWith(client, AgentEventSink.noop()))) {
+            var result = agent.prompt(user("hi")).toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var stored = (Message.Assistant) ((StandardAgentMessage) result.context().messages().get(1)).message();
+            assertEquals(metadata, stored.metadata());
+            assertEquals(MODEL, stored.sourceModel());
+        }
+    }
+
+    @Test
     void promptReturnsResultWithAssistantMessage() throws Exception {
         var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
                 assistantText("hello", StopReason.STOP));
@@ -68,6 +95,35 @@ class AgentTest {
             assertEquals(2, result.context().messages().size());
             assertFalse(agent.isRunning());
         }
+    }
+
+    @Test
+    void modelRequestOptionsPassThroughFromAgentConfig() throws Exception {
+        var options = ModelRequestOptions.defaults()
+                .withMaxOutputTokens(32)
+                .withTemperature(0.2d)
+                .withToolChoice(ToolChoice.required())
+                .withPromptCache(PromptCacheOptions.defaults()
+                        .withRetention(CacheRetention.SHORT)
+                        .withCacheKey("cache-key")
+                        .withSessionAffinityId("session-1"));
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("hello", StopReason.STOP));
+        var cfg = new AgentConfig(
+                new AgentContext("sys", List.of(), List.of()),
+                MODEL, client, MAPPER, null, null, null, null, null, AgentEventSink.noop(),
+                null, null, null, null, null, options);
+        try (var agent = new Agent(cfg)) {
+            agent.prompt(user("hi")).toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(options, client.receivedRequests().get(0).options());
+        }
+        assertFalse(cfg.toString().contains("cache-key"));
+        assertFalse(cfg.toString().contains("session-1"));
+
+        var legacy = new AgentConfig(
+                new AgentContext("sys", List.of(), List.of()),
+                MODEL, client, MAPPER, null, null, null, null, null, AgentEventSink.noop(), null, null);
+        assertEquals(ModelRequestOptions.defaults(), legacy.modelRequestOptions());
     }
 
     @Test

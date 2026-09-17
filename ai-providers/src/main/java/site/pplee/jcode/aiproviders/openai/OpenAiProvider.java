@@ -36,10 +36,21 @@ public final class OpenAiProvider implements ModelProvider, AutoCloseable {
     }
 
     public OpenAiProvider(OpenAiProviderConfig config, HttpClient httpClient, ObjectMapper objectMapper) {
+        this(config, httpClient, objectMapper, OpenAiRetrySupport.createDefault());
+    }
+
+    OpenAiProvider(
+            OpenAiProviderConfig config,
+            HttpClient httpClient,
+            ObjectMapper objectMapper,
+            OpenAiRetrySupport retrySupport
+    ) {
         this.config = Objects.requireNonNull(config, "config must not be null");
-        this.adapter = new OpenAiResponsesAdapter(config,
+        this.adapter = new OpenAiResponsesAdapter(
+                config,
                 Objects.requireNonNull(httpClient, "httpClient must not be null"),
-                Objects.requireNonNull(objectMapper, "objectMapper must not be null"));
+                Objects.requireNonNull(objectMapper, "objectMapper must not be null"),
+                Objects.requireNonNull(retrySupport, "retrySupport must not be null"));
     }
 
     @Override
@@ -83,6 +94,11 @@ public final class OpenAiProvider implements ModelProvider, AutoCloseable {
 
     @Override
     public AssistantMessageStream stream(ModelRequest request, CancellationSignal cancellation) {
+        try {
+            OpenAiRequestUnicode.requireWellFormedModel(request.model());
+        } catch (IllegalArgumentException e) {
+            return AssistantMessageStreams.failed(StopReason.ERROR, e.getMessage());
+        }
         if (!supports(request.model())) {
             return AssistantMessageStreams.failed(StopReason.ERROR,
                     "unsupported model: " + request.model().provider() + "/" + request.model().api()

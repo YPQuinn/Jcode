@@ -11,6 +11,7 @@ import site.pplee.jcode.agentcore.turn.PrepareNextTurn;
 import site.pplee.jcode.agentcore.turn.ShouldStopAfterTurn;
 
 import site.pplee.jcode.ai.client.ModelClient;
+import site.pplee.jcode.ai.client.ModelRequestOptions;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 
@@ -32,7 +33,12 @@ import java.util.Objects;
  * {@code followUpMode = ONE_AT_A_TIME},
  * {@code thinkingLevel = PROVIDER_DEFAULT},
  * {@code prepareNextTurn = noop()},
- * {@code shouldStopAfterTurn = never()}.
+ * {@code shouldStopAfterTurn = never()},
+ * {@code modelRequestOptions = defaults()}.
+ *
+ * <p>{@link ModelRequestOptions} are fixed for the Agent lifetime and passed
+ * through unchanged on every model call. This batch does not let
+ * {@link PrepareNextTurn} replace them.
  */
 public record AgentConfig(
         AgentContext initialContext,
@@ -49,7 +55,8 @@ public record AgentConfig(
         QueueMode followUpMode,
         ThinkingLevel thinkingLevel,
         PrepareNextTurn prepareNextTurn,
-        ShouldStopAfterTurn shouldStopAfterTurn
+        ShouldStopAfterTurn shouldStopAfterTurn,
+        ModelRequestOptions modelRequestOptions
 ) {
     public AgentConfig {
         Objects.requireNonNull(initialContext, "initialContext must not be null");
@@ -67,6 +74,34 @@ public record AgentConfig(
         thinkingLevel = (thinkingLevel == null) ? ThinkingLevel.PROVIDER_DEFAULT : thinkingLevel;
         prepareNextTurn = (prepareNextTurn == null) ? PrepareNextTurn.noop() : prepareNextTurn;
         shouldStopAfterTurn = (shouldStopAfterTurn == null) ? ShouldStopAfterTurn.never() : shouldStopAfterTurn;
+        modelRequestOptions = (modelRequestOptions == null) ? ModelRequestOptions.defaults() : modelRequestOptions;
+    }
+
+    /**
+     * Compatibility constructor without request options. Uses
+     * {@link ModelRequestOptions#defaults()}.
+     */
+    public AgentConfig(
+            AgentContext initialContext,
+            ModelRef model,
+            ModelClient modelClient,
+            ObjectMapper objectMapper,
+            ContextTransformer contextTransformer,
+            MessageProjector messageProjector,
+            ToolExecutionMode toolExecution,
+            BeforeToolCall beforeToolCall,
+            AfterToolCall afterToolCall,
+            AgentEventSink eventSink,
+            QueueMode steeringMode,
+            QueueMode followUpMode,
+            ThinkingLevel thinkingLevel,
+            PrepareNextTurn prepareNextTurn,
+            ShouldStopAfterTurn shouldStopAfterTurn
+    ) {
+        this(initialContext, model, modelClient, objectMapper, contextTransformer,
+                messageProjector, toolExecution, beforeToolCall, afterToolCall,
+                eventSink, steeringMode, followUpMode, thinkingLevel, prepareNextTurn,
+                shouldStopAfterTurn, ModelRequestOptions.defaults());
     }
 
     /**
@@ -91,6 +126,7 @@ public record AgentConfig(
         this(initialContext, model, modelClient, objectMapper, contextTransformer,
                 messageProjector, toolExecution, beforeToolCall, afterToolCall,
                 eventSink, steeringMode, followUpMode,
-                ThinkingLevel.PROVIDER_DEFAULT, PrepareNextTurn.noop(), ShouldStopAfterTurn.never());
+                ThinkingLevel.PROVIDER_DEFAULT, PrepareNextTurn.noop(), ShouldStopAfterTurn.never(),
+                ModelRequestOptions.defaults());
     }
 }

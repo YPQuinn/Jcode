@@ -43,7 +43,7 @@ The goal is not line-for-line parity. Jcode must preserve its provider-neutral `
 | OAI-015 | P1 | Preserve useful response and usage metadata | message/usage model | provider-neutral metadata design |
 | OAI-016 | P2 | Add opt-in retry and structured provider-error handling | transport | OAI-004 recommended |
 | OAI-017 | P2 | Sanitize invalid Unicode before request serialization | request conversion | — |
-| OAI-018 | P1 | Add a protocol-parity regression matrix | tests | first-batch items covered; remaining P1/P2 still open |
+| OAI-018 | P1 | Add a protocol-parity regression matrix | tests | first-batch and second-batch delivered rules covered; deferred tools remain backlog |
 
 ## P0 — correctness and lifecycle
 

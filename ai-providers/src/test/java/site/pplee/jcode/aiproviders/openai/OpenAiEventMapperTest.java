@@ -8,8 +8,11 @@ import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -240,7 +243,7 @@ class OpenAiEventMapperTest {
     @Test
     void unknownEventsAreIgnored() throws Exception {
         var mapper = mapper();
-        assertTrue(mapper.onEvent("response.created",
+        assertTrue(mapper.onEvent("response.in_progress",
                 json("{\"response\":{\"id\":\"resp_1\"}}")).isEmpty());
         assertFalse(mapper.terminalHandled());
     }
@@ -424,5 +427,366 @@ class OpenAiEventMapperTest {
                 "{\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_abc\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}")));
         var end = (AssistantMessageEvent.ToolCallEnd) all.get(2);
         assertEquals("Paris", end.toolCall().arguments().get("city").asText());
+    }
+
+    @Test
+    void customToolStreamUsesDeclaredPropertyAndEscapesJsonDeltas() throws Exception {
+        var mapper = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        var all = new ArrayList<AssistantMessageEvent>();
+        all.addAll(mapper.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"a\"}}")));
+        all.addAll(mapper.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0,\"delta\":\"\\\"\\nb\\uD83D\\uDE00\"}")));
+        all.addAll(mapper.onEvent("response.custom_tool_call_input.done", json(
+                "{\"output_index\":0,\"input\":\"a\\\"\\nb\\uD83D\\uDE00\"}")));
+        all.addAll(mapper.onEvent("response.output_item.done", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"a\\\"\\nb\\uD83D\\uDE00\"}}")));
+        all.addAll(mapper.onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"a\\\"\\nb\\uD83D\\uDE00\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}")));
+
+        var start = (AssistantMessageEvent.ToolCallStart) all.get(0);
+        assertEquals("a", ((Content.ToolCall) start.partial().content().get(0)).arguments().get("payload").asText());
+        var deltas = all.stream()
+                .filter(e -> e instanceof AssistantMessageEvent.ToolCallDelta)
+                .map(e -> ((AssistantMessageEvent.ToolCallDelta) e).delta())
+                .toList();
+        assertEquals(MAPPER.createObjectNode().put("payload", "a\"\nb😀"),
+                MAPPER.readTree(String.join("", deltas)));
+        var end = (AssistantMessageEvent.ToolCallEnd) all.get(all.size() - 2);
+        assertEquals("a\"\nb😀", end.toolCall().arguments().get("payload").asText());
+        assertTrue(end.toolCall().arguments().isObject());
+        assertEquals(1, all.stream().filter(e -> e instanceof AssistantMessageEvent.ToolCallEnd).count());
+        assertEquals(StopReason.TOOL_CALL, ((AssistantMessageEvent.Done) all.get(all.size() - 1)).reason());
+    }
+
+    @Test
+    void customToolDoneOnlyAndTerminalRecoveryEmitStartDeltaEnd() throws Exception {
+        var mapper = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        var doneOnly = mapper.onEvent("response.output_item.done", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"abc\"}}"));
+        assertInstanceOf(AssistantMessageEvent.ToolCallStart.class, doneOnly.get(0));
+        var delta = (AssistantMessageEvent.ToolCallDelta) doneOnly.get(1);
+        assertEquals(MAPPER.createObjectNode().put("payload", "abc"), MAPPER.readTree(delta.delta()));
+        assertEquals("abc", ((AssistantMessageEvent.ToolCallEnd) doneOnly.get(2)).toolCall().arguments().get("payload").asText());
+
+        var terminal = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        var recovered = terminal.onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"custom_tool_call\",\"id\":\"ctc_9\",\"call_id\":\"call_9\",\"name\":\"sample_tool\",\"input\":\"only\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}"));
+        assertInstanceOf(AssistantMessageEvent.ToolCallStart.class, recovered.get(0));
+        assertEquals("only", ((AssistantMessageEvent.ToolCallEnd) recovered.get(2)).toolCall().arguments().get("payload").asText());
+        assertInstanceOf(AssistantMessageEvent.Done.class, recovered.get(3));
+    }
+
+    @Test
+    void customToolTerminalFinalizesOpenSlotWithoutItemDone() throws Exception {
+        var mapper = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        var all = new ArrayList<AssistantMessageEvent>();
+        all.addAll(mapper.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\"}}")));
+        all.addAll(mapper.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0,\"delta\":\"hel\"}")));
+        all.addAll(mapper.onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"hello\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}")));
+
+        long starts = all.stream().filter(e -> e instanceof AssistantMessageEvent.ToolCallStart).count();
+        long ends = all.stream().filter(e -> e instanceof AssistantMessageEvent.ToolCallEnd).count();
+        assertEquals(1, starts);
+        assertEquals(1, ends);
+        int endIndex = -1;
+        int doneIndex = -1;
+        for (int i = 0; i < all.size(); i++) {
+            if (all.get(i) instanceof AssistantMessageEvent.ToolCallEnd) {
+                endIndex = i;
+            }
+            if (all.get(i) instanceof AssistantMessageEvent.Done) {
+                doneIndex = i;
+            }
+        }
+        assertTrue(endIndex >= 0 && doneIndex > endIndex);
+        var end = (AssistantMessageEvent.ToolCallEnd) all.get(endIndex);
+        assertEquals("hello", end.toolCall().arguments().get("payload").asText());
+        assertInstanceOf(AssistantMessageEvent.Done.class, all.get(all.size() - 1));
+    }
+
+    @Test
+    void customToolRejectsNonTextualFieldsAndMissingDelta() throws Exception {
+        var added = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        assertThrows(IllegalStateException.class, () -> added.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":1}}")));
+
+        var open = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        var started = open.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\"}}"));
+        assertInstanceOf(AssistantMessageEvent.ToolCallStart.class, started.get(0));
+        assertEquals("", ((Content.ToolCall) ((AssistantMessageEvent.ToolCallStart) started.get(0))
+                .partial().content().get(0)).arguments().get("payload").asText());
+
+        assertThrows(IllegalStateException.class, () -> open.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0}")));
+        assertThrows(IllegalStateException.class, () -> open.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0,\"delta\":1}")));
+        assertThrows(IllegalStateException.class, () -> open.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0,\"delta\":null}")));
+        assertThrows(IllegalStateException.class, () -> open.onEvent("response.custom_tool_call_input.done", json(
+                "{\"output_index\":0,\"input\":[]}")));
+
+        open.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0,\"delta\":\"ab\"}"));
+        var doneMissingInput = open.onEvent("response.output_item.done", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\"}}"));
+        var end = (AssistantMessageEvent.ToolCallEnd) doneMissingInput.get(doneMissingInput.size() - 1);
+        assertEquals("ab", end.toolCall().arguments().get("payload").asText());
+
+        var nonTextualDone = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        nonTextualDone.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\"}}"));
+        assertThrows(IllegalStateException.class, () -> nonTextualDone.onEvent("response.output_item.done", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":{\"x\":1}}}")));
+    }
+
+    @Test
+    void customToolRejectsNonMonotonicCloseChangeUnknownPropertyAndWrongSlot() throws Exception {
+        var mapper = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        mapper.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"ab\"}}"));
+        mapper.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0,\"delta\":\"c\"}"));
+        assertThrows(IllegalStateException.class, () -> mapper.onEvent("response.custom_tool_call_input.done", json(
+                "{\"output_index\":0,\"input\":\"ac\"}")));
+
+        var closed = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "payload"));
+        closed.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"ab\"}}"));
+        closed.onEvent("response.custom_tool_call_input.done", json(
+                "{\"output_index\":0,\"input\":\"ab\"}"));
+        assertTrue(closed.onEvent("response.custom_tool_call_input.done", json(
+                "{\"output_index\":0,\"input\":\"ab\"}")).isEmpty());
+        assertThrows(IllegalStateException.class, () -> closed.onEvent("response.custom_tool_call_input.done", json(
+                "{\"output_index\":0,\"input\":\"abc\"}")));
+
+        var unknown = new OpenAiEventMapper(SOURCE, Map.of());
+        assertThrows(IllegalStateException.class, () -> unknown.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"x\"}}")));
+
+        var function = mapper();
+        function.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_abc\",\"name\":\"get_weather\",\"arguments\":\"\"}}"));
+        assertThrows(IllegalStateException.class, () -> function.onEvent("response.custom_tool_call_input.delta", json(
+                "{\"output_index\":0,\"delta\":\"x\"}")));
+    }
+
+    @Test
+    void customToolDoesNotHardcodeInputProperty() throws Exception {
+        var mapper = new OpenAiEventMapper(SOURCE, Map.of("sample_tool", "query"));
+        var events = mapper.onEvent("response.output_item.done", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_1\",\"call_id\":\"call_1\",\"name\":\"sample_tool\",\"input\":\"hello\"}}"));
+        var end = (AssistantMessageEvent.ToolCallEnd) events.get(events.size() - 1);
+        assertTrue(end.toolCall().arguments().has("query"));
+        assertFalse(end.toolCall().arguments().has("input"));
+        assertEquals("hello", end.toolCall().arguments().get("query").asText());
+    }
+
+    @Test
+    void completedResponseKeepsIdRequestIdReasonAndReasoningTokens() throws Exception {
+        var mapper = mapper();
+        mapper.acceptProviderRequestId(Optional.of("req_abc"));
+        var done = (AssistantMessageEvent.Done) mapper.onEvent("response.completed", json(
+                "{\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens_details\":{\"reasoning_tokens\":3}}}}"))
+                .get(0);
+        assertEquals("resp_1", done.message().metadata().responseId().orElseThrow());
+        assertEquals("req_abc", done.message().metadata().providerRequestId().orElseThrow());
+        assertEquals("completed", done.message().metadata().rawTerminalReason().orElseThrow());
+        assertEquals(3, done.message().usage().reasoningTokens());
+        assertEquals(8, done.message().usage().input());
+        assertTrue(done.message().usage().cost().isEmpty());
+        assertEquals(StopReason.STOP, done.reason());
+    }
+
+    @Test
+    void partialEventsKeepEmptyMetadata() throws Exception {
+        var mapper = mapper();
+        var start = (AssistantMessageEvent.TextStart) mapper.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"content\":[]}}"))
+                .get(0);
+        assertTrue(start.partial().metadata().isEmpty());
+        assertTrue(start.partial().usage().cost().isEmpty());
+        assertEquals(0, start.partial().usage().reasoningTokens());
+    }
+
+    @Test
+    void incompleteAndFailedKeepMetadata() throws Exception {
+        var incompleteMapper = mapper();
+        incompleteMapper.acceptProviderRequestId(Optional.of("req_inc"));
+        var incomplete = (AssistantMessageEvent.Error) incompleteMapper.onEvent("response.incomplete", json(
+                "{\"response\":{\"id\":\"resp_inc\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1}}}"))
+                .get(0);
+        assertEquals("resp_inc", incomplete.error().metadata().responseId().orElseThrow());
+        assertEquals("incomplete.content_filter", incomplete.error().metadata().rawTerminalReason().orElseThrow());
+
+        var failedMapper = mapper();
+        var failed = (AssistantMessageEvent.Error) failedMapper.onEvent("response.failed", json(
+                "{\"response\":{\"id\":\"resp_fail\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}"))
+                .get(0);
+        assertEquals("resp_fail", failed.error().metadata().responseId().orElseThrow());
+        assertEquals("failed", failed.error().metadata().rawTerminalReason().orElseThrow());
+    }
+
+    @Test
+    void sseErrorDoesNotInventResponseIdOrReason() throws Exception {
+        var mapper = mapper();
+        mapper.acceptProviderRequestId(Optional.of("req_only"));
+        var error = (AssistantMessageEvent.Error) mapper.onEvent("error", json(
+                "{\"id\":\"resp_fake\",\"status\":\"failed\",\"code\":\"rate_limit\",\"message\":\"slow down\"}"))
+                .get(0);
+        assertTrue(error.error().metadata().responseId().isEmpty());
+        assertTrue(error.error().metadata().rawTerminalReason().isEmpty());
+        assertEquals("req_only", error.error().metadata().providerRequestId().orElseThrow());
+    }
+
+    @Test
+    void illegalUsageIsProtocolMappingError() throws Exception {
+        var mapper = mapper();
+        assertThrows(IllegalStateException.class, () -> mapper.onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":-1,\"output_tokens\":0,\"total_tokens\":0}}}")));
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"output_tokens_details\":{\"reasoning_tokens\":2}}}}")));
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":3}}}}")));
+    }
+
+    @Test
+    void pricingAttachesCostAndUsesResponseServiceTier() throws Exception {
+        var pricing = OpenAiPricing.of("USD", Map.of(SOURCE.modelId(), new OpenAiPricing.ModelPrice(
+                new OpenAiPricing.TokenRates(
+                        BigDecimal.ONE, new BigDecimal("2"), BigDecimal.ZERO, BigDecimal.ZERO),
+                List.of(),
+                Map.of(OpenAiServiceTier.FLEX, new BigDecimal("0.5")))));
+        var mapper = new OpenAiEventMapper(
+                SOURCE, Map.of(), Optional.of(pricing), Optional.of(OpenAiServiceTier.PRIORITY));
+        var done = (AssistantMessageEvent.Done) mapper.onEvent("response.completed", json(
+                "{\"response\":{\"id\":\"resp_cost\",\"status\":\"completed\",\"service_tier\":\"flex\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":1000000,\"total_tokens\":2000000}}}"))
+                .get(0);
+        var cost = done.message().usage().cost().orElseThrow();
+        assertEquals(0, cost.input().compareTo(new BigDecimal("0.5")));
+        assertEquals(0, cost.output().compareTo(BigDecimal.ONE));
+        assertEquals(0, cost.total().compareTo(new BigDecimal("1.5")));
+    }
+
+    @Test
+    void oversizeResponseIdIsProtocolMappingError() throws Exception {
+        String id = "r".repeat(257);
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"id\":\"" + id + "\",\"status\":\"completed\"}}")));
+    }
+
+    @Test
+    void illegalTerminalUsageKeepsConstructedCorrelationAndPartialEmpty() throws Exception {
+        var mapper = mapper();
+        mapper.acceptProviderRequestId(Optional.of("req_usage"));
+        assertTrue(mapper.onEvent("response.created", json("{\"response\":{\"id\":\"resp_created\"}}")).isEmpty());
+        assertEquals("resp_created", mapper.correlationSnapshot().responseId().orElseThrow());
+        assertTrue(mapper.correlationSnapshot().rawTerminalReason().isEmpty());
+        var start = (AssistantMessageEvent.TextStart) mapper.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"content\":[]}}"))
+                .get(0);
+        assertTrue(start.partial().metadata().isEmpty());
+
+        var thrown = assertThrows(IllegalStateException.class, () -> mapper.onEvent("response.completed", json(
+                "{\"response\":{\"id\":\"resp_term\",\"status\":\"completed\",\"usage\":{\"input_tokens\":-1,\"output_tokens\":0}}}")));
+        assertTrue(thrown.getMessage().contains("protocol mapping error"));
+        var snap = mapper.correlationSnapshot();
+        assertEquals("resp_term", snap.responseId().orElseThrow());
+        assertEquals("req_usage", snap.providerRequestId().orElseThrow());
+        assertEquals("completed", snap.rawTerminalReason().orElseThrow());
+        assertTrue(start.partial().metadata().isEmpty());
+    }
+
+    @Test
+    void createdIdFillsTerminalWhenResponseIdAbsentAndStaysOffPartial() throws Exception {
+        var mapper = mapper();
+        assertTrue(mapper.onEvent("response.created", json("{\"response\":{\"id\":\"resp_created\"}}")).isEmpty());
+        var start = (AssistantMessageEvent.TextStart) mapper.onEvent("response.output_item.added", json(
+                "{\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"content\":[]}}"))
+                .get(0);
+        assertTrue(start.partial().metadata().isEmpty());
+        var done = (AssistantMessageEvent.Done) mapper.onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1}}}"))
+                .get(0);
+        assertEquals("resp_created", done.message().metadata().responseId().orElseThrow());
+        assertEquals("completed", done.message().metadata().rawTerminalReason().orElseThrow());
+        assertTrue(start.partial().metadata().isEmpty());
+    }
+
+    @Test
+    void terminalResponseIdWinsOverCreatedId() throws Exception {
+        var mapper = mapper();
+        mapper.onEvent("response.created", json("{\"response\":{\"id\":\"resp_created\"}}"));
+        var done = (AssistantMessageEvent.Done) mapper.onEvent("response.completed", json(
+                "{\"response\":{\"id\":\"resp_terminal\",\"status\":\"completed\"}}"))
+                .get(0);
+        assertEquals("resp_terminal", done.message().metadata().responseId().orElseThrow());
+    }
+
+    @Test
+    void createdIdRejectsNonStringAndOversize() throws Exception {
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.created",
+                json("{\"response\":{\"id\":1}}")));
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.created",
+                json("{\"response\":{\"id\":\"" + "r".repeat(257) + "\"}}")));
+    }
+
+    @Test
+    void tokenFieldRejectsOutOfRangeFractionAndOverflow() throws Exception {
+        var max = mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":9223372036854775807,\"output_tokens\":0,\"total_tokens\":9223372036854775807}}}"));
+        assertEquals(Long.MAX_VALUE, ((AssistantMessageEvent.Done) max.get(0)).message().usage().input());
+
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":9223372036854775808,\"output_tokens\":0}}}")));
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1.5,\"output_tokens\":0}}}")));
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":9223372036854775807,\"output_tokens\":1}}}")));
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":9223372036854775807,\"output_tokens\":0,\"input_tokens_details\":{\"cached_tokens\":9223372036854775807,\"cache_write_tokens\":1}}}}")));
+    }
+
+    @Test
+    void usageDetailsMustBeObjectWhenPresent() throws Exception {
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"input_tokens_details\":[]}}}")));
+        assertThrows(IllegalStateException.class, () -> mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"output_tokens_details\":1}}}")));
+        var done = (AssistantMessageEvent.Done) mapper().onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"input_tokens_details\":null,\"output_tokens_details\":null}}}"))
+                .get(0);
+        assertEquals(1, done.message().usage().input());
+        assertEquals(0, done.message().usage().reasoningTokens());
+    }
+
+    @Test
+    void unknownServiceTierDoesNotInheritRequestedMultiplier() throws Exception {
+        var pricing = OpenAiPricing.of("USD", Map.of(SOURCE.modelId(), new OpenAiPricing.ModelPrice(
+                new OpenAiPricing.TokenRates(BigDecimal.ONE, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO),
+                List.of(),
+                Map.of(OpenAiServiceTier.PRIORITY, new BigDecimal("2")))));
+        var requested = new OpenAiEventMapper(
+                SOURCE, Map.of(), Optional.of(pricing), Optional.of(OpenAiServiceTier.PRIORITY));
+        var unknown = (AssistantMessageEvent.Done) requested.onEvent("response.completed", json(
+                "{\"response\":{\"status\":\"completed\",\"service_tier\":\"future_tier\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0,\"total_tokens\":1000000}}}"))
+                .get(0);
+        assertEquals(0, unknown.message().usage().cost().orElseThrow().total().compareTo(BigDecimal.ONE));
+
+        var absent = (AssistantMessageEvent.Done) new OpenAiEventMapper(
+                SOURCE, Map.of(), Optional.of(pricing), Optional.of(OpenAiServiceTier.PRIORITY))
+                .onEvent("response.completed", json(
+                        "{\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0,\"total_tokens\":1000000}}}"))
+                .get(0);
+        assertEquals(0, absent.message().usage().cost().orElseThrow().total().compareTo(new BigDecimal("2")));
+
+        assertThrows(IllegalStateException.class, () -> new OpenAiEventMapper(
+                SOURCE, Map.of(), Optional.of(pricing), Optional.of(OpenAiServiceTier.PRIORITY))
+                .onEvent("response.completed", json(
+                        "{\"response\":{\"status\":\"completed\",\"service_tier\":1,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}")));
     }
 }
