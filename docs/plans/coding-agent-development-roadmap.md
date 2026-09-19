@@ -1,8 +1,8 @@
 # Coding Agent 总开发计划
 
-> 状态：进行中（阶段一已完成，阶段二待实施）
+> 状态：进行中（阶段一已完成，阶段二 PR 1 已完成）
 >
-> Jcode 基线：`663c3e28ac9219c12aa2bb29c00ffef59c97796c`（2026-09-17）
+> Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
 >
 > pi 源码基线：`60e7e76bd7ea25cad1dd6f3f1ce0d18814a42759`（`@earendil-works/pi-coding-agent` 0.85.1，2026-09-16）
 >
@@ -12,11 +12,13 @@
 >
 > 第一阶段实施计划（已完成）：[`archived/coding-agent-phase-1-headless-foundation.md`](archived/coding-agent-phase-1-headless-foundation.md)
 >
+> 第二阶段实施计划（实施中）：[`coding-agent-phase-2-local-tools.md`](coding-agent-phase-2-local-tools.md)
+>
 > 实施范围：阶段一至阶段七；不包含 TUI、Server 或其他产品入口
 
 ## 1. 决策摘要
 
-Jcode 下一层应创建 `coding-agent`，把现有 provider-neutral 模型协议和通用 Agent Runtime 组装成可独立嵌入的编码产品内核。TUI、CLI、RPC 和 Server 都应消费该产品内核，而不是直接操作 `Agent`、具体 provider adapter 或内置工具。
+Jcode 已通过第一阶段创建 `coding-agent`，把现有 provider-neutral 模型协议和通用 Agent Runtime 组装成可独立嵌入的编码产品内核。后续阶段继续补齐工具、上下文与产品能力。TUI、CLI、RPC 和 Server 都应消费该产品内核，而不是直接操作 `Agent`、具体 provider adapter 或内置工具。
 
 目标依赖方向为：
 
@@ -100,17 +102,15 @@ Jcode 下一层应创建 `coding-agent`，把现有 provider-neutral 模型协�
 
 ### 2.2 产品层缺口
 
-仓库尚未提供：
+第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果。当前仍需补齐：
 
-- 面向调用方的 coding session 门面；
-- 工作目录及本地文件/命令工具；
-- coding-oriented System Prompt；
+- 写文件、精确编辑、命令执行、结构化搜索和显式工具授权；
 - AGENTS.md 等项目上下文发现；
 - Session 持久化、恢复与分支；
 - 产品设置、默认模型与凭证装配；
 - context window 策略和 compaction；
 - Skill、Prompt Template、Resource Loader、Extension；
-- 供 TUI/CLI/RPC 消费的稳定产品事件。
+- 随后续能力扩展的产品事件，而不是重新定义已交付的基础事件协议。
 
 这些能力都依赖产品语义，不应进入 `ai` 或 `agent-core`。
 
@@ -304,17 +304,21 @@ caller
 
 ### 6.5 完成状态（2026-09-18）
 
-阶段一已完成并通过全仓验证。实际交付包括 module-local Enforcer 边界、`CodingAgentSession` 产品门面、防御性 state/result/event 快照、最小 coding prompt、严格有界 `read` 工具，以及覆盖文本、图片、失败恢复、取消、队列归属和事件顺序的 deterministic 测试。详细命令、测试数量、依赖树和残余风险记录在已归档实施计划中。
+阶段一已完成并通过全仓验证。实际交付包括 module-local Enforcer 边界、`CodingAgentSession` 产品门面、防御性 state/result/event 快照、最小 coding prompt、严格有界 `read` 工具，以及覆盖文本、图片、失败恢复、取消、队列归属和事件顺序的 deterministic 测试。随后审查修复了 symlink/`..` 解析、超长行扫描和流式 sink 失败传播；`849ae9a` 基线的 `mvn clean verify` 共 585 个测试全部通过。初始交付证据见已归档计划，第二阶段以修复后的提交为起点。
 
 ## 7. 阶段二：编码工具集
+
+详细实施计划见 [`coding-agent-phase-2-local-tools.md`](coding-agent-phase-2-local-tools.md)。PR 1 已完成工具集合、产品 policy、显式装配、旧 Config 兼容与 prompt 同源；具体新增工具尚未实现，不能视为阶段二完成。
 
 ### 7.1 目标
 
 完成本地编码工作所需的受约束工具，而不是只向模型暴露万能 shell。
 
+分为 2A（read/write/edit/bash 的读取—修改—执行验证闭环）与 2B（grep/find/ls 的结构化发现）。2A 可独立试用，但全部完成才达到第二阶段门槛。
+
 ### 7.2 必须交付
 
-默认编码工具：
+显式选择 coding profile 后的默认编码工具（旧 Config 构造器继续仅启用 read，不自动扩大权限）：
 
 - `read`：阶段一能力继续作为统一读取入口；
 - `write`：创建父目录并完整写入文件；
@@ -327,15 +331,18 @@ caller
 - `find`：有界文件匹配，返回相对搜索根的路径；
 - `ls`：稳定排序、有界目录列表。
 
-跨平台 shell 可以通过显式 shell profile 支持 PowerShell，但不得在不匹配的平台宣传不可执行的工具。
+首批使用显式 POSIX Bash profile；PowerShell 作为后续适配，不得在不匹配的平台宣传不可执行的工具。搜索建议统一使用显式配置的 ripgrep 后端，不自动下载依赖、不重写 Git ignore。
 
 ### 7.3 工具共同约束
 
 - 参数使用强类型 record 和 JSON Schema；
 - 输出统一受 line/byte 上限保护；
-- mutation 操作具有确定的并发策略；
-- `edit` 保持原始换行符，拒绝零匹配、多匹配、重复或重叠 edit；
-- `bash` 取消必须终止活动进程并继续 drain 已接收输出；
+- `write/edit/bash` 声明 `SEQUENTIAL`，复用 core 整批源序执行；不建立静态跨 Session 文件锁；
+- 产品 policy 经 defensive snapshot 适配 `BeforeToolCall`，不泄漏底层工具/context；副作用工具显式启用；
+- 文件修改先完整规划再原子替换，不支持原子移动时失败；不宣称跨进程 CAS 或磁盘回滚；
+- `edit` 仅兼容换行表示，保留 BOM 和未改动字节，拒绝零匹配、多匹配、重复或重叠 edit；
+- `bash` 取消必须终止直接活动进程、尽力回收可观察的普通前台子进程，并有界 drain 已接收输出；不承诺回收逃逸后代；
+- 输出采集与事件 publisher 分离：慢 sink 可阻塞 run 完成，但不得阻碍进程 timeout/cancel；不默认保存无限完整日志；
 - 命令超时和用户取消产生不同的可诊断结果；
 - 默认实现只使用调用用户权限，不声称提供 sandbox；
 - I/O seam 应允许 deterministic test double，但不提前创建独立 storage 模块。
@@ -344,8 +351,13 @@ caller
 
 - 默认 `read/bash/edit/write` 组成一个完整 coding turn；
 - 工具 schema、边界值、截断、换行、并发、取消和错误均有测试；
-- 对临时 Git 仓库完成一次“读取—修改—测试”的 fake-model 集成流程；
-- 没有命令或输出导致无界内存增长。
+- 对临时 Git 仓库完成一次“定位—读取—修改—测试”的 fake-model 集成流程；
+- `mvn clean verify` 与显式注入 Bash/rg 的严格 native smoke 均通过；不以 skip 代替平台支持证据；
+- 框架输出缓冲、事件排队和搜索记录处理无界增长被测试阻止；不把此保证夸大为任意子进程的 OS 内存沙箱。
+
+### 7.5 当前进度
+
+阶段二 PR 1 已完成：`CodingAgentConfig` 增加末尾工具配置且保留旧构造的 read-only 行为；Session 仅装配显式启用且已实现的工具；产品 policy 接收参数深拷贝并在 core prepare 阶段执行；prompt 与模型请求共享实际工具列表。全仓 `mvn clean verify` 共 596 个测试通过。`write/edit/bash/grep/find/ls`、coding/search profile 和 native smoke 仍待后续 PR，阶段二尚未完成。
 
 ## 8. 阶段三：项目上下文与 System Prompt
 

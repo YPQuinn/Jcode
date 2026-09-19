@@ -9,14 +9,12 @@ import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.ContextTransformer;
 import site.pplee.jcode.agentcore.message.MessageProjector;
 import site.pplee.jcode.agentcore.tool.AfterToolCall;
-import site.pplee.jcode.agentcore.tool.BeforeToolCall;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 import site.pplee.jcode.agentcore.turn.PrepareNextTurn;
 import site.pplee.jcode.agentcore.turn.ShouldStopAfterTurn;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
 import site.pplee.jcode.codingagent.internal.SnapshotMapper;
 import site.pplee.jcode.codingagent.prompt.SystemPromptBuilder;
-import site.pplee.jcode.codingagent.tool.ReadTool;
 
 import java.nio.file.Path;
 import java.time.Clock;
@@ -44,13 +42,14 @@ public final class CodingAgentSession implements AutoCloseable {
         this.workingDirectory = config.workingDirectory();
         this.clock = config.clock();
 
-        var readTool = new ReadTool(workingDirectory);
+        var tools = BuiltInTools.create(workingDirectory, config.tools());
+        var toolSpecs = tools.stream().map(tool -> tool.spec()).toList();
         String systemPrompt = SystemPromptBuilder.build(
                 workingDirectory,
-                List.of(readTool.spec()),
+                toolSpecs,
                 config.customSystemPrompt(),
                 config.appendSystemPrompt());
-        var context = new AgentContext(systemPrompt, List.of(), List.of(readTool));
+        var context = new AgentContext(systemPrompt, List.of(), tools);
         var eventSink = config.eventSink();
         this.agent = new Agent(new AgentConfig(
                 context,
@@ -60,7 +59,7 @@ public final class CodingAgentSession implements AutoCloseable {
                 ContextTransformer.identity(),
                 MessageProjector.standard(),
                 ToolExecutionMode.PARALLEL,
-                BeforeToolCall.noop(),
+                CodingToolPolicyAdapter.adapt(config.tools().policy(), workingDirectory),
                 AfterToolCall.noop(),
                 event -> {
                     CodingAgentEvent productEvent = event instanceof AgentEvent.AgentCompleted completed

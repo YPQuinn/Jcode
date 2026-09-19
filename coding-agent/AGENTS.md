@@ -10,9 +10,20 @@ Headless 编码产品内核。组合 `ai` 与 `agent-core`，提供 `CodingAgent
 | 显式运行配置 | `CodingAgentConfig.java` |
 | 产品快照 | `CodingAgentState.java` / `CodingAgentRunResult.java` / `event/` |
 | System Prompt | `prompt/SystemPromptBuilder.java` |
+| 工具选择与授权 | `tool/CodingToolConfig.java` / `tool/CodingToolPolicy.java` |
+| 内置工具装配 | `BuiltInTools.java` / `CodingToolPolicyAdapter.java` |
 | 文件读取工具 | `tool/ReadTool.java` |
 | 完整行截断 | `tool/OutputTruncator.java` |
 | 递归快照 | `internal/SnapshotMapper.java` |
+| 第二阶段工具计划（实施中） | `../docs/plans/coding-agent-phase-2-local-tools.md` |
+
+## PLANNING STATUS
+
+- 第二阶段实施中：PR 1 已完成工具枚举/配置、产品 policy、Session 显式装配、旧 Config 兼容与 prompt 同源；当前可执行工具仍只有 `read`。
+- 计划分 2A（显式启用 read/write/edit/bash）与 2B（grep/find/ls），不包含持久化、配置发现或 UI。
+- 旧 Config 与 `tools == null` 保持 read-only；产品授权请求递归快照参数，不能直接对外暴露含 `AgentTool`/`AgentContext` 的 core hook，诊断不得输出参数或工作目录。policy 失败或拒绝归一为普通 tool error，不得执行工具。
+- Bash 配置拒绝 `BASH_ENV`/`ENV`/`SHELLOPTS`/`BASHOPTS`，profile 最大 timeout 硬上限为 3600 秒。
+- profile 工厂随真实实现开放。工具并发、原子提交、BOM/换行、进程输出/backpressure/取消和搜索 ignore 的详细规则以实施计划为准，不提前广告未实现能力。
 
 ## CONVENTIONS
 

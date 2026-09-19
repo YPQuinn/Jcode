@@ -7,6 +7,7 @@ import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.agentcore.queue.QueueMode;
 import site.pplee.jcode.codingagent.event.CodingAgentEventSink;
+import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,7 +27,8 @@ public record CodingAgentConfig(
         String customSystemPrompt,
         String appendSystemPrompt,
         CodingAgentEventSink eventSink,
-        Clock clock
+        Clock clock,
+        CodingToolConfig tools
 ) {
     public CodingAgentConfig {
         Objects.requireNonNull(workingDirectory, "workingDirectory must not be null");
@@ -43,6 +45,27 @@ public record CodingAgentConfig(
         followUpMode = followUpMode == null ? QueueMode.ONE_AT_A_TIME : followUpMode;
         eventSink = eventSink == null ? CodingAgentEventSink.noop() : eventSink;
         clock = clock == null ? Clock.systemUTC() : clock;
+        tools = tools == null ? CodingToolConfig.readOnly() : tools;
+    }
+
+    /** Compatibility constructor that preserves the original read-only tool set. */
+    public CodingAgentConfig(
+            Path workingDirectory,
+            ModelRef model,
+            ModelClient modelClient,
+            ObjectMapper objectMapper,
+            ThinkingLevel thinkingLevel,
+            ModelRequestOptions requestOptions,
+            QueueMode steeringMode,
+            QueueMode followUpMode,
+            String customSystemPrompt,
+            String appendSystemPrompt,
+            CodingAgentEventSink eventSink,
+            Clock clock
+    ) {
+        this(workingDirectory, model, modelClient, objectMapper, thinkingLevel,
+                requestOptions, steeringMode, followUpMode, customSystemPrompt,
+                appendSystemPrompt, eventSink, clock, CodingToolConfig.readOnly());
     }
 
     @Override
@@ -58,6 +81,7 @@ public record CodingAgentConfig(
                 + ", customSystemPrompt=" + (customSystemPrompt == null ? "absent" : "present")
                 + ", appendSystemPrompt=" + (appendSystemPrompt == null ? "absent" : "present")
                 + ", eventSink=" + eventSink.getClass().getName()
-                + ", clock=" + clock.getClass().getName() + ']';
+                + ", clock=" + clock.getClass().getName()
+                + ", tools=" + tools + ']';
     }
 }
