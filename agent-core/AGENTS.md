@@ -32,18 +32,19 @@
 | 优雅停止 | `turn/ShouldStopAfterTurn.java`（Decision CONTINUE/STOP，默认 never） |
 | turn 快照 | `turn/TurnContext.java`（assistant + 源顺序 toolResults + context + newMessages） |
 | 工具管道契约测试 | `src/test/.../ToolPipelineTest`（schema/before/after/update/settle/ToolUpdate 阻塞语义）；`ParallelToolOrderingTest`（并行双排序/并发结算/失败状态机/取消） |
-| 流式事件契约测试 | `src/test/.../StreamingEventTest`（text/thinking/toolcall start-delta-end 顺序、状态归约、provider 错误） |
+| 流式事件契约测试 | `src/test/.../StreamingEventTest`（text/thinking/toolcall start-delta-end 顺序、状态归约、provider 错误、start/update sink 三种失败模式、异常取消清理与再次运行） |
 | Context 投影契约测试 | `src/test/.../ContextProjectionTest`（transform-before-project、每轮重复、transcript 隔离、source/replayState 原样进入 ModelRequest、失败归一、取消） |
 
 ## CONVENTIONS
 
 - `AgentLoop`/`ToolCallExecutor`/`AgentLoopConfig`/`LoopState`/`ToolSchemaValidator`/`RunEventEmitter` 保持 package-private；唯一公开运行入口是 `Agent`。
+- `pom.xml` 声明本模块自己的 `enforce-module-boundaries` execution：仅允许依赖 `ai`，禁止 `ai-providers`、`coding-agent` 及更高产品模块；根 POM 只管理插件版本。
 - `AgentContext` 不可变；可变状态只在 `LoopState`（核心层唯一例外）。`AgentState` 是公开不可变快照，由 `Agent` 的归约器在每次事件时原子替换。
 - `Agent` 持有 `Executors.newVirtualThreadPerTaskExecutor()`，实现 `AutoCloseable`；公开 API 返回 `CompletionStage`，内部 loop 在虚拟线程上顺序控制流。
 - 每个 `Agent` 同时最多一个 active run（`AtomicReference<ActiveRun>` CAS 保护）；`close()` 协作式 abort + drain executor。
 - 事件归约：`Agent` 内部包装用户 `AgentEventSink` 为归约 sink。归约器先 `reduceState(event)` 以 `AtomicReference<AgentState>` CAS 更新 `AgentState`，再委托用户 sink。用户 sink 看到事件时状态已完成归约。`AgentCompleted` 事件的 sink 完成前 loop 不返回（`emit().join()` 保证）。归约原子化不锁用户 sink；并行工具下 `ToolUpdate` 与生命周期事件可并发归约。
 - 流式消费：`AgentLoop.consumeStream()` 消费 `AssistantMessageStream`，在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终 `Message.Assistant`。partial 不进入 context；final 才 append。
-- 事件投递：`AgentLoopConfig` 持有 `RunEventEmitter`（持有一个 `AgentEventSink`）。loop 和 `ToolCallExecutor` 内的 `LoopToolUpdateSink` 通过 `RunEventEmitter.emit(event)` 投递事件——该方法 `delegate.emit(event).toCompletableFuture().join()`，等待 sink 的 `CompletionStage` 完成后才返回。慢 sink 阻塞 run。异常不捕获不包装，沿 `.join()` 传播。
+- 事件投递：`AgentLoopConfig` 持有 `RunEventEmitter`（持有一个 `AgentEventSink`）。loop 和 `ToolCallExecutor` 内的 `LoopToolUpdateSink` 通过 `RunEventEmitter.emit(event)` 投递事件——该方法 `delegate.emit(event).toCompletableFuture().join()`，等待 sink 的 `CompletionStage` 完成后才返回。慢 sink 阻塞 run。异常不捕获不包装，沿 `.join()` 传播；`invokeModelSafely` 的 RuntimeException 归一边界仅覆盖模型调用，不包含流式事件投递。sink 同步抛出、failed stage、null stage 均使 run 异常退出，不提交 transcript、不合成 model error。`Agent` 异常退出先取消在途 provider，再重置 state/activeRun 并异常完成 future；取消清理异常以 suppressed 保留，不覆盖原始失败。
 - 工具三阶段管道（prepare/execute/finalize）：并行批次中 `prepareCall()` 与 `ToolStarted` 按 tool call 源顺序串行；immediate failure 在 prepare pass 当场发 `ToolCompleted`；`executeAndFinalize()` 并行，`ToolCompleted` 由 loop 线程按实际完成顺序投递（`ExecutorCompletionService`）；tool-result 消息、context、`TurnCompleted.toolResults` 按源顺序写回。
   - prepare：`prepareArguments` → `ToolSchemaValidator.validate` → `BeforeToolCall` → `ObjectMapper.treeToValue`
   - execute：`tool.execute(id, args, ToolUpdateSink, cancellation)` → 异常转 error result → `LoopToolUpdateSink.settle()`（关闭接纳并 drain 已接纳 update；delivery failure 在此重抛，不归一为 tool error）

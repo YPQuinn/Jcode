@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>site.pplee</groupId>
@@ -9,26 +9,23 @@
         <version>1.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>ai</artifactId>
-
-    <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
+    <artifactId>coding-agent</artifactId>
 
     <description>
-        Unified model-calling protocol and runtime: model identity, standard LLM
-        messages and content blocks, usage/stop-reason/result metadata, the
-        declarable ToolSpec, the provider-neutral ModelClient/ModelRequest seam,
-        and the read-only CancellationSignal shared by model adapters and tools.
-
-        Zero Jcode-internal dependencies. No provider SDK, no Agent, no Session,
-        no coding tools, no UI.
+        Headless coding-product runtime. Composes the provider-neutral model
+        protocol and Agent runtime with coding prompts, local tools, product
+        state, results, and events. UI and provider wire protocols stay out of
+        this module.
     </description>
 
     <dependencies>
         <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
+            <groupId>site.pplee</groupId>
+            <artifactId>ai</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>site.pplee</groupId>
+            <artifactId>agent-core</artifactId>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -59,12 +56,10 @@
                                 <bannedDependencies>
                                     <excludes>
                                         <exclude>site.pplee:ai-providers</exclude>
-                                        <exclude>site.pplee:agent-core</exclude>
-                                        <exclude>site.pplee:coding-agent</exclude>
                                         <exclude>site.pplee:server</exclude>
                                         <exclude>site.pplee:tui</exclude>
                                     </excludes>
-                                    <message>ai must not depend on another Jcode module.</message>
+                                    <message>coding-agent must depend only on ai and agent-core among Jcode modules.</message>
                                 </bannedDependencies>
                             </rules>
                         </configuration>
@@ -73,5 +68,4 @@
             </plugin>
         </plugins>
     </build>
-
 </project>

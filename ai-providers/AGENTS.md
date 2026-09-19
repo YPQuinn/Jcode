@@ -34,6 +34,7 @@
 ## CONVENTIONS
 
 - 模块内每个 provider 一个子包：`site.pplee.jcode.aiproviders.<provider>`。新增 provider 时新建子包，不新增 Maven 模块。
+- `pom.xml` 声明本模块自己的 `enforce-module-boundaries` execution：唯一允许的 Jcode 内部依赖是 `ai`；根 POM 只管理插件版本。
 - 每个 provider 子包的公开主入口是该 provider 的 runtime 类（如 `OpenAiProvider`）；HTTP/SSE adapter、mapper/parser/codec 全部 package-private。
 - provider runtime 不实现 `ModelClient`；provider 是 runtime 单元，adapter 是内部实现。
 - 不在模块内读取环境变量/配置文件；凭证通过各 provider 的显式配置类型传入。

@@ -45,6 +45,7 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 - `CancellationSignal` 是只读协议，住在 `ai`（最低共享层），因为 Java 无 `AbortSignal` 等价物；model adapter 和工具都读同一个信号。创建/触发取消的 `CancellationSource` 在 `agent-core`。`onCancellation` 观察未来取消：已取消时 listener 在注册返回前执行一次；listener 必须非阻塞。
 - `ToolSpec` 只携带可声明形状（给模型看）；执行能力在 `agent-core.AgentTool`。三参数构造器默认 `ToolInputConstraint.none()`。`Grammar` variants 做 defensive copy，blank definition 在构造时拒绝。`PREFER` 允许 adapter 安全降级；`REQUIRE` 必须 mapping failure。
 - 所有 list 在 compact constructor 执行 `List.copyOf()`。
+- `pom.xml` 声明本模块自己的 `enforce-module-boundaries` execution：禁止依赖 `ai-providers`、`agent-core`、`coding-agent` 及更高产品模块；根 POM 只管理插件版本。
 - `ModelRequest` 只携带 `ai` 类型，不含 `AgentMessage` 或可执行工具。
 - `ModelRequest` 携带绝对 `ThinkingLevel`：`PROVIDER_DEFAULT` 表示 adapter 不主动指定思考参数；`OFF` 明确请求关闭；其余为 provider-neutral 相对强度。厂商映射与不支持值的处理由 adapter 负责，通过流错误协议表达。
 - `ModelRequest` 携带 `ModelRequestOptions`：`maxOutputTokens` 未设置或正整数（禁止 0/负数）；`temperature` 未设置或有限非负数；`ToolChoice` 不得用裸字符串同时表达模式和工具名。四参数/五参数构造器使用 `ModelRequestOptions.defaults()`。

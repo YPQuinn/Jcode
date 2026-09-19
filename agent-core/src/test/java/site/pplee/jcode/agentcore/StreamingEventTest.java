@@ -1,6 +1,9 @@
 package site.pplee.jcode.agentcore;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
@@ -24,11 +27,15 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -66,6 +73,126 @@ class StreamingEventTest {
                 new AgentContext("sys", List.of(), List.of()),
                 MODEL, client, MAPPER, null, null, null, null, null, sink, null, null);
     }
+
+    @ParameterizedTest
+    @EnumSource(SinkFailureMode.class)
+    void assistantStartSinkFailurePropagatesWithoutCommittingTranscript(SinkFailureMode mode) throws Exception {
+        assertStreamingSinkFailure(mode, event -> event instanceof AgentEvent.MessageStarted started
+                && started.message() instanceof StandardAgentMessage standard
+                && standard.message() instanceof Message.Assistant);
+    }
+
+    @ParameterizedTest
+    @EnumSource(SinkFailureMode.class)
+    void assistantUpdateSinkFailurePropagatesWithoutCommittingTranscript(SinkFailureMode mode) throws Exception {
+        assertStreamingSinkFailure(mode, event -> event instanceof AgentEvent.MessageUpdated);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void streamingSinkFailureCancelsTheActiveProvider(boolean throwDuringCancellation) throws Exception {
+        var providerCancelled = new CompletableFuture<Void>();
+        var failure = new IllegalStateException("event delivery failed");
+        var cancellationFailure = new AssertionError("cancellation listener failed");
+        ModelClient client = (request, cancellation) -> {
+            var stream = new AssistantMessageStream();
+            cancellation.onCancellation(() -> {
+                providerCancelled.complete(null);
+                if (throwDuringCancellation) {
+                    throw cancellationFailure;
+                }
+            });
+            stream.push(new AssistantMessageEvent.Start(partial("")));
+            stream.push(new AssistantMessageEvent.TextDelta(0, "hello", partial("hello")));
+            return stream;
+        };
+        AgentEventSink sink = event -> event instanceof AgentEvent.MessageUpdated
+                ? CompletableFuture.failedStage(failure)
+                : CompletableFuture.completedStage(null);
+
+        try (var agent = new Agent(configWith(client, sink))) {
+            var run = agent.prompt(user("hi")).toCompletableFuture();
+            assertSame(failure, assertThrows(ExecutionException.class,
+                    () -> run.get(3, TimeUnit.SECONDS)).getCause());
+            providerCancelled.get(3, TimeUnit.SECONDS);
+            if (throwDuringCancellation) {
+                var exception = assertThrows(CompletionException.class, run::join);
+                assertArrayEquals(new Throwable[] {cancellationFailure}, exception.getSuppressed());
+            }
+            assertFalse(agent.isRunning());
+        }
+    }
+
+    @Test
+    void synchronousModelInvocationFailureStillBecomesTerminalAssistant() throws Exception {
+        ModelClient client = (request, cancellation) -> {
+            throw new IllegalStateException("model invocation failed");
+        };
+        try (var agent = new Agent(configWith(client, AgentEventSink.noop()))) {
+            var result = agent.prompt(user("hi")).toCompletableFuture().get(3, TimeUnit.SECONDS);
+            assertEquals(StopReason.ERROR, finalAssistant(result).stopReason());
+            assertEquals("model invocation failed", finalAssistant(result).errorMessage());
+        }
+    }
+
+    @Test
+    void nullModelStreamStillBecomesTerminalAssistant() throws Exception {
+        try (var agent = new Agent(configWith((request, cancellation) -> null, AgentEventSink.noop()))) {
+            var result = agent.prompt(user("hi")).toCompletableFuture().get(3, TimeUnit.SECONDS);
+            assertEquals(StopReason.ERROR, finalAssistant(result).stopReason());
+        }
+    }
+
+    private static Message.Assistant finalAssistant(LoopResult result) {
+        var message = assertInstanceOf(StandardAgentMessage.class, result.newMessages().getLast());
+        return assertInstanceOf(Message.Assistant.class, message.message());
+    }
+
+    private static void assertStreamingSinkFailure(
+            SinkFailureMode mode, Predicate<AgentEvent> rejectedEvent
+    ) throws Exception {
+        var events = new CopyOnWriteArrayList<AgentEvent>();
+        var rejectOnce = new AtomicBoolean(true);
+        var failure = new IllegalStateException("event delivery failed");
+        AgentEventSink sink = event -> {
+            events.add(event);
+            if (rejectedEvent.test(event) && rejectOnce.getAndSet(false)) {
+                return switch (mode) {
+                    case THROW -> throw failure;
+                    case FAILED_STAGE -> CompletableFuture.failedStage(failure);
+                    case NULL_STAGE -> null;
+                };
+            }
+            return CompletableFuture.completedStage(null);
+        };
+        var done = partial("hello");
+        var client = streamingClient(
+                new AssistantMessageEvent.Start(partial("")),
+                new AssistantMessageEvent.TextDelta(0, "hello", done),
+                new AssistantMessageEvent.Done(StopReason.STOP, done));
+
+        try (var agent = new Agent(configWith(client, sink))) {
+            var run = agent.prompt(user("hi")).toCompletableFuture();
+            var exception = assertThrows(ExecutionException.class, () -> run.get(3, TimeUnit.SECONDS));
+            if (mode == SinkFailureMode.NULL_STAGE) {
+                assertInstanceOf(NullPointerException.class, exception.getCause());
+            } else {
+                assertSame(failure, exception.getCause());
+            }
+            assertTrue(rejectedEvent.test(events.getLast()));
+            assertTrue(events.stream().noneMatch(AgentEvent.AgentCompleted.class::isInstance));
+            assertTrue(agent.context().messages().isEmpty());
+            assertFalse(agent.isRunning());
+            assertFalse(agent.state().streaming());
+            assertNull(agent.state().streamingMessage());
+            assertNull(agent.state().errorMessage());
+
+            var recovered = agent.prompt(user("retry")).toCompletableFuture().get(3, TimeUnit.SECONDS);
+            assertEquals(StopReason.STOP, finalAssistant(recovered).stopReason());
+        }
+    }
+
+    private enum SinkFailureMode { THROW, FAILED_STAGE, NULL_STAGE }
 
     @Test
     void textStreamingEmitsStartDeltaEndInOrder() throws Exception {

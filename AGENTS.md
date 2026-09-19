@@ -1,17 +1,17 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-09-17 02:55 PDT
+**Generated:** 2026-09-18 PDT
 **Branch:** master
 
 ## OVERVIEW
 
-Java 21 多模块 Maven monorepo。`ai` 是 provider-neutral 模型调用协议层（零内部依赖），`agent-core` 是通用 Agent Runtime（仅依赖 `ai`）。库模块，无 main/Spring Boot 启动类。
+Java 21 多模块 Maven monorepo。`ai` 是 provider-neutral 模型调用协议层（零内部依赖），`ai-providers` 提供具体 provider adapter，`agent-core` 是通用 Agent Runtime，`coding-agent` 是 headless 编码产品内核。均为库模块，无 main/Spring Boot 启动类。
 
 ## STRUCTURE
 
 ```
 Jcode/
-├── pom.xml              # 聚合 reactor: ai -> ai-providers -> agent-core; enforcer 强制模块边界
+├── pom.xml              # 聚合 reactor: ai -> ai-providers -> agent-core -> coding-agent; 各模块 enforcer 强制边界
 ├── .mvn/jvm.config      # -Djava.io.tmpdir=C:/Temp/maven (会副作用创建根目录 C:/)
 ├── ai/                  # 模型调用协议层 (零 Jcode 内部依赖)
 │   └── src/main/java/site/pplee/jcode/ai/
@@ -55,6 +55,16 @@ Jcode/
 │       ├── queue/       # PendingMessageQueue/Source + QueueMode (steering/follow-up)
 │       ├── tool/        # AgentTool + ToolExecutionResult + ToolExecutionMode + ToolUpdateSink + BeforeToolCall + AfterToolCall
 │       └── turn/        # PrepareNextTurn + NextTurnUpdate + ShouldStopAfterTurn + TurnContext (下一 Turn 控制)
+├── coding-agent/        # Headless 编码产品内核 (内部依赖: ai + agent-core)
+│   └── src/main/java/site/pplee/jcode/codingagent/
+│       ├── CodingAgentSession.java   # 唯一产品运行门面，独占底层 Agent
+│       ├── CodingAgentConfig.java    # 显式 model/client/cwd/options/event 配置
+│       ├── CodingAgentState.java     # 产品状态防御性快照
+│       ├── CodingAgentRunResult.java # 不暴露 LoopResult/context/tools 的运行结果
+│       ├── event/                    # CodingAgentEvent + backpressure sink
+│       ├── internal/                 # Standard message/event 递归快照 mapper
+│       ├── prompt/                   # 纯 SystemPromptBuilder
+│       └── tool/                     # ReadTool + 有界完整行 OutputTruncator
 └── docs/
     ├── agents/          # issue tracker、triage 标签与 domain docs 配置
     ├── architecture/    # mdBook 架构解读文档集 (含写作规则 AGENTS.md)
@@ -70,7 +80,7 @@ Jcode/
 - Java 21：`record`、`sealed interface`、模式匹配、`Executors.newVirtualThreadPerTaskExecutor()`。
 - 包名：`site.pplee.jcode.<module>`（模块名 `agent-core` → 包 `agentcore`，不带连字符）。
 - 显式装配：provider/工具/hook 通过构造参数传入；禁止静态可变注册表、禁止 `ServiceLoader` 扫描、禁止 classpath 自动注册。
-- 公开类型不可变；一次 run 的可变状态仅存在于 package-private `LoopState`。
+- 公开类型不可变；一次 core run 的可变状态仅存在于 package-private `LoopState`。`coding-agent` 对含可变 `JsonNode` 的 state/result/event 在构造和访问时均递归快照。
 - `ModelClient.stream()` 返回 `AssistantMessageStream`；adapter 不得同步抛，成功/错误/取消均通过 `Done`/`Error` 事件产生最终 `Message.Assistant`。
 - `Agent` 内部包装用户 `AgentEventSink` 为归约 sink：先以 `AtomicReference<AgentState>` + CAS 更新 AgentState，再委托用户 sink。用户 sink 看到事件时状态已完成归约。
 - 流式消费：`AgentLoop.consumeStream()` 在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终消息。partial 不进入 context。
@@ -95,6 +105,7 @@ Jcode/
 **模块边界（enforcer 强制）：**
 - `ai` 不得依赖 `agent-core` 或任何 Jcode 模块。
 - `agent-core` 仅可依赖 `ai`；禁止依赖 `ai-providers`/`coding-agent`/`server`/`tui`（前瞻 guard）。
+- `coding-agent` 当前仅依赖 `ai` 与 `agent-core`；第一阶段不得依赖 `ai-providers`，不得依赖未来 `server`/`tui`。
 - 依赖图必须无环，只能产品层 → 内核层。
 - `message`/`event`/`tool`/`queue`/`concurrent` 是源码包，不是 Maven 模块。
 - 禁止 `common`/`shared` 杂物模块。
@@ -105,7 +116,7 @@ Jcode/
 - `CancellationSignal` 只读；不得 cast 回 `CancellationSource` 调 `cancel()`。`onCancellation` 只观察取消，listener 必须非阻塞。
 - `cancel()` 幂等；listener 最多执行一次，失败不得阻止其他 listener 或让 `cancel()` 失败。
 - 不阻塞轮询、不用 `Thread.sleep()`、不用长期共享无界平台线程池。
-- `AgentEventSink.emit()` 返回的 stage 必须被等待；慢 sink 阻塞 run。`RunEventEmitter` 是唯一等待点——loop 和 `LoopToolUpdateSink` 均通过它投递事件。
+- `AgentEventSink.emit()` 返回的 stage 必须被等待；慢 sink 阻塞 run。`RunEventEmitter` 是唯一等待点——loop 和 `LoopToolUpdateSink` 均通过它投递事件。流式 `MessageStarted`/`MessageUpdated` 的 sink 异常不得归一为模型错误；run 异常退出先取消在途 provider，再清理状态并异常完成 future，取消清理异常不覆盖原始失败。
 
 **工具三阶段管道：**
 - 工具失败/参数转换失败/schema 失败/未知工具 → 转 error `ToolExecutionResult`，不抛进 loop。
@@ -136,7 +147,7 @@ Jcode/
 ## COMMANDS
 
 ```bash
-# 构建全模块（ai -> agent-core reactor 顺序）
+# 构建全模块（ai -> ai-providers/agent-core -> coding-agent）
 mvn clean install
 
 # 测试全模块
@@ -150,6 +161,10 @@ mvn -pl ai-providers -am test
 
 # 单模块测试（ai 独立）
 mvn -pl ai test
+
+# coding-agent 及其依赖
+mvn -pl coding-agent -am test
+mvn -pl coding-agent dependency:tree
 
 # 根 reactor 验证（enforcer + 全测试）
 mvn verify
@@ -168,8 +183,9 @@ mdbook serve docs/architecture --open
 - 无 Maven wrapper（`mvnw`）；用系统 `mvn`。
 - 无 CI 配置（无 `.github/workflows`/`Jenkinsfile`）。
 - jdtls（Java LSP）未安装；codegraph 未索引（`.codegraph/` 存在但未 `codegraph init`）。
-- 未来模块（未创建）：`coding-agent`、`server`、`tui`。仅在出现真实独立使用者或产品入口时创建，不预建空模块。未来 provider 实现（anthropic/google 等）不再新建 Maven 模块，而是放入共享模块 `ai-providers` 的子包。
+- 未来模块（未创建）：`server`、`tui`。仅在出现真实独立使用者或产品入口时创建，不预建空模块。未来 provider 实现（anthropic/google 等）不再新建 Maven 模块，而是放入共享模块 `ai-providers` 的子包。
 - `agent-core` 核心基线已包含模块 seam、流式协议、工具三阶段执行、Context 投影、下一 Turn 控制与并行工具双排序；对应实施方案均已归档。
+- `coding-agent` 第一阶段 Headless 产品闭环已落地：显式 Session 装配、产品快照事件/状态/结果、coding system prompt、UTF-8/图片有界 `read` 工具，以及 fake-model 纵向测试；尚无 Session 持久化、配置发现、compaction、extension 或 UI。审查修复后，`read` 路径参数保留文件系统的 symlink/`..` 解析语义；目标页按剩余 UTF-8 字节预算提前终止超长行扫描，offset 前置行仍完整跳过但不缓冲；Session 流式 sink 失败异常完成且可再次运行。
 - OpenAI Responses 正确性首批（OAI-001～OAI-009）已落地：`store:false` reasoning replay、transcript planner、可中断 HTTP/SSE、incomplete 分 reason 映射、stream/event fidelity。方案见 `docs/plans/archived/openai-responses-correctness-first-batch.md`。`Content.ToolCall` 仍走 `oai1:` id 编码，text/thinking 走 `ModelReplayState`；统一到 content replayState 须在引入第二个 provider 前完成。
 - OpenAI Responses 第二批（OAI-010～OAI-018，OAI-014 不含 deferred tool loading）已落地。方案见 `docs/plans/archived/openai-responses-capabilities-resilience-second-batch.md`。
 - OpenAI Responses 第二批 PR 1（OAI-010/OAI-011）已落地：`Content.Image`（base64-only，`toString()` redacted）、空工具结果 `"(no tool output)"`、vision/non-vision 图片占位与 `function_call_output` 内保留、`developer`/`system` 由 model capability × endpoint compatibility 共同决定。老 `OpenAiModelCapabilities` 两参数构造默认无 image、不优先 developer。

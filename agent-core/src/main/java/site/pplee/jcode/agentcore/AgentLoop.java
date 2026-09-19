@@ -233,17 +233,18 @@ final class AgentLoop {
 
     /**
      * Build the model request from the current context via the two-stage
-     * projection pipeline, stream the response, and normalize failures into a
-     * zero-usage {@link Message.Assistant}.
+     * projection pipeline, stream the response, and normalize model or projection
+     * failures into a zero-usage {@link Message.Assistant}.
      *
      * <p>Pipeline: {@link ContextTransformer} (awaited) → copy/validate →
      * cancellation check → {@link MessageProjector} → copy/validate →
      * cancellation check → {@code ModelRequest} → {@code ModelClient.stream}.
      *
-     * <p>Cancellation boundary 2 lives in the model-call phase: stream and
+     * <p>Cancellation boundary 2 lives in the model-call phase: invocation and
      * interruption errors are turned into an {@link StopReason#ABORTED} (if
      * cancelled) or {@link StopReason#ERROR} assistant message. Projection
      * failures follow the same normalization — the model is never called.
+     * Event delivery failures propagate unchanged as infrastructure failures.
      */
     private Message.Assistant invokeModelSafely(LoopState state, AgentLoopConfig config,
                                                   CancellationSignal cancellation) {
@@ -289,15 +290,21 @@ final class AgentLoop {
                 state.thinkingLevel(),
                 config.modelRequestOptions()
         );
+        AssistantMessageStream stream;
         try {
-            var stream = config.modelClient().stream(request, cancellation);
-            return consumeStream(stream, config.events());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return cancellation.isCancelled() ? abortedAssistant("interrupted") : erroredAssistant("interrupted");
+            stream = Objects.requireNonNull(config.modelClient().stream(request, cancellation),
+                    "model client returned null stream");
         } catch (RuntimeException e) {
             var msg = cancellation.isCancelled() ? "cancelled" : ToolCallExecutor.causeMessage(e);
             return cancellation.isCancelled() ? abortedAssistant(msg) : erroredAssistant(msg);
+        }
+
+        // Event delivery must remain outside the model invocation failure boundary.
+        try {
+            return consumeStream(stream, events);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return cancellation.isCancelled() ? abortedAssistant("interrupted") : erroredAssistant("interrupted");
         }
     }
 

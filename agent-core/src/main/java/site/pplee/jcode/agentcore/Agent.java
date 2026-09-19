@@ -187,6 +187,14 @@ public final class Agent implements AutoCloseable {
                     context = result.context();
                 } catch (Throwable t) {
                     failure = t;
+                    // Stop in-flight provider work without masking the original run failure.
+                    try {
+                        source.cancel();
+                    } catch (Throwable cancellationFailure) {
+                        if (cancellationFailure != t) {
+                            t.addSuppressed(cancellationFailure);
+                        }
+                    }
                 }
                 // Reset streaming state: streaming=false, clear streamingMessage/pendingToolCalls.
                 // Preserve errorMessage from the reducer on success; clear on failure.

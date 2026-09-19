@@ -51,6 +51,29 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-module-boundaries</id>
+                        <goals><goal>enforce</goal></goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <excludes>
+                                        <exclude>site.pplee:agent-core</exclude>
+                                        <exclude>site.pplee:coding-agent</exclude>
+                                        <exclude>site.pplee:server</exclude>
+                                        <exclude>site.pplee:tui</exclude>
+                                    </excludes>
+                                    <message>ai-providers may depend only on ai among Jcode modules.</message>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
