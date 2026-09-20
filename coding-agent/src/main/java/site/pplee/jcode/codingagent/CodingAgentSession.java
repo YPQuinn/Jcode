@@ -126,7 +126,8 @@ public final class CodingAgentSession implements AutoCloseable {
         }
         this.toolSet = createdToolSet;
         this.agent = createdAgent;
-        this.reloadExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        this.reloadExecutor = projectContextConfig.enabled()
+                ? Executors.newVirtualThreadPerTaskExecutor() : null;
     }
 
     /** Start a run with one text user message; concurrent runs fail fast. */
@@ -246,7 +247,8 @@ public final class CodingAgentSession implements AutoCloseable {
         }
 
         try {
-            reloadExecutor.execute(() -> runReload(source, revision, operation));
+            Objects.requireNonNull(reloadExecutor, "reload executor must exist when project context is enabled")
+                    .execute(() -> runReload(source, revision, operation));
         } catch (RuntimeException failure) {
             operation.completeExceptionally(releaseFailedReload(source, failure));
         }
@@ -357,14 +359,17 @@ public final class CodingAgentSession implements AutoCloseable {
         } catch (Error failure) {
             errorFailure = failure;
         }
-        reloadExecutor.shutdownNow();
-        if (!Boolean.TRUE.equals(reloadWorker.get())) {
-            try {
-                reloadExecutor.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException failure) {
-                Thread.currentThread().interrupt();
-                if (runtimeFailure == null && errorFailure == null) {
-                    runtimeFailure = new IllegalStateException("interrupted while closing project context loader", failure);
+        if (reloadExecutor != null) {
+            reloadExecutor.shutdownNow();
+            if (!Boolean.TRUE.equals(reloadWorker.get())) {
+                try {
+                    reloadExecutor.awaitTermination(2, TimeUnit.SECONDS);
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    if (runtimeFailure == null && errorFailure == null) {
+                        runtimeFailure = new IllegalStateException(
+                                "interrupted while closing project context loader", failure);
+                    }
                 }
             }
         }

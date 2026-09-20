@@ -28,10 +28,11 @@ Headless 编码产品内核。组合 `ai` 与 `agent-core`，提供 `CodingAgent
 
 ## PLANNING STATUS
 
-- 第三阶段已完成显式项目指令发现、不可变来源/诊断快照、纯 Prompt 装配和 idle 原子 reload；实施计划归档于 `docs/plans/archived/coding-agent-phase-3-project-context.md`。候选仅 `AGENTS.override.md` → `AGENTS.md` → `AGENTS.MD`，不读取 CLAUDE 文件；物理祖先链、全局来源、symlink/hardlink 去重和严格验证的嵌套 linked-worktree 遮蔽均有固定边界。旧配置默认不执行新增发现 I/O，custom/append/tools/cwd 语义不变。阶段三审查修复后新增 19 个回归，全仓 762 个测试、本模块 220 个测试，0 failure/error/skipped，严格 native smoke 与生命周期/加载边界连续三轮复验通过。
-- 项目指令读取采用严格 UTF-8、BOM 规则、文件/总量/来源/祖先/Git 元数据/读取/deadline/渲染预算和结构化诊断。`WARN_AND_SKIP` 可提交带诊断快照，`FAIL`、整体预算失败或取消不替换旧快照。reload 与 prompt/close 共用产品 admission lock，不重建 Agent/工具，不改变历史、队列、model/options；返回 stage 是不可反向取消内部操作的观察副本。
+- 第三阶段已完成显式项目指令发现、不可变来源/诊断快照、纯 Prompt 装配和 idle 原子 reload；实施计划及后续语义纠偏记录归档于 `docs/plans/archived/coding-agent-phase-3-project-context.md`。候选仅 `AGENTS.override.md` → `AGENTS.md` → `AGENTS.MD`，不读取 CLAUDE 文件；每个候选只有成功读取后才停止，缺失、非普通文件、不可读或非法 UTF-8 均继续尝试较低优先级候选。
+- 项目来源按配置 working directory 的词法祖先链从父到子发现；real path 只用于来源身份、去重和 linked-worktree 关系判断。显式全局目录缺失表示无全局来源，配置成现存非目录或悬空链接仍是配置错误。普通文件筛选、严格 UTF-8/BOM、symlink/hardlink 去重与 1 MiB 聚合实际读取上限保留；不再维护单文件、保留总量、来源数、祖先数、路径、诊断、渲染或 deadline 等重叠预算。
+- `<project_context>` / `<project_instructions>` 是 prompt 来源标记，不是待解析的 XML 文档。只轻量转义 `path` 属性，指令正文必须逐字拼接，不做 XML 转义或 XML 字符合法性拒绝。Git 元数据识别是 best-effort：失败只产生诊断并继续普通加载；只有 worktree 根来源已成功加载时，才遮蔽主工作树中同候选文件名的来源。
+- `WARN_AND_SKIP` 可提交带诊断快照；`FAIL` 仅在某目录出现候选失败且没有后续候选成功时拒绝加载，整体读取上限失败或取消也不替换旧快照。reload 与 prompt/close 共用产品 admission lock，不重建 Agent/工具，不改变历史、队列、model/options；返回 stage 是不可反向取消内部操作的观察副本。项目上下文关闭时不创建 reload executor。
 - reload 在提交或失败清理的临界区内释放接纳，再锁外完成 stage；同步完成回调可启动 prompt/下一 reload，也可 close。worker 使用线程局部标记覆盖回调周期，避免新 reload 覆盖旧 worker 身份而导致 close 自等待；close 的两秒窗口结束不能替尚未退出加载的 worker 结算 stage 或清除 reloading。取消导致的读取中断在真实清理后归一为取消。
-- 项目来源打开前必须复核所选属性与普通文件类型，已知变化或特殊文件不得试读；package-private `InputOpener` seam 用于确定性文件替换/FIFO 回归。保留的 256 KiB/64 个来源预算在 UTF-8、正文与展示路径验证后计算，失败读取仍消耗 1 MiB 实际读取预算。路径不可渲染遵循 WARN/FAIL，不留给 builder 才失败；可选 `commondir` 仅真正缺失可忽略，非普通文件、悬空链接及读取错误走 Git 元数据诊断。
 - 第二阶段 PR 1～6 已完成工具配置/policy/显式装配、`write`/`edit`、受控 `bash`、有界 `ls`/`grep`/`find`、完整 fake-model Git 工作区闭环、故障恢复矩阵和严格 native smoke。旧配置的默认可执行工具仍只有 `read`；显式 `coding(BashConfig)` profile 提供 `read/write/edit/bash`，`codingWithSearch(BashConfig, SearchConfig)` profile 显式提供全部七个工具。
 - 阶段二分 2A（显式启用 read/write/edit/bash）与 2B（结构化发现），均已完成，不包含持久化、配置发现或 UI。审查修复后全仓 721 个测试通过（本模块 181 个），严格 native smoke 与进程/sink 回归连续三次复验通过；实施记录已归档。
 - 旧 Config 与 `tools == null` 保持 read-only；产品授权请求递归快照参数，不能直接对外暴露含 `AgentTool`/`AgentContext` 的 core hook，诊断不得输出参数或工作目录。policy 失败或拒绝归一为普通 tool error，不得执行工具。

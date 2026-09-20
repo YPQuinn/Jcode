@@ -4,7 +4,6 @@ import site.pplee.jcode.ai.concurrent.CancellationSignal;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -15,31 +14,21 @@ import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.LongSupplier;
 
-/** Internal bounded loader for project instruction files. */
+/** Discovers and loads explicit project instruction files without performing prompt rendering. */
 public final class ProjectContextLoader {
-    static final int MAX_FILE_BYTES = 64 * 1024;
-    static final int MAX_TOTAL_BYTES = 256 * 1024;
-    static final int MAX_FILES = 64;
-    static final int MAX_ANCESTORS = 128;
-    private static final int MAX_READ_BYTES = 1024 * 1024;
-    private static final int MAX_PATH_BYTES = 4 * 1024;
-    private static final int MAX_GIT_FILE_BYTES = 8 * 1024;
-    private static final int MAX_GIT_READS = 32;
-    private static final int MAX_DIAGNOSTICS = 512;
-    private static final long DEADLINE_NANOS = Duration.ofSeconds(5).toNanos();
-    private static final List<String> CANDIDATES = List.of("AGENTS.override.md", "AGENTS.md", "AGENTS.MD");
+    static final int MAX_READ_BYTES = 1024 * 1024;
+    private static final List<String> CANDIDATES = List.of(
+            "AGENTS.override.md", "AGENTS.md", "AGENTS.MD");
 
     private ProjectContextLoader() {
     }
 
-    /** Load one complete candidate snapshot with the requested revision. */
+    /** Load one immutable project instruction snapshot. */
     public static ProjectContextSnapshot load(
             Path workingDirectory,
             ProjectContextConfig config,
@@ -48,255 +37,241 @@ public final class ProjectContextLoader {
     ) {
         Objects.requireNonNull(workingDirectory, "workingDirectory must not be null");
         Objects.requireNonNull(config, "config must not be null");
-        return load(workingDirectory, config, revision, cancellation, System::nanoTime);
-    }
-
-    static ProjectContextSnapshot load(
-            Path workingDirectory,
-            ProjectContextConfig config,
-            long revision,
-            CancellationSignal cancellation,
-            LongSupplier nanoTime
-    ) {
-        return load(workingDirectory, config, revision, cancellation, nanoTime, Files::newInputStream);
-    }
-
-    /** Package-local I/O seam; all opened streams retain the same budgets and ownership. */
-    static ProjectContextSnapshot load(
-            Path workingDirectory,
-            ProjectContextConfig config,
-            long revision,
-            CancellationSignal cancellation,
-            LongSupplier nanoTime,
-            InputOpener inputOpener
-    ) {
-        Objects.requireNonNull(workingDirectory, "workingDirectory must not be null");
-        Objects.requireNonNull(config, "config must not be null");
         Objects.requireNonNull(cancellation, "cancellation must not be null");
-        Objects.requireNonNull(nanoTime, "nanoTime must not be null");
-        Objects.requireNonNull(inputOpener, "inputOpener must not be null");
         if (!config.enabled()) {
             return ProjectContextSnapshot.disabled(workingDirectory);
         }
-        return new LoadOperation(config, cancellation, nanoTime, inputOpener).load(workingDirectory, revision);
-    }
-
-    /** Opens an input stream whose lifetime is owned by one bounded read. */
-    @FunctionalInterface
-    interface InputOpener {
-        InputStream open(Path path) throws IOException;
+        return new LoadOperation(config, cancellation).load(workingDirectory, revision);
     }
 
     private static final class LoadOperation {
         private final ProjectContextConfig config;
         private final CancellationSignal cancellation;
-        private final LongSupplier nanoTime;
-        private final InputOpener inputOpener;
-        private final long deadline;
         private final List<ProjectContextDiagnostic> diagnostics = new ArrayList<>();
         private int bytesRead;
-        private int gitReads;
 
-        private LoadOperation(
-                ProjectContextConfig config,
-                CancellationSignal cancellation,
-                LongSupplier nanoTime,
-                InputOpener inputOpener
-        ) {
+        private LoadOperation(ProjectContextConfig config, CancellationSignal cancellation) {
             this.config = config;
             this.cancellation = cancellation;
-            this.nanoTime = nanoTime;
-            this.inputOpener = inputOpener;
-            this.deadline = nanoTime.getAsLong() + DEADLINE_NANOS;
         }
 
-        private ProjectContextSnapshot load(Path workingDirectory, long revision) {
+        private ProjectContextSnapshot load(Path configuredWorkingDirectory, long revision) {
+            Path workingDirectory = configuredWorkingDirectory.toAbsolutePath().normalize();
+            requireDirectory(workingDirectory, ProjectContextDiagnostic.Code.INVALID_DISCOVERY_ROOT, false);
+
+            Path discoveryRoot = config.discoveryRoot() == null
+                    ? workingDirectory.getRoot()
+                    : config.discoveryRoot().toAbsolutePath().normalize();
+            requireDirectory(discoveryRoot, ProjectContextDiagnostic.Code.INVALID_DISCOVERY_ROOT, false);
+            List<Path> ancestors = ancestors(workingDirectory, discoveryRoot);
+
+            var loaded = new ArrayList<ProjectContextFile>();
+            Path globalDirectory = optionalGlobalDirectory();
+            if (globalDirectory != null) {
+                ProjectContextFile global = loadFromDirectory(globalDirectory, ProjectContextScope.GLOBAL);
+                if (global != null) {
+                    loaded.add(global);
+                }
+            }
+            for (Path directory : ancestors) {
+                checkpoint();
+                ProjectContextFile project = loadFromDirectory(directory, ProjectContextScope.PROJECT);
+                if (project != null) {
+                    loaded.add(project);
+                }
+            }
+
+            applyWorktreeShadow(loaded, workingDirectory, discoveryRoot);
+            return new ProjectContextSnapshot(revision, workingDirectory, deduplicate(loaded), diagnostics);
+        }
+
+        private Path optionalGlobalDirectory() {
+            if (config.globalDirectory() == null) {
+                return null;
+            }
+            Path directory = config.globalDirectory().toAbsolutePath().normalize();
+            return requireDirectory(directory, ProjectContextDiagnostic.Code.INVALID_GLOBAL_DIRECTORY, true)
+                    ? directory : null;
+        }
+
+        private boolean requireDirectory(
+                Path path,
+                ProjectContextDiagnostic.Code code,
+                boolean missingIsEmpty
+        ) {
             checkpoint();
-            Path physicalWorkingDirectory = realDirectory(
-                    workingDirectory, ProjectContextDiagnostic.Code.INVALID_DISCOVERY_ROOT);
-            Path root = config.discoveryRoot() == null
-                    ? physicalWorkingDirectory.getRoot()
-                    : realDirectory(config.discoveryRoot(), ProjectContextDiagnostic.Code.INVALID_DISCOVERY_ROOT);
-            if (root == null || !physicalWorkingDirectory.startsWith(root)) {
-                throw fatal(ProjectContextDiagnostic.Code.DISCOVERY_ROOT_NOT_ANCESTOR,
-                        root, physicalWorkingDirectory);
-            }
-
-            var directories = new ArrayList<DirectorySource>();
-            if (config.globalDirectory() != null) {
-                directories.add(new DirectorySource(realDirectory(config.globalDirectory(),
-                        ProjectContextDiagnostic.Code.INVALID_GLOBAL_DIRECTORY), ProjectContextScope.GLOBAL));
-            }
-            var projectDirectories = collectProjectDirectories(physicalWorkingDirectory, root);
-            projectDirectories.forEach(path -> directories.add(new DirectorySource(path, ProjectContextScope.PROJECT)));
-
-            var selected = new ArrayList<SelectedSource>();
-            for (var directory : directories) {
-                checkpoint();
-                var candidate = selectCandidate(directory);
-                if (candidate != null) {
-                    selected.add(candidate);
+            try {
+                BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class);
+                if (!attributes.isDirectory()) {
+                    throw fatal(code, path, null, null);
                 }
-            }
-            applyWorktreeShadow(selected, physicalWorkingDirectory, root);
-            var unique = deduplicate(selected);
-            var files = new ArrayList<ProjectContextFile>();
-            int retainedBytes = 0;
-            for (var source : unique) {
-                checkpoint();
-                try {
-                    BasicFileAttributes before = attributes(source.path());
-                    if (!stable(source.selectedAttributes(), before)) {
-                        sourceFailure(ProjectContextDiagnostic.Code.SOURCE_CHANGED, source.path(), null);
-                        continue;
-                    }
-                    byte[] bytes = readFile(source.path(), MAX_FILE_BYTES, false);
-                    BasicFileAttributes after = attributes(source.path());
-                    Path physicalAfter = source.path().toRealPath();
-                    if (!stable(before, after) || !source.physicalPath().equals(physicalAfter)) {
-                        sourceFailure(ProjectContextDiagnostic.Code.SOURCE_CHANGED, source.path(), null);
-                        continue;
-                    }
-                    String content = decode(bytes);
-                    if (!isSafeXmlText(content) || !isSafeXmlText(source.path().toString())) {
-                        sourceFailure(ProjectContextDiagnostic.Code.UNSAFE_CONTENT, source.path(), null);
-                        continue;
-                    }
-                    // Retention budgets count accepted sources; readFile also charges rejected input.
-                    if (files.size() >= MAX_FILES || retainedBytes > MAX_TOTAL_BYTES - bytes.length) {
-                        throw fatal(ProjectContextDiagnostic.Code.LOAD_LIMIT_EXCEEDED, source.path(), null);
-                    }
-                    retainedBytes += bytes.length;
-                    files.add(new ProjectContextFile(source.scope(), source.path(), source.physicalPath(),
-                            stripBom(content), bytes.length));
-                } catch (FileTooLargeException e) {
-                    sourceFailure(ProjectContextDiagnostic.Code.SOURCE_TOO_LARGE, source.path(), null);
-                } catch (CharacterCodingException e) {
-                    sourceFailure(ProjectContextDiagnostic.Code.INVALID_UTF8, source.path(), null);
-                } catch (IOException | SecurityException e) {
-                    sourceFailure(ProjectContextDiagnostic.Code.SOURCE_UNREADABLE, source.path(), null);
+                return true;
+            } catch (NoSuchFileException e) {
+                if (missingIsEmpty && !Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                    return false;
                 }
+                throw fatal(code, path, null, e);
+            } catch (IOException | SecurityException e) {
+                throw fatal(code, path, null, e);
             }
-            return new ProjectContextSnapshot(revision, physicalWorkingDirectory, files, diagnostics);
         }
 
-        private List<Path> collectProjectDirectories(Path workingDirectory, Path root) {
+        private List<Path> ancestors(Path workingDirectory, Path root) {
+            if (!workingDirectory.startsWith(root)) {
+                throw fatal(ProjectContextDiagnostic.Code.DISCOVERY_ROOT_NOT_ANCESTOR,
+                        root, workingDirectory, null);
+            }
             var result = new ArrayList<Path>();
             for (Path current = workingDirectory; current != null; current = current.getParent()) {
                 checkpoint();
                 result.add(current);
-                if (result.size() > MAX_ANCESTORS) {
-                    throw fatal(ProjectContextDiagnostic.Code.LOAD_LIMIT_EXCEEDED,
-                            workingDirectory, root);
-                }
                 if (current.equals(root)) {
                     break;
                 }
             }
             if (result.isEmpty() || !result.getLast().equals(root)) {
-                throw fatal(ProjectContextDiagnostic.Code.DISCOVERY_ROOT_NOT_ANCESTOR, root, workingDirectory);
+                throw fatal(ProjectContextDiagnostic.Code.DISCOVERY_ROOT_NOT_ANCESTOR,
+                        root, workingDirectory, null);
             }
             Collections.reverse(result);
             return result;
         }
 
-        private SelectedSource selectCandidate(DirectorySource directory) {
+        private ProjectContextFile loadFromDirectory(Path directory, ProjectContextScope scope) {
+            CandidateFailure lastFailure = null;
             for (String name : CANDIDATES) {
                 checkpoint();
-                Path candidate = directory.path().resolve(name);
-                if (!validPath(candidate)) {
-                    sourceFailure(ProjectContextDiagnostic.Code.PATH_TOO_LONG, null, null);
-                    return null;
-                }
+                Path candidate = directory.resolve(name);
                 BasicFileAttributes attributes;
                 try {
-                    attributes = attributes(candidate);
+                    attributes = Files.readAttributes(candidate, BasicFileAttributes.class);
                 } catch (NoSuchFileException e) {
-                    try {
-                        var linkAttributes = Files.readAttributes(candidate, BasicFileAttributes.class,
-                                LinkOption.NOFOLLOW_LINKS);
-                        if (linkAttributes.isSymbolicLink()) {
-                            sourceFailure(ProjectContextDiagnostic.Code.SOURCE_IDENTITY_FAILED, candidate, null);
-                            return null;
-                        }
-                    } catch (NoSuchFileException absent) {
-                        continue;
-                    } catch (IOException | SecurityException identityFailure) {
-                        sourceFailure(ProjectContextDiagnostic.Code.SOURCE_IDENTITY_FAILED, candidate, null);
-                        return null;
+                    if (Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)) {
+                        lastFailure = candidateFailure(
+                                ProjectContextDiagnostic.Code.SOURCE_UNREADABLE, candidate, e);
                     }
                     continue;
                 } catch (IOException | SecurityException e) {
-                    sourceFailure(ProjectContextDiagnostic.Code.SOURCE_IDENTITY_FAILED, candidate, null);
-                    return null;
-                }
-                if (!attributes.isRegularFile()) {
-                    addDiagnostic(ProjectContextDiagnostic.Code.NOT_REGULAR_FILE,
-                            ProjectContextDiagnostic.Severity.WARNING, candidate, null);
+                    lastFailure = candidateFailure(
+                            ProjectContextDiagnostic.Code.SOURCE_UNREADABLE, candidate, e);
                     continue;
                 }
-                try {
-                    return new SelectedSource(directory.scope(), directory.path(), candidate.toAbsolutePath(),
-                            candidate.toRealPath(), attributes);
-                } catch (IOException | SecurityException e) {
-                    sourceFailure(ProjectContextDiagnostic.Code.SOURCE_IDENTITY_FAILED, candidate, null);
-                    return null;
+                if (!attributes.isRegularFile()) {
+                    lastFailure = candidateFailure(
+                            ProjectContextDiagnostic.Code.NOT_REGULAR_FILE, candidate, null);
+                    continue;
                 }
+
+                try {
+                    byte[] bytes = readFile(candidate, true);
+                    String content = stripBom(decode(bytes));
+                    Path discoveredPath = candidate.toAbsolutePath().normalize();
+                    Path physicalPath = candidate.toRealPath();
+                    return new ProjectContextFile(scope, discoveredPath, physicalPath, content, bytes.length);
+                } catch (CharacterCodingException e) {
+                    lastFailure = candidateFailure(ProjectContextDiagnostic.Code.INVALID_UTF8, candidate, e);
+                } catch (IOException | SecurityException e) {
+                    lastFailure = candidateFailure(ProjectContextDiagnostic.Code.SOURCE_UNREADABLE, candidate, e);
+                }
+            }
+            if (lastFailure != null && config.failureMode() == ProjectContextFailureMode.FAIL) {
+                promoteLastDiagnostic(lastFailure);
+                throw new ProjectContextLoadException(diagnostics, lastFailure.cause());
             }
             return null;
         }
 
-        private List<SelectedSource> deduplicate(List<SelectedSource> selected) {
-            var unique = new ArrayList<SelectedSource>();
+        private CandidateFailure candidateFailure(
+                ProjectContextDiagnostic.Code code,
+                Path source,
+                Throwable cause
+        ) {
+            addDiagnostic(code, ProjectContextDiagnostic.Severity.WARNING, source, null);
+            return new CandidateFailure(code, source, cause);
+        }
+
+        private void promoteLastDiagnostic(CandidateFailure failure) {
+            for (int index = diagnostics.size() - 1; index >= 0; index--) {
+                ProjectContextDiagnostic diagnostic = diagnostics.get(index);
+                if (diagnostic.code() == failure.code() && Objects.equals(diagnostic.source(), failure.source())) {
+                    diagnostics.set(index, new ProjectContextDiagnostic(
+                            diagnostic.code(), ProjectContextDiagnostic.Severity.ERROR,
+                            diagnostic.source(), diagnostic.relatedSource()));
+                    return;
+                }
+            }
+        }
+
+        private List<ProjectContextFile> deduplicate(List<ProjectContextFile> loaded) {
+            var unique = new ArrayList<ProjectContextFile>();
             sourceLoop:
-            for (var source : selected) {
+            for (ProjectContextFile source : loaded) {
                 checkpoint();
-                for (var existing : unique) {
+                for (ProjectContextFile existing : unique) {
                     try {
                         if (source.physicalPath().equals(existing.physicalPath())
-                                || Files.isSameFile(source.path(), existing.path())) {
+                                || Files.isSameFile(source.discoveredPath(), existing.discoveredPath())) {
                             addDiagnostic(ProjectContextDiagnostic.Code.DUPLICATE_SOURCE,
-                                    ProjectContextDiagnostic.Severity.WARNING, source.path(), existing.path());
+                                    ProjectContextDiagnostic.Severity.WARNING,
+                                    source.discoveredPath(), existing.discoveredPath());
                             continue sourceLoop;
                         }
                     } catch (IOException | SecurityException e) {
-                        sourceFailure(ProjectContextDiagnostic.Code.SOURCE_IDENTITY_FAILED,
-                                source.path(), existing.path());
-                        continue sourceLoop;
+                        addDiagnostic(ProjectContextDiagnostic.Code.SOURCE_IDENTITY_FAILED,
+                                ProjectContextDiagnostic.Severity.WARNING,
+                                source.discoveredPath(), existing.discoveredPath());
                     }
                 }
                 unique.add(source);
             }
-            return unique;
+            return List.copyOf(unique);
         }
 
-        private void applyWorktreeShadow(List<SelectedSource> selected, Path cwd, Path root) {
+        private void applyWorktreeShadow(List<ProjectContextFile> loaded, Path cwd, Path root) {
             WorktreeRelation relation;
             try {
                 relation = findWorktreeRelation(cwd, root);
             } catch (IOException | InvalidPathException | SecurityException e) {
-                gitFailure(cwd);
+                addDiagnostic(ProjectContextDiagnostic.Code.GIT_METADATA_INVALID,
+                        ProjectContextDiagnostic.Severity.WARNING, cwd, null);
                 return;
             }
             if (relation == null) {
                 return;
             }
-            SelectedSource worktreeSource = selected.stream()
-                    .filter(source -> source.scope() == ProjectContextScope.PROJECT
-                            && source.directory().equals(relation.worktreeRoot()))
-                    .findFirst().orElse(null);
+
+            ProjectContextFile worktreeSource = loaded.stream()
+                    .filter(file -> file.scope() == ProjectContextScope.PROJECT)
+                    .filter(file -> file.discoveredPath().getParent().equals(relation.worktreeRoot()))
+                    .findFirst()
+                    .orElse(null);
             if (worktreeSource == null) {
                 return;
             }
-            for (int index = 0; index < selected.size(); index++) {
-                var source = selected.get(index);
-                if (source.scope() == ProjectContextScope.PROJECT
-                        && source.directory().equals(relation.mainRoot())) {
-                    selected.remove(index);
-                    addDiagnostic(ProjectContextDiagnostic.Code.SHADOWED_WORKTREE_SOURCE,
-                            ProjectContextDiagnostic.Severity.WARNING, source.path(), worktreeSource.path());
-                    return;
+
+            String selectedName = worktreeSource.discoveredPath().getFileName().toString();
+            for (int index = 0; index < loaded.size(); index++) {
+                ProjectContextFile source = loaded.get(index);
+                if (source.scope() != ProjectContextScope.PROJECT
+                        || !source.discoveredPath().getFileName().toString().equals(selectedName)) {
+                    continue;
                 }
+                Path sourceDirectory = source.discoveredPath().getParent();
+                try {
+                    if (!sourceDirectory.toRealPath().equals(relation.mainRoot())) {
+                        continue;
+                    }
+                } catch (IOException | SecurityException e) {
+                    addDiagnostic(ProjectContextDiagnostic.Code.SOURCE_IDENTITY_FAILED,
+                            ProjectContextDiagnostic.Severity.WARNING,
+                            source.discoveredPath(), worktreeSource.discoveredPath());
+                    continue;
+                }
+                loaded.remove(index);
+                addDiagnostic(ProjectContextDiagnostic.Code.SHADOWED_WORKTREE_SOURCE,
+                        ProjectContextDiagnostic.Severity.WARNING,
+                        source.discoveredPath(), worktreeSource.discoveredPath());
+                return;
             }
         }
 
@@ -308,7 +283,7 @@ public final class ProjectContextLoader {
                 Path candidate = current.resolve(".git");
                 BasicFileAttributes attributes;
                 try {
-                    attributes = attributes(candidate);
+                    attributes = Files.readAttributes(candidate, BasicFileAttributes.class);
                 } catch (NoSuchFileException e) {
                     if (current.equals(root)) {
                         break;
@@ -328,133 +303,75 @@ public final class ProjectContextLoader {
             if (worktreeRoot == null) {
                 return null;
             }
-            String gitFile = readGitText(dotGit);
+
+            String gitFile = readGitText(dotGit).trim();
             if (!gitFile.startsWith("gitdir: ")) {
                 throw new IOException("invalid git file");
             }
-            Path gitDir = resolveMetadataPath(dotGit.getParent(), singleLine(gitFile.substring(8))).toRealPath();
-            Path commonFile = gitDir.resolve("commondir");
-            BasicFileAttributes commonAttributes;
-            try {
-                checkpoint();
-                commonAttributes = Files.readAttributes(commonFile, BasicFileAttributes.class,
-                        LinkOption.NOFOLLOW_LINKS);
-            } catch (NoSuchFileException missingOptionalMetadata) {
+            Path gitDirectory = resolveMetadataPath(worktreeRoot, gitFile.substring(8).trim()).toRealPath();
+            if (!Files.exists(gitDirectory.resolve("HEAD"))) {
                 return null;
             }
-            if (commonAttributes.isSymbolicLink()) {
-                commonAttributes = attributes(commonFile);
+            Path commonFile = gitDirectory.resolve("commondir");
+            if (!Files.exists(commonFile, LinkOption.NOFOLLOW_LINKS)) {
+                return null;
             }
-            if (!commonAttributes.isRegularFile()) {
-                throw new IOException("invalid worktree common directory metadata");
+            if (!Files.isRegularFile(commonFile)) {
+                throw new IOException("invalid common directory metadata");
             }
-            Path commonDir = resolveMetadataPath(gitDir, singleLine(readGitText(commonFile))).toRealPath();
-            Path backPointer = gitDir.resolve("gitdir");
-            if (!Files.isRegularFile(backPointer)) {
-                throw new IOException("missing worktree back pointer");
-            }
-            Path back = resolveMetadataPath(gitDir, singleLine(readGitText(backPointer))).toRealPath();
-            if (!Files.isSameFile(back, dotGit)) {
-                throw new IOException("worktree back pointer mismatch");
-            }
-            Path mainRoot = commonDir.getParent();
-            if (mainRoot == null || worktreeRoot.equals(mainRoot) || !worktreeRoot.startsWith(mainRoot)
-                    || !mainRoot.startsWith(root) || !cwd.startsWith(worktreeRoot)) {
+            Path commonDirectory = resolveMetadataPath(
+                    gitDirectory, readGitText(commonFile).trim()).toRealPath();
+            Path mainRoot = commonDirectory.getParent();
+            Path physicalWorktreeRoot = worktreeRoot.toRealPath();
+            if (mainRoot == null || physicalWorktreeRoot.equals(mainRoot)
+                    || !physicalWorktreeRoot.startsWith(mainRoot)) {
                 return null;
             }
             Path mainDotGit = mainRoot.resolve(".git");
-            if (!Files.isDirectory(mainDotGit) || !Files.isSameFile(mainDotGit, commonDir)) {
+            if (!Files.isDirectory(mainDotGit) || !mainDotGit.toRealPath().equals(commonDirectory)) {
                 return null;
             }
             return new WorktreeRelation(mainRoot, worktreeRoot);
         }
 
         private String readGitText(Path path) throws IOException {
-            if (++gitReads > MAX_GIT_READS) {
-                throw fatal(ProjectContextDiagnostic.Code.LOAD_LIMIT_EXCEEDED, path, null);
-            }
             try {
-                return decode(readFile(path, MAX_GIT_FILE_BYTES, true));
-            } catch (CharacterCodingException | FileTooLargeException e) {
-                throw new IOException("invalid git metadata", e);
+                return decode(readFile(path, false));
+            } catch (CharacterCodingException e) {
+                throw new IOException("invalid UTF-8 Git metadata", e);
             }
         }
 
         private Path resolveMetadataPath(Path base, String value) throws IOException {
             if (value.isEmpty() || value.indexOf('\0') >= 0) {
-                throw new IOException("invalid git metadata path");
+                throw new IOException("invalid Git metadata path");
             }
             Path parsed = Path.of(value);
             return parsed.isAbsolute() ? parsed : base.resolve(parsed);
         }
 
-        private String singleLine(String value) throws IOException {
-            String stripped = value.endsWith("\n") ? value.substring(0, value.length() - 1) : value;
-            if (stripped.endsWith("\r")) {
-                stripped = stripped.substring(0, stripped.length() - 1);
-            }
-            if (stripped.indexOf('\n') >= 0 || stripped.indexOf('\r') >= 0) {
-                throw new IOException("unexpected git metadata lines");
-            }
-            return stripped;
-        }
-
-        private byte[] readFile(Path path, int limit, boolean metadata)
-                throws IOException, FileTooLargeException {
+        private byte[] readFile(Path path, boolean failWhenLimitExceeded) throws IOException {
             checkpoint();
-            try (var input = inputOpener.open(path); var output = new ByteArrayOutputStream()) {
-                var buffer = new byte[8192];
-                int fileBytes = 0;
+            try (var input = Files.newInputStream(path); var output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
                 while (true) {
                     checkpoint();
-                    int globalRemaining = MAX_READ_BYTES - bytesRead;
-                    int count = input.read(buffer, 0,
-                            Math.min(buffer.length, Math.min(limit + 1 - fileBytes, globalRemaining + 1)));
+                    int remaining = MAX_READ_BYTES - bytesRead;
+                    int count = input.read(buffer, 0, Math.min(buffer.length, remaining + 1));
                     if (count < 0) {
                         return output.toByteArray();
                     }
                     bytesRead += count;
                     if (bytesRead > MAX_READ_BYTES) {
-                        throw fatal(ProjectContextDiagnostic.Code.LOAD_LIMIT_EXCEEDED, path, null);
-                    }
-                    fileBytes += count;
-                    if (fileBytes > limit) {
-                        throw new FileTooLargeException();
+                        if (failWhenLimitExceeded) {
+                            throw fatal(ProjectContextDiagnostic.Code.LOAD_LIMIT_EXCEEDED,
+                                    path, null, null);
+                        }
+                        throw new IOException("project context read limit exceeded");
                     }
                     output.write(buffer, 0, count);
-                    if (metadata && fileBytes == limit) {
-                        // The next iteration performs one bounded over-limit probe.
-                    }
                 }
             }
-        }
-
-        private BasicFileAttributes attributes(Path path) throws IOException {
-            checkpoint();
-            return Files.readAttributes(path, BasicFileAttributes.class);
-        }
-
-        private Path realDirectory(Path path, ProjectContextDiagnostic.Code code) {
-            try {
-                Path real = path.toRealPath();
-                if (!Files.isDirectory(real)) {
-                    throw new IOException("not a directory");
-                }
-                return real;
-            } catch (IOException | SecurityException e) {
-                throw fatal(code, path, null);
-            }
-        }
-
-        private void sourceFailure(ProjectContextDiagnostic.Code code, Path source, Path related) {
-            if (config.failureMode() == ProjectContextFailureMode.FAIL) {
-                throw fatal(code, source, related);
-            }
-            addDiagnostic(code, ProjectContextDiagnostic.Severity.WARNING, source, related);
-        }
-
-        private void gitFailure(Path source) {
-            sourceFailure(ProjectContextDiagnostic.Code.GIT_METADATA_INVALID, source, null);
         }
 
         private void addDiagnostic(
@@ -463,51 +380,23 @@ public final class ProjectContextLoader {
                 Path source,
                 Path related
         ) {
-            if (diagnostics.size() >= MAX_DIAGNOSTICS) {
-                return;
-            }
-            diagnostics.add(new ProjectContextDiagnostic(
-                    code, severity, boundedPath(source), boundedPath(related)));
+            diagnostics.add(new ProjectContextDiagnostic(code, severity, source, related));
         }
 
         private ProjectContextLoadException fatal(
                 ProjectContextDiagnostic.Code code,
                 Path source,
-                Path related
+                Path related,
+                Throwable cause
         ) {
-            var diagnostic = new ProjectContextDiagnostic(
-                    code, ProjectContextDiagnostic.Severity.ERROR,
-                    boundedPath(source), boundedPath(related));
-            if (diagnostics.size() >= MAX_DIAGNOSTICS) {
-                diagnostics.set(MAX_DIAGNOSTICS - 1, diagnostic);
-            } else {
-                diagnostics.add(diagnostic);
-            }
-            return new ProjectContextLoadException(diagnostics);
+            diagnostics.add(new ProjectContextDiagnostic(
+                    code, ProjectContextDiagnostic.Severity.ERROR, source, related));
+            return new ProjectContextLoadException(diagnostics, cause);
         }
 
         private void checkpoint() {
             cancellation.throwIfCancelled();
-            if (nanoTime.getAsLong() - deadline >= 0) {
-                throw fatal(ProjectContextDiagnostic.Code.LOAD_DEADLINE_EXCEEDED, null, null);
-            }
         }
-
-        private Path boundedPath(Path path) {
-            return path != null && validPath(path) ? path : null;
-        }
-
-        private boolean validPath(Path path) {
-            return path.toString().getBytes(StandardCharsets.UTF_8).length <= MAX_PATH_BYTES;
-        }
-    }
-
-    private static boolean stable(BasicFileAttributes before, BasicFileAttributes after) {
-        return before.isRegularFile() && after.isRegularFile()
-                && before.size() == after.size()
-                && before.lastModifiedTime().equals(after.lastModifiedTime())
-                && (before.fileKey() == null || after.fileKey() == null
-                || before.fileKey().equals(after.fileKey()));
     }
 
     private static String decode(byte[] bytes) throws CharacterCodingException {
@@ -521,29 +410,13 @@ public final class ProjectContextLoader {
         return value.startsWith("\uFEFF") ? value.substring(1) : value;
     }
 
-    private static boolean isSafeXmlText(String value) {
-        for (int index = 0; index < value.length();) {
-            int codePoint = value.codePointAt(index);
-            boolean valid = codePoint == '\t' || codePoint == '\n' || codePoint == '\r'
-                    || codePoint >= 0x20 && codePoint <= 0xd7ff
-                    || codePoint >= 0xe000 && codePoint <= 0xfffd
-                    || codePoint >= 0x10000 && codePoint <= 0x10ffff;
-            if (!valid || (codePoint & 0xffff) == 0xfffe || (codePoint & 0xffff) == 0xffff) {
-                return false;
-            }
-            index += Character.charCount(codePoint);
-        }
-        return true;
+    private record CandidateFailure(
+            ProjectContextDiagnostic.Code code,
+            Path source,
+            Throwable cause
+    ) {
     }
 
-    private record DirectorySource(Path path, ProjectContextScope scope) {}
-    private record SelectedSource(
-            ProjectContextScope scope,
-            Path directory,
-            Path path,
-            Path physicalPath,
-            BasicFileAttributes selectedAttributes
-    ) {}
-    private record WorktreeRelation(Path mainRoot, Path worktreeRoot) {}
-    private static final class FileTooLargeException extends Exception {}
+    private record WorktreeRelation(Path mainRoot, Path worktreeRoot) {
+    }
 }

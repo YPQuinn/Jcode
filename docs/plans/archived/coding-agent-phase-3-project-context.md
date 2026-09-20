@@ -418,3 +418,16 @@ git diff --check
 - `git diff --check`、归档链接及 UTF-8 检查通过；根与两个涉及模块的知识库、路线图同步。无关 `.idea/encodings.xml`、`.idea/vcs.xml` 不属于本阶段提交。
 
 文件系统属性查询/打开之间仍存在 OS 级竞态，不宣称消除所有 TOCTOU 或保证任意文件系统调用可强制中断。close 的两秒窗口只限制等待，不代表底层加载已退出；实际退出清理前的 stage 保持 pending，迟到加载不得提交。
+
+## 12. 对齐 pi 的行为纠偏（2026-09-20）
+
+在后续复核 pi `60e7e76` 与阶段三实现时，确认第 4、6、8、9、10、11 节将若干防御性实现细节误升格成了产品契约。此次纠偏保留项目上下文功能与 reload 并发骨架，但以下内容取代前文对应的现行行为描述；前文作为当时实施历史不删除。
+
+- `<project_context>` / `<project_instructions>` 只是 prompt 来源边界。`path` 属性继续单独轻量转义，来源正文与 pi 一致逐字拼接；删除正文 XML 转义、XML 字符合法性检查和渲染后字节预算。正文即使包含标签样式文本、控制字符或 `&` 也不由 builder 改写。
+- 同目录候选按 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD` 逐个检查并读取。缺失、非普通文件、悬空链接、不可读或非法 UTF-8 的高优先级候选不再阻断较低优先级候选；`FAIL` 仅在该目录确有候选失败且最终没有任何候选成功时抛出，并保留底层 cause。显式全局目录真正缺失表示没有全局来源。
+- 发现沿调用方配置的 working directory 词法祖先链进行，不再把 real path 祖先链当成用户可见继承关系。real path 仅用于物理身份去重和 worktree 关系比较。
+- 只保留普通文件检查、严格 UTF-8/BOM 与一个易解释的 1 MiB 聚合实际读取上限。删除 64 KiB 单文件、256 KiB 保留内容、64 来源、128 祖先、路径、诊断、Git 次数、渲染和五秒 deadline 等重叠限制，也删除多阶段属性/identity 稳定性协议及其 `InputOpener` 测试 seam；不以锁、hash 或另一套可配置安全框架替代。
+- linked-worktree 识别改为 best-effort。Git 元数据损坏或关系识别失败只记录诊断并按普通祖先来源继续加载；只有 worktree 根来源已经成功加载时才应用遮蔽，而且只遮蔽主工作树中的同名候选，不扩张为跨候选文件名遮蔽。
+- 不可变 snapshot、来源元数据、严格 idle 接纳、reload 原子发布、失败/取消保留旧快照、close 后迟到结果防护、完成回调重入和观察 Future 隔离全部保留。项目上下文关闭时不再创建闲置 reload executor。
+
+对应测试删除了 `ProjectContextBoundaryTest` 中只证明上述旧附加契约的用例，改为直接覆盖候选回退、缺失全局目录、词法祖先、正文原样拼接、单一聚合上限、best-effort Git 识别与同名 worktree 遮蔽；`CodingAgentReloadLifecycleTest` 和 Session 生命周期回归继续保留。针对性命令 `mvn -pl coding-agent -am -Dtest=ProjectContextLoaderTest,SystemPromptBuilderTest,CodingAgentSessionTest,CodingAgentReloadLifecycleTest -Dsurefire.failIfNoSpecifiedTests=false test` 运行 44 个测试，0 failure/error/skipped。全仓 `mvn verify` 运行 762 个测试，0 failure/error，常规配置下 10 个需显式本机工具的测试按预期 skipped；Enforcer 与打包通过。

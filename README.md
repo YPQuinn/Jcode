@@ -26,7 +26,7 @@ Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它�
 - **OpenAI Responses 适配**：基于 JDK `HttpClient` 与 Jackson 实现 HTTP/SSE，不依赖 Provider SDK；支持显式凭证、自定义 endpoint、兼容性、定价和有界重试配置。
 - **Headless 编码能力**：通过 `CodingAgentSession` 提供 prompt、steer、follow-up、abort、状态与产品事件接口。
 - **本地编码工具**：内置 `read`、`write`、`edit`、`bash`、`grep`、`find`、`ls`，工具集与授权策略均由调用方显式配置。
-- **项目指令发现**：可在有界目录内发现 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，生成不可变上下文快照并组装 system prompt。
+- **项目指令发现**：沿配置工作目录的词法祖先链依次尝试 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，生成不可变上下文快照并组装 system prompt。
 
 ## 架构与模块
 
@@ -148,6 +148,8 @@ try (var provider = new OpenAiProvider(providerConfig)) {
 - `abort()`：取消当前运行；
 - `state()` / `isRunning()`：读取不可变状态快照；
 - `reloadProjectContext()`：在空闲边界重新发现项目指令。
+
+同目录中高优先级候选缺失、不是普通文件、不可读或不是合法 UTF-8 时，会继续尝试下一候选。System prompt 保留来源路径标记，但项目指令正文逐字拼接，不进行 XML 转义；总加载保留 1 MiB 聚合实际读取上限。Git worktree 识别失败不会阻止普通项目指令加载。
 
 ### 配置本地工具
 

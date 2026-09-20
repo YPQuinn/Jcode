@@ -8,11 +8,15 @@ public final class ProjectContextLoadException extends RuntimeException {
     private final List<ProjectContextDiagnostic> diagnostics;
 
     public ProjectContextLoadException(List<ProjectContextDiagnostic> diagnostics) {
-        super("project context loading failed");
+        this(diagnostics, null);
+    }
+
+    public ProjectContextLoadException(List<ProjectContextDiagnostic> diagnostics, Throwable cause) {
+        super("project context loading failed", cause);
         this.diagnostics = List.copyOf(Objects.requireNonNull(diagnostics, "diagnostics must not be null"));
     }
 
-    /** Return bounded structured diagnostics without underlying exception text. */
+    /** Return structured diagnostics without project instruction contents. */
     public List<ProjectContextDiagnostic> diagnostics() {
         return diagnostics;
     }

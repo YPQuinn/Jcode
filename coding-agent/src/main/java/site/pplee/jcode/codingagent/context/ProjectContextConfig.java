@@ -3,7 +3,7 @@ package site.pplee.jcode.codingagent.context;
 import java.nio.file.Path;
 import java.util.Objects;
 
-/** Explicit immutable configuration for bounded project instruction discovery. */
+/** Explicit immutable configuration for project instruction discovery. */
 public record ProjectContextConfig(
         boolean enabled,
         Path globalDirectory,
@@ -29,7 +29,7 @@ public record ProjectContextConfig(
         return new ProjectContextConfig(true, null, null, ProjectContextFailureMode.WARN_AND_SKIP);
     }
 
-    /** Discover project instructions up to an explicit inclusive physical ancestor. */
+    /** Discover project instructions up to an explicit inclusive configured-path ancestor. */
     public static ProjectContextConfig project(Path discoveryRoot) {
         return new ProjectContextConfig(true, null,
                 Objects.requireNonNull(discoveryRoot, "discoveryRoot must not be null"),

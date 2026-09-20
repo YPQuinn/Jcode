@@ -392,7 +392,7 @@ PR 2～6 审查发现的五项问题均已修复并补齐回归：进程终止�
 - prompt append 与 custom prompt 的清晰替换/追加语义；
 - 资源读取警告和来源路径诊断；
 - 显式启用、初次加载、不可变快照查询和 idle 原子 reload；
-- 文件、扫描、元数据与转义后输出预算，以及整体加载失败时保留旧快照。
+- 聚合实际读取上限，以及整体加载失败时保留旧快照。
 
 ### 8.3 关键不变量
 
@@ -401,7 +401,7 @@ PR 2～6 审查发现的五项问题均已修复并补齐回归：进程终止�
 - 注入文本是数据，不获得 Java 代码执行能力；
 - context 文件内容不作为 Session transcript message 持久化；
 - 旧配置默认不新增项目文件发现，全局目录由宿主显式注入；
-- 项目来源使用物理祖先链，默认至文件系统根，可显式设定发现上界；
+- 项目来源使用配置 working directory 的词法祖先链，默认至文件系统根，可显式设定发现上界；
 - reload 只能在 idle 接纳边界一次替换 system prompt 与项目上下文快照，消息历史、队列和工具集合保持不变；
 - 本阶段不加载 SYSTEM/settings/skill/extension，不引入文件监听或动态工具重载。
 
@@ -414,15 +414,13 @@ PR 2～6 审查发现的五项问题均已修复并补齐回归：进程终止�
 - reload 的失败、取消、close 竞态，以及 core idle prompt 更新的原子接纳均有测试；
 - 有界加载、文件系统回归与全仓/严格 native smoke 均有实际验证记录。
 
-### 8.5 完成状态（2026-09-19）
+### 8.5 完成状态（2026-09-19，2026-09-20 纠偏）
 
-第三阶段已完成，实施记录见 [`archived/coding-agent-phase-3-project-context.md`](archived/coding-agent-phase-3-project-context.md)。`coding-agent` 增加显式 `ProjectContextConfig`、有界 loader、不可变来源/诊断/snapshot、带安全可逆 XML 转义的纯 Prompt 装配，以及 Session 初始加载、快照查询和 idle reload；旧构造默认关闭发现。发现顺序固定为显式全局来源后接物理祖先链，同目录只选择三种 AGENTS 候选；实现普通文件筛选、严格 UTF-8/BOM、symlink/hardlink 去重、文件变化复核和受严格验证的嵌套 linked-worktree 根遮蔽，不读取 CLAUDE/SYSTEM/settings 等旁路文件。
+第三阶段已完成，实施与后续纠偏记录见 [`archived/coding-agent-phase-3-project-context.md`](archived/coding-agent-phase-3-project-context.md)。`coding-agent` 提供显式 `ProjectContextConfig`、不可变来源/诊断/snapshot、纯 Prompt 装配，以及 Session 初始加载、快照查询和 idle reload；旧构造默认关闭发现，且关闭时不创建 reload executor。
 
-固定预算覆盖单文件、保留总量、来源数、祖先数、Git 元数据、实际读取字节、路径、诊断、渲染区块与协作式 deadline。`WARN_AND_SKIP` 返回结构化诊断，`FAIL` 和整体失败拒绝候选；失败、abort 或 close 取消均保留旧快照。reload 与 prompt/close 通过产品 admission lock 线性化，文件 I/O 和渲染在锁外，提交时调用 core 新增的 idle `updateSystemPrompt()`；历史、队列、工具、model/options 均保持不变。core seam 同步拒绝 busy/closed，原子更新 context/state 且不发事件或调用模型。针对性测试覆盖默认关闭、候选与顺序、预算/编码、物理去重、linked-worktree 正反例、XML 注入转义、成功/失败 reload、观察 stage 取消、abort/close 和 active-run 竞态。
+发现顺序为显式全局来源后接配置 working directory 的词法祖先链。同目录依次尝试 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，高优先级候选缺失、非普通文件、不可读或非法 UTF-8 时继续回退；不读取 CLAUDE/SYSTEM/settings 等旁路文件。保留普通文件筛选、严格 UTF-8/BOM、物理来源去重和 1 MiB 聚合实际读取上限，删除单文件、保留总量、来源数、祖先数、路径、诊断、渲染及 deadline 等重叠限制和多阶段文件稳定性契约。
 
-审查修复补充 19 个回归：成功/失败/取消 reload 先释放接纳再结算 stage，完成回调可重入，close 不伪造尚未退出的文件 I/O 已完成；已知类型/属性变化在打开前拒绝；保留预算只统计有效来源，实际读取预算仍包含失败读取；不可渲染路径和损坏 `commondir` 遵循 WARN/FAIL。真实 FIFO 测试通过打开 seam 在错误试读前断言，确保失败时也不会阻塞测试。
-
-最终验证中，全仓 `mvn clean verify` 共运行 762 个测试，其中 `coding-agent` 220 个，0 failure/error/skipped；显式注入 `/bin/bash` 与 `/opt/homebrew/bin/rg` 的严格 `local-tools-smoke` 同样通过。`AgentTest`、Session/reload 与 loader 边界回归连续三轮通过。
+Prompt 中的项目来源标签只用于标记边界：路径属性单独转义，指令正文逐字拼接，不再 XML 转义或按 XML 字符集拒绝。linked-worktree 识别是 best-effort，Git 元数据失败只记录诊断而不阻止普通来源加载；worktree 根来源成功后，只遮蔽主工作树中同候选文件名的来源。`WARN_AND_SKIP` 与 `FAIL` 保留可诊断差异，reload 的原子接纳、旧快照保留、历史/队列/工具/model/options 不变、取消/close 发布防护及观察 stage 隔离继续保持。
 
 ## 9. 阶段四：Session 树与 JSONL 持久化
 
