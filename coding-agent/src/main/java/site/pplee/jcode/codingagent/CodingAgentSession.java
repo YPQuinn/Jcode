@@ -32,6 +32,7 @@ import java.util.concurrent.CompletionStage;
 public final class CodingAgentSession implements AutoCloseable {
     private final Object lifecycleLock = new Object();
     private final Agent agent;
+    private final BuiltInTools.ToolSet toolSet;
     private final Path workingDirectory;
     private final Clock clock;
     private boolean running;
@@ -42,41 +43,54 @@ public final class CodingAgentSession implements AutoCloseable {
         this.workingDirectory = config.workingDirectory();
         this.clock = config.clock();
 
-        var tools = BuiltInTools.create(workingDirectory, config.tools());
-        var toolSpecs = tools.stream().map(tool -> tool.spec()).toList();
-        String systemPrompt = SystemPromptBuilder.build(
-                workingDirectory,
-                toolSpecs,
-                config.customSystemPrompt(),
-                config.appendSystemPrompt());
-        var context = new AgentContext(systemPrompt, List.of(), tools);
-        var eventSink = config.eventSink();
-        this.agent = new Agent(new AgentConfig(
-                context,
-                config.model(),
-                config.modelClient(),
-                config.objectMapper(),
-                ContextTransformer.identity(),
-                MessageProjector.standard(),
-                ToolExecutionMode.PARALLEL,
-                CodingToolPolicyAdapter.adapt(config.tools().policy(), workingDirectory),
-                AfterToolCall.noop(),
-                event -> {
-                    CodingAgentEvent productEvent = event instanceof AgentEvent.AgentCompleted completed
-                            ? new CodingAgentEvent.RunCompleted(SnapshotMapper.runResult(completed.result()))
-                            : new CodingAgentEvent.RuntimeEvent(event);
-                    var stage = eventSink.emit(productEvent);
-                    if (stage == null) {
-                        throw new IllegalStateException("coding event sink returned null stage");
-                    }
-                    return stage;
-                },
-                config.steeringMode(),
-                config.followUpMode(),
-                config.thinkingLevel(),
-                PrepareNextTurn.noop(),
-                ShouldStopAfterTurn.never(),
-                config.requestOptions()));
+        var createdToolSet = BuiltInTools.create(workingDirectory, config.tools());
+        Agent createdAgent;
+        try {
+            var tools = createdToolSet.tools();
+            var toolSpecs = tools.stream().map(tool -> tool.spec()).toList();
+            String systemPrompt = SystemPromptBuilder.build(
+                    workingDirectory,
+                    toolSpecs,
+                    config.customSystemPrompt(),
+                    config.appendSystemPrompt());
+            var context = new AgentContext(systemPrompt, List.of(), tools);
+            var eventSink = config.eventSink();
+            createdAgent = new Agent(new AgentConfig(
+                    context,
+                    config.model(),
+                    config.modelClient(),
+                    config.objectMapper(),
+                    ContextTransformer.identity(),
+                    MessageProjector.standard(),
+                    ToolExecutionMode.PARALLEL,
+                    CodingToolPolicyAdapter.adapt(config.tools().policy(), workingDirectory),
+                    AfterToolCall.noop(),
+                    event -> {
+                        CodingAgentEvent productEvent = event instanceof AgentEvent.AgentCompleted completed
+                                ? new CodingAgentEvent.RunCompleted(SnapshotMapper.runResult(completed.result()))
+                                : new CodingAgentEvent.RuntimeEvent(event);
+                        var stage = eventSink.emit(productEvent);
+                        if (stage == null) {
+                            throw new IllegalStateException("coding event sink returned null stage");
+                        }
+                        return stage;
+                    },
+                    config.steeringMode(),
+                    config.followUpMode(),
+                    config.thinkingLevel(),
+                    PrepareNextTurn.noop(),
+                    ShouldStopAfterTurn.never(),
+                    config.requestOptions()));
+        } catch (RuntimeException e) {
+            try {
+                createdToolSet.close();
+            } catch (RuntimeException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
+        }
+        this.toolSet = createdToolSet;
+        this.agent = createdAgent;
     }
 
     /** Start a run with one text user message; concurrent runs fail fast. */
@@ -179,7 +193,17 @@ public final class CodingAgentSession implements AutoCloseable {
             }
             closed = true;
         }
-        agent.close();
+        try {
+            agent.close();
+        } catch (RuntimeException | Error failure) {
+            try {
+                toolSet.close();
+            } catch (RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+        toolSet.close();
     }
 
     private Message.User userMessage(String text) {

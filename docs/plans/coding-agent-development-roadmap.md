@@ -1,6 +1,6 @@
 # Coding Agent 总开发计划
 
-> 状态：进行中（阶段一已完成，阶段二 PR 1 已完成）
+> 状态：进行中（阶段一、阶段二已完成）
 >
 > Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
 >
@@ -12,7 +12,7 @@
 >
 > 第一阶段实施计划（已完成）：[`archived/coding-agent-phase-1-headless-foundation.md`](archived/coding-agent-phase-1-headless-foundation.md)
 >
-> 第二阶段实施计划（实施中）：[`coding-agent-phase-2-local-tools.md`](coding-agent-phase-2-local-tools.md)
+> 第二阶段实施计划（已完成）：[`archived/coding-agent-phase-2-local-tools.md`](archived/coding-agent-phase-2-local-tools.md)
 >
 > 实施范围：阶段一至阶段七；不包含 TUI、Server 或其他产品入口
 
@@ -102,9 +102,8 @@ Jcode 已通过第一阶段创建 `coding-agent`，把现有 provider-neutral �
 
 ### 2.2 产品层缺口
 
-第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果。当前仍需补齐：
+第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果；第二阶段已补齐显式授权的本地编码工具闭环。当前仍需补齐：
 
-- 写文件、精确编辑、命令执行、结构化搜索和显式工具授权；
 - AGENTS.md 等项目上下文发现；
 - Session 持久化、恢复与分支；
 - 产品设置、默认模型与凭证装配；
@@ -308,7 +307,7 @@ caller
 
 ## 7. 阶段二：编码工具集
 
-详细实施计划见 [`coding-agent-phase-2-local-tools.md`](coding-agent-phase-2-local-tools.md)。PR 1 已完成工具集合、产品 policy、显式装配、旧 Config 兼容与 prompt 同源；具体新增工具尚未实现，不能视为阶段二完成。
+详细实施记录见已归档的 [`coding-agent-phase-2-local-tools.md`](archived/coding-agent-phase-2-local-tools.md)。PR 1 已完成工具集合、产品 policy、显式装配、旧 Config 兼容与 prompt 同源；PR 2 已完成可显式启用的 `write`/`edit` 和原子文件 mutation；PR 3 已完成受控 `bash`、有界进程/输出生命周期及显式 coding profile；PR 4 已完成有界 record formatter、路径 glob 和可独立显式启用的 `ls`；PR 5 已完成显式 ripgrep backend、有界 NDJSON/NUL parser、`grep/find` 及 search profile；PR 6 已完成全工具 Git 工作区闭环、可恢复故障矩阵、资源清理证据和严格 native smoke。阶段二已完成。
 
 ### 7.1 目标
 
@@ -355,9 +354,13 @@ caller
 - `mvn clean verify` 与显式注入 Bash/rg 的严格 native smoke 均通过；不以 skip 代替平台支持证据；
 - 框架输出缓冲、事件排队和搜索记录处理无界增长被测试阻止；不把此保证夸大为任意子进程的 OS 内存沙箱。
 
-### 7.5 当前进度
+### 7.5 完成状态（2026-09-19）
 
-阶段二 PR 1 已完成：`CodingAgentConfig` 增加末尾工具配置且保留旧构造的 read-only 行为；Session 仅装配显式启用且已实现的工具；产品 policy 接收参数深拷贝并在 core prepare 阶段执行；prompt 与模型请求共享实际工具列表。全仓 `mvn clean verify` 共 596 个测试通过。`write/edit/bash/grep/find/ls`、coding/search profile 和 native smoke 仍待后续 PR，阶段二尚未完成。
+阶段二 PR 1～6 已完成：`CodingAgentConfig` 增加末尾工具配置且保留旧构造的 read-only 行为；Session 仅装配显式启用且已实现的工具；产品 policy 接收参数深拷贝并在 core prepare 阶段执行；prompt 与模型请求共享实际工具列表。`write`/`edit` 使用强类型参数、严格边界校验和 `SEQUENTIAL` 模式，统一经 8 MiB 有界 reader/writer、同目录临时文件和单次原子替换提交；`edit` 基于同一原始视图规划，保留 BOM、换行风格、未触及文本和已有 POSIX 权限。`bash` 使用绝对 executable、无 profile 启动和完全替换的环境快照；有界 runner 最多运行 4 个进程，持续 drain 合并输出并保留 2000 行/50 KiB tail，timeout/cancel 终止进程树，Session close 回收活跃进程。更新发布与采集解耦，最多一个 update 在途且 sink 失败不归一为工具错误。`ls` 使用 `DirectoryStream` 与有界 top-N heap；`grep/find` 共享经 capability probe 的显式 ripgrep 14+ backend和每 Session 进程预算，以有界 NDJSON/NUL parser 处理结构化结果。
+
+最终 fake-model Git 工作区测试通过唯一产品 Session 使用全部七个工具，验证真实定位、读取、修改、命令失败、再次修改和命令成功，并确认进程退出及 mutation 临时文件清理；同一 Session 的 policy 拒绝、edit 冲突和搜索失败均可恢复。`local-tools-smoke` profile 要求显式绝对 Bash/ripgrep 路径并禁止以 assumption skip 代替严格证据。Darwin arm64、Java 21.0.10 LTS、Maven 3.9.14、GNU Bash 3.2.57、ripgrep 15.2.0 环境下，严格 native verify 与全仓 `mvn clean verify` 均通过；审查修复后全仓共 721 个测试，其中 `coding-agent` 181 个，0 failure/error/skipped。进程/sink 生命周期回归连续三次复验通过。阶段二计划已归档。
+
+PR 2～6 审查发现的五项问题均已修复并补齐回归：进程终止保留已观察后代句柄，等待整棵已观察树退出且保留有界强杀 deadline；sink 失败立即通过工具自有取消源停止进程，清理后传播原异常；显式 grep 文件预检 8 MiB 上限并添加 `./` 防止 `-` 被当 stdin；glob 正确处理文件名中的字面星号。
 
 ## 8. 阶段三：项目上下文与 System Prompt
 

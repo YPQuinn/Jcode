@@ -29,6 +29,24 @@ public record CodingToolConfig(
                 CodingToolPolicy.allowAll());
     }
 
+    /** Explicitly enable the minimal local coding loop, including Bash execution. */
+    public static CodingToolConfig coding(BashConfig bash) {
+        return new CodingToolConfig(
+                Set.of(CodingTool.READ, CodingTool.WRITE, CodingTool.EDIT, CodingTool.BASH),
+                Objects.requireNonNull(bash, "bash must not be null"),
+                null,
+                CodingToolPolicy.allowAll());
+    }
+
+    /** Explicitly enable all local coding and search tools. */
+    public static CodingToolConfig codingWithSearch(BashConfig bash, SearchConfig search) {
+        return new CodingToolConfig(
+                EnumSet.allOf(CodingTool.class),
+                Objects.requireNonNull(bash, "bash must not be null"),
+                Objects.requireNonNull(search, "search must not be null"),
+                CodingToolPolicy.allowAll());
+    }
+
     @Override
     public String toString() {
         return "CodingToolConfig[enabledTools=" + enabledTools

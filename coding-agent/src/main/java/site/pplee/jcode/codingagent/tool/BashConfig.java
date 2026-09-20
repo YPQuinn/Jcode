@@ -35,7 +35,7 @@ public record BashConfig(
 
     @Override
     public String toString() {
-        return "BashConfig[executable=" + executable
+        return "BashConfig[executable=redacted"
                 + ", environment=redacted"
                 + ", defaultTimeout=" + defaultTimeout
                 + ", maximumTimeout=" + maximumTimeout + ']';
@@ -71,6 +71,9 @@ public record BashConfig(
         Objects.requireNonNull(duration, name + " must not be null");
         if (duration.isZero() || duration.isNegative()) {
             throw new IllegalArgumentException(name + " must be positive");
+        }
+        if (duration.getNano() != 0) {
+            throw new IllegalArgumentException(name + " must use whole seconds");
         }
         return duration;
     }

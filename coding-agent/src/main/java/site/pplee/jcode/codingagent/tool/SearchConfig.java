@@ -15,6 +15,6 @@ public record SearchConfig(
 
     @Override
     public String toString() {
-        return "SearchConfig[executable=" + executable + ", environment=redacted]";
+        return "SearchConfig[executable=redacted, environment=redacted]";
     }
 }

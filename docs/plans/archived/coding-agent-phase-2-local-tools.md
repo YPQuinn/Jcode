@@ -1,12 +1,12 @@
 # Coding Agent 第二阶段：本地编码工具集
 
-> 状态：实施中；PR 1（工具集合、产品 policy、显式装配）已完成
+> 状态：已完成并归档（2026-09-19）；PR 1～6 全部完成
 >
 > Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
 >
-> 总路线图：[`coding-agent-development-roadmap.md`](coding-agent-development-roadmap.md)
+> 总路线图：[`coding-agent-development-roadmap.md`](../coding-agent-development-roadmap.md)
 >
-> 前置阶段：[`archived/coding-agent-phase-1-headless-foundation.md`](archived/coding-agent-phase-1-headless-foundation.md)
+> 前置阶段：[`coding-agent-phase-1-headless-foundation.md`](coding-agent-phase-1-headless-foundation.md)
 >
 > pi 源码：`60e7e76bd7ea25cad1dd6f3f1ce0d18814a42759`
 >
@@ -452,11 +452,11 @@ prompt
 | PR | 内容 | 完成门槛 |
 |---|---|---|
 | 1（已完成） | 工具集合/产品 policy/显式装配；旧 Config 兼容；prompt 同源 | 原有 585 测试不退化；read-only 无隐式扩权；policy 快照和失败测试 |
-| 2 | 文件 I/O seam、原子 mutation writer、write、纯 EditPlanner 与 edit | 预提交失败不改原文件；多段匹配/BOM/换行/权限/取消/冲突矩阵；两工具 SEQUENTIAL |
-| 3 | 有界 ProcessRunner、tail buffer、BashTool、Session 资源生命周期 | 不死锁的采集与 publisher；timeout/cancel/exit 竞争；native 前台树测试；2A 纵向闭环 |
-| 4 | 有界 record formatter、SearchGlob、LsTool | 特殊路径；稳定排序与扫描截断的区别；不把完整目录装进内存 |
-| 5 | 显式 ripgrep backend、GrepTool、FindTool | ignore/global limit/oversized record/exit 语义；真实 backend smoke；2B 工具齐备 |
-| 6 | 全工具 fake-model Git 工作区闭环、故障矩阵收口、文档 | native 严格 profile、资源泄漏检查、完整阶段验收记录 |
+| 2（已完成） | 文件 I/O seam、原子 mutation writer、write、纯 EditPlanner 与 edit | 预提交失败不改原文件；多段匹配/BOM/换行/权限/取消/冲突矩阵；两工具 SEQUENTIAL |
+| 3（已完成） | 有界 ProcessRunner、tail buffer、BashTool、Session 资源生命周期 | 不死锁的采集与 publisher；timeout/cancel/exit 竞争；native 前台树测试；2A 纵向闭环 |
+| 4（已完成） | 有界 record formatter、SearchGlob、LsTool | 特殊路径；稳定排序与扫描截断的区别；不把完整目录装进内存 |
+| 5（已完成） | 显式 ripgrep backend、GrepTool、FindTool | ignore/global limit/oversized record/exit 语义；真实 backend smoke；2B 工具齐备 |
+| 6（已完成） | 全工具 fake-model Git 工作区闭环、故障矩阵收口、文档 | native 严格 profile、资源泄漏检查、完整阶段验收记录 |
 
 PR 3 是最大风险点，应尽早用测试 seam 和少量本地真实进程验证“慢 sink 不阻碍超时/取消”。如果失败，先修 runner，不继续堆搜索工具。
 
@@ -464,7 +464,27 @@ PR 3 是最大风险点，应尽早用测试 seam 和少量本地真实进程验
 
 ## 11. 完成门槛与交付记录
 
-当前交付记录：PR 1 已增加 `CodingTool`、防御性 `CodingToolConfig`/外部进程配置、产品级 `CodingToolPolicy` 与快照请求，并由 Session 将 policy 适配到 core prepare hook。旧 12 参数 Config 和 `tools == null` 均保持 read-only；prompt 与模型请求从实际装配的同一工具列表生成。尚未开放 coding/search profile，也未实现 `write/edit/bash/grep/find/ls`。`mvn clean verify` 共 596 个测试通过，其中 `coding-agent` 56 个测试通过。
+当前交付记录：PR 1 已增加 `CodingTool`、防御性 `CodingToolConfig`/外部进程配置、产品级 `CodingToolPolicy` 与快照请求，并由 Session 将 policy 适配到 core prepare hook。旧 12 参数 Config 和 `tools == null` 均保持 read-only；prompt 与模型请求从实际装配的同一工具列表生成。PR 2 已增加可显式启用的 `write`/`edit`、文件 I/O seam、8 MiB 有界原子 mutation writer 与纯 `EditPlanner`。写入保留 symlink referent 语义与已有 POSIX 权限，不支持原子移动时失败；edit 的全部匹配基于同一原始视图，保留 UTF-8 BOM、区域/文件换行风格及未触及文本，拒绝缺失、多重、重叠与增量依赖。取消、临时写入失败、外部冲突和 sink 提交后失败均有确定性测试。
+
+PR 3 已增加 `ProcessRunner`/`LocalProcessLauncher`、增量 UTF-8 tail buffer、latest-only update publisher 与 `BashTool`，并开放显式 `coding(BashConfig)` profile。Bash 通过绝对 executable 和 `--noprofile --norc -c` 启动，使用完全替换的环境快照；每个 Session 最多 4 个进程，合并 stdout/stderr 持续 drain，仅保留 2000 行/50 KiB tail。exit、timeout、cancel、启动失败、容量耗尽、drain 失败和终止失败具有类型化结果；timeout/cancel 先 graceful 后 forceful 地终止进程树，Session close 与构造失败均清理自有资源。输出采集与 sink backpressure 解耦，最多一个 update 在途并合并为最新待发布快照；sink 失败仍是基础设施失败。`write/edit/bash` 均为 `SEQUENTIAL`，fake-model 已覆盖 `write → read → edit → bash` 的 2A 纵向闭环。Darwin arm64 上的真实 `/bin/bash` 测试覆盖环境/cwd、合并输出、非零退出、timeout、取消、前台子进程回收、慢 sink、非法 UTF-8 和巨大单行。
+
+PR 4 已增加按完整单行记录和 UTF-8 字节预算限量的 `BoundedRecordFormatter`、非正则且具有显式操作预算的 `SearchGlob`，以及可通过 enabledTools 独立显式启用的 `LsTool`。glob 支持段内 `*`/`?` 和整段 `**`，拒绝 brace、字符组、extglob、反向规则及歧义 `**`。`ls` 使用 Java `DirectoryStream`，包含隐藏项但不递归或应用 ignore；条目显式区分 directory/file/symlink/other，名称用 JSON 字符串安全显示，固定按目录优先和 Unicode code point 排序。完整扫描以有界 top-N heap 返回稳定前缀；100000 条扫描上限、30 秒超时、请求条数上限和 50 KiB 正文预算分别诊断，单条记录绝不截成半条路径。特殊名称、symlink/`..` 原生解析、完整扫描与不完整扫描、输出字节边界、严格参数、prompt 同源和产品 Session 工具调用均有确定性测试。
+
+PR 5 已增加由宿主显式配置并在 Session 构造时验证的 ripgrep 14+ backend、64 KiB 单记录的有界 byte record reader、`GrepTool`、`FindTool` 以及显式 `codingWithSearch(BashConfig, SearchConfig)` profile。`grep/find` 共享一个 backend 和最多 4 个活跃进程的 runner；搜索固定 30 秒、2 个 ripgrep worker、8 MiB 单文件、100000 条结构化记录扫描上限，stdout/stderr 独立持续 drain。`grep` 解析 NDJSON match event 并按匹配行计数，`find` 解析 NUL 路径；非法 UTF-8、Base64、超大/不安全 record 只产生有界省略诊断，协议损坏则保留已完成记录并返回 tool error。正向 glob 仅后置过滤已遵循项目/父目录 ignore 的结果，不重新包含 ignored 文件；默认不搜索 hidden、不跟随 symlink，并禁用用户级 global ignore。达到匹配数、文件数或输出字节预算时由 collector 内部取消主动停止子进程，该停止与调用方取消和真实 backend exit 2 分开归类。特殊路径与行摘要用 JSON 字符串展示；无匹配、无效 regex、部分结果后失败、显式 ignored 文件、特殊文件名和大文件过滤均有 deterministic/native 测试。产品 Session 已验证 `grep/find/ls` 的 prompt/request 同源、工具结果源序和真实 ripgrep 调用。
+
+PR 6 已增加完整的 fake-model Git 工作区闭环：同一产品 Session 使用真实 `ls/find/grep → read → edit/write → bash`，先观察实际命令失败，再次 edit 后取得真实成功结果，并验证 prompt/request 中的七工具同源。恢复矩阵在同一 Session 中覆盖 policy 拒绝、edit 冲突和搜索路径失败，随后仍可成功写入并完成 run。闭环记录实际 Bash 进程并确认全部退出，且扫描工作区确认没有 `.jcode-*.tmp` mutation 文件残留；既有测试继续覆盖 abort、Session close、构造失败、update sink 失败、timeout/cancel 和 reader/timer 清理。
+
+`local-tools-smoke` Maven profile 已落地：必须显式传入绝对 Bash 与 ripgrep executable；Maven Enforcer 在属性缺失时失败，测试支持层在严格模式下把缺失、非普通文件、不可执行或平台能力不足转为失败而非 assumption skip。普通测试仍允许不具备 native 条件的平台跳过对应 smoke。
+
+PR 2～6 审查后的五项修复（2026-09-19）：
+
+1. **已观察子进程回收**：`ManagedProcess.terminateTree()` 返回整棵已观察树的退出 stage，跨 graceful/forceful 阶段保留后代句柄；父进程退出不提前结算或撤销强杀。runner close 将自有调度资源保留至已接纳执行结算，仍通过 deadline 有界报告终止失败。确定性测试覆盖 timeout/cancel 后父进程先退出、关闭时无法强杀以及退出 stage 失败；真实 Bash 覆盖忽略 TERM 且输出重定向的普通前台子 Bash。
+2. **sink 失败停止执行**：publisher 首次失败立即触发 Bash 工具自有取消源，等待进程清理后由 `finish()` 传播原基础设施异常；不反向取消调用方 signal。测试验证失败发生时 executor 尚未返回，真实进程在异常完成前已退出。
+3. **显式搜索文件大小**：ripgrep 的 `--max-filesize` 不约束显式文件操作数；工具现在启动 backend 前检查大小，超过 8 MiB 时拒绝，等于边界时允许。
+4. **含字面星号的文件名**：glob 的模式 `*` 优先于字符相等分支，纯匹配器和真实 `find/grep` 均覆盖 `*report.txt` 等名称。
+5. **文件名 `-`**：显式文件操作数统一添加 `./` 前缀，避免即使在 `--` 后仍被 ripgrep 当作 stdin；fake backend 参数断言和真实文件搜索均已覆盖。
+
+新增首批 7 个回归测试在修复前均按预期失败，随后补齐生命周期边界，累计新增 12 个测试。修复后 `mvn clean verify` 共 721 个测试通过，其中 `ai` 71、`ai-providers` 267、`agent-core` 202、`coding-agent` 181，0 failure/error/skipped。`mvn -pl coding-agent -am verify -Plocal-tools-smoke -Djcode.test.bash=/bin/bash -Djcode.test.rg=/opt/homebrew/bin/rg` 同样通过；进程 runner、publisher、Bash 单元/native 回归连续三次复验通过，`git diff --check` 通过。此前缺少严格 profile 属性的反向验证按预期在 Enforcer 阶段失败。验证环境为 Darwin arm64、Java 21.0.10 LTS、Maven 3.9.14、GNU Bash 3.2.57、ripgrep 15.2.0。阶段二全部完成门槛已满足，本计划归档。
 
 第二阶段完成必须同时满足：
 
@@ -478,7 +498,7 @@ PR 3 是最大风险点，应尽早用测试 seam 和少量本地真实进程验
 8. `mvn clean verify` 以及严格 native smoke 均有命令、平台、依赖版本、测试数量和结果记录；不得用 skip 替代完成证据。
 9. 根与相关模块 `AGENTS.md`、路线图同步实际实现；本计划完成后移入 `docs/plans/archived/`。
 
-后续建议执行命令（native smoke profile 尚未落地）：
+复验命令：
 
 ```bash
 mvn -pl coding-agent -am test

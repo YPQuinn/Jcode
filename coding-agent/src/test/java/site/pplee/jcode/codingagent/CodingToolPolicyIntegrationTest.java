@@ -2,6 +2,7 @@ package site.pplee.jcode.codingagent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import site.pplee.jcode.ai.client.ModelRequestOptions;
@@ -17,6 +18,7 @@ import site.pplee.jcode.codingagent.tool.BashConfig;
 import site.pplee.jcode.codingagent.tool.CodingTool;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 import site.pplee.jcode.codingagent.tool.CodingToolPolicy;
+import site.pplee.jcode.codingagent.tool.SearchConfig;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -100,6 +102,22 @@ class CodingToolPolicyIntegrationTest {
     }
 
     @Test
+    void lsIsAvailableWithoutAnExternalSearchBackendAndKeepsPromptInSync() {
+        var client = new ScriptedModelClient(request -> {
+            assertEquals(List.of("ls"),
+                    request.tools().stream().map(tool -> tool.name()).toList());
+            assertTrue(request.systemPrompt().contains("- ls:"));
+            assertFalse(request.systemPrompt().contains("- grep:"));
+            return assistant(List.of(new Content.Text("done")), StopReason.STOP);
+        });
+        var tools = new CodingToolConfig(Set.of(CodingTool.LS), null, null, null);
+
+        try (var session = new CodingAgentSession(config(client, tools))) {
+            session.prompt("inspect").toCompletableFuture().join();
+        }
+    }
+
+    @Test
     void enabledExternalToolConfigurationFailsFastDuringSessionAssembly() {
         var client = new ScriptedModelClient();
         var missingBashConfig = new CodingToolConfig(
@@ -121,6 +139,23 @@ class CodingToolPolicyIntegrationTest {
         var missingExecutableFailure = assertThrows(IllegalArgumentException.class,
                 () -> new CodingAgentSession(config(client, missingExecutable)));
         assertTrue(missingExecutableFailure.getMessage().contains("not a regular file"));
+    }
+
+    @Test
+    void enabledSearchToolsRejectAnExecutableWithoutRipgrepCapabilities() {
+        Path executable = Path.of("/usr/bin/true");
+        Assumptions.assumeTrue(Files.isExecutable(executable), "/usr/bin/true is required");
+        var client = new ScriptedModelClient();
+        var tools = new CodingToolConfig(
+                Set.of(CodingTool.FIND), null,
+                new SearchConfig(executable, Map.of()), null);
+
+        var failure = assertThrows(IllegalArgumentException.class,
+                () -> new CodingAgentSession(config(client, tools)));
+
+        assertTrue(failure.getMessage().contains("capability probe failed")
+                || failure.getMessage().contains("not a supported ripgrep"));
+        assertFalse(failure.getMessage().contains(executable.toString()));
     }
 
     @Test

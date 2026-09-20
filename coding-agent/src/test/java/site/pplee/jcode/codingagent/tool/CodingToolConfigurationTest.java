@@ -31,6 +31,34 @@ class CodingToolConfigurationTest {
     }
 
     @Test
+    void codingProfileExplicitlyEnablesTheMinimalSideEffectToolSet() {
+        var bash = new BashConfig(
+                Path.of("/bin/bash"), Map.of(),
+                Duration.ofSeconds(10), Duration.ofSeconds(30));
+
+        var config = CodingToolConfig.coding(bash);
+
+        assertEquals(Set.of(CodingTool.READ, CodingTool.WRITE, CodingTool.EDIT, CodingTool.BASH),
+                config.enabledTools());
+        assertSame(bash, config.bash());
+        assertNull(config.search());
+    }
+
+    @Test
+    void codingWithSearchProfileExplicitlyEnablesAllSevenTools() {
+        var bash = new BashConfig(
+                Path.of("/bin/bash"), Map.of(),
+                Duration.ofSeconds(10), Duration.ofSeconds(30));
+        var search = new SearchConfig(Path.of("/configured/rg"), Map.of());
+
+        var config = CodingToolConfig.codingWithSearch(bash, search);
+
+        assertEquals(java.util.EnumSet.allOf(CodingTool.class), config.enabledTools());
+        assertSame(bash, config.bash());
+        assertSame(search, config.search());
+    }
+
+    @Test
     void snapshotsEnabledToolsAndEnvironment() {
         var enabledTools = new HashSet<>(Set.of(CodingTool.READ));
         var environment = new HashMap<>(Map.of("TOKEN", "secret-value"));
@@ -49,7 +77,9 @@ class CodingToolConfigurationTest {
         assertThrows(UnsupportedOperationException.class,
                 () -> bash.environment().put("OTHER", "value"));
         assertFalse(bash.toString().contains("secret-value"));
+        assertFalse(bash.toString().contains("/bin/bash"));
         assertFalse(search.toString().contains("secret-value"));
+        assertFalse(search.toString().contains("/usr/bin/rg"));
         assertFalse(config.toString().contains("secret-value"));
     }
 
@@ -69,6 +99,9 @@ class CodingToolConfigurationTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new BashConfig(Path.of("/bin/bash"), Map.of(),
                         Duration.ofMinutes(1), Duration.ofSeconds(3_601)));
+        assertThrows(IllegalArgumentException.class,
+                () -> new BashConfig(Path.of("/bin/bash"), Map.of(),
+                        Duration.ofMillis(500), Duration.ofSeconds(2)));
     }
 
     @Test
