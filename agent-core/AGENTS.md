@@ -69,4 +69,4 @@
 - `ToolUpdateSink` settle 后的迟到 update 被静默丢弃。
 - `terminate` 不进入标准 LLM transcript。
 - 不解析 `ModelReplayState`，不按 provider 分支处理 `Assistant.sourceModel` 或 `ResponseMetadata`。旧 Assistant 构造器仍默认 empty metadata；模型返回的 metadata 原样进入 context。
-- 通用工具/取消/并行排序约束见根 AGENTS.md ANTI-PATTERNS。
+- 通用工具、取消与并行排序约束见 [`docs/agents/runtime-contracts.md`](../docs/agents/runtime-contracts.md)。

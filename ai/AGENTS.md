@@ -60,4 +60,4 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 - `Error` 的 `reason` 必须是 terminal failure（ERROR/ABORTED）。
 - `Models.stream()` / `ModelProvider.stream()` 不抛同步 provider/网络异常；unknown provider/unsupported model 用 `AssistantMessageStreams.failed(...)` 生成 `Start -> Error`。
 - provider runtime 不读取环境变量、不使用 `ServiceLoader`/静态注册表。
-- 模块边界与不含类型约束见根 AGENTS.md ANTI-PATTERNS（模块边界节）。
+- 跨模块依赖与类型边界见 [`docs/agents/architecture-boundaries.md`](../docs/agents/architecture-boundaries.md)。
