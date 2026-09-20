@@ -1,32 +1,202 @@
+<div align="center">
+
 # Jcode
 
-基于 **Java 21** 的多模块 Maven monorepo，实现一套**最小、可组合、可测试**的 Agent Runtime。
+**面向 Java 21 的 provider-neutral Agent Runtime 与 headless Coding Agent 内核**
 
-Jcode 将「模型调用协议」与「Agent 循环运行时」严格分层：
+[![Java 21](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white)](https://openjdk.org/projects/jdk/21/)
+[![Maven](https://img.shields.io/badge/build-Maven-C71A36?logo=apachemaven&logoColor=white)](https://maven.apache.org/)
+[![Status](https://img.shields.io/badge/status-active_development-orange)](docs/plans/coding-agent-development-roadmap.md)
 
-- `ai`：provider-neutral 的模型调用协议层（零 Jcode 内部依赖），含 provider runtime 抽象（`ModelProvider`/`Models`）
-- `ai-providers`：共享的具体 provider 模块（唯一内部依赖为 `ai`；每 provider 一子包，当前含 OpenAI Responses API adapter，无第三方 SDK）
-- `agent-core`：通用 Agent Runtime（唯一内部依赖为 `ai`）
+[特性](#核心特性) · [架构](#架构与模块) · [快速开始](#快速开始) · [嵌入应用](#嵌入应用) · [文档](#文档)
 
-当前仓库是**库模块**，不包含 Spring Boot 启动类、CLI、HTTP Server、Session 持久化或第三方 provider SDK。
+</div>
 
----
+Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它将模型协议、Provider 适配、通用 Agent Loop 与编码产品能力拆分为边界清晰的库模块，使应用可以显式选择模型、工具、权限策略、上下文与生命周期行为，而不依赖全局注册表或自动扫描。
 
-## 技术栈
+> [!IMPORTANT]
+> Jcode 当前处于开发阶段，版本为 `1.0-SNAPSHOT`，需要从源码构建。仓库只提供可嵌入的库模块，不包含 CLI、TUI、HTTP Server 或 Spring Boot 启动入口；Session 持久化、Compaction、产品级配置/凭证解析和 Extension 系统也尚未实现。
 
-| 类别 | 选型 | 说明 |
-|------|------|------|
-| 语言 / 平台 | Java 21 | `record`、`sealed interface`、模式匹配、虚拟线程 |
-| 构建 | Maven（多模块 reactor） | 根聚合：`ai` → `ai-providers` → `agent-core` |
-| JSON | Jackson Databind `2.18.2` | 工具参数边界使用 `JsonNode` |
-| 工具辅助 | Lombok `1.18.46` | 编译期辅助 |
-| 测试 | JUnit 5 `5.11.4` | 无 Mockito；自定义测试双放 `support/` |
-| 边界守卫 | maven-enforcer-plugin `3.5.0` | 禁止非法模块依赖 |
+## 核心特性
 
-**外部依赖版本一律由根 POM `<properties>` 固定，不使用版本范围。**
+- **Provider-neutral 模型协议**：统一模型标识、消息、内容、工具、usage、cost、流式事件、取消与 replay state。
+- **确定的流式语义**：每个 assistant stream 都以唯一 terminal event 结束，并显式区分完成、错误和主动取消。
+- **通用 Agent Runtime**：支持 steering、follow-up、背压事件、不可变状态快照与单 active run 生命周期。
+- **统一工具管道**：工具调用遵循 `prepare → execute → finalize`，支持顺序/并行执行及 `BeforeToolCall`、`AfterToolCall` hook。
+- **OpenAI Responses 适配**：基于 JDK `HttpClient` 与 Jackson 实现 HTTP/SSE，不依赖 Provider SDK；支持显式凭证、自定义 endpoint、兼容性、定价和有界重试配置。
+- **Headless 编码能力**：通过 `CodingAgentSession` 提供 prompt、steer、follow-up、abort、状态与产品事件接口。
+- **本地编码工具**：内置 `read`、`write`、`edit`、`bash`、`grep`、`find`、`ls`，工具集与授权策略均由调用方显式配置。
+- **项目指令发现**：可在有界目录内发现 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，生成不可变上下文快照并组装 system prompt。
 
----
+## 架构与模块
 
-## License
+```mermaid
+flowchart TD
+    App[宿主应用 / future CLI or Server]
+    Coding[coding-agent<br/>Headless 编码产品内核]
+    Core[agent-core<br/>通用 Agent Runtime]
+    Providers[ai-providers<br/>具体 Provider 适配]
+    AI[ai<br/>Provider-neutral 协议]
 
-当前版本为内部/个人开发快照（`1.0-SNAPSHOT`）。如需开源许可，请在发布前补充正式 License 文件。
+    App --> Coding
+    App --> Providers
+    Coding --> Core
+    Coding --> AI
+    Core --> AI
+    Providers --> AI
+```
+
+宿主应用负责创建 Provider runtime，并将其作为 `ModelClient` 注入 `coding-agent`。`coding-agent` 不直接依赖具体 Provider，因此产品层可以替换模型实现而无需改变 Agent Loop。
+
+| 模块 | 职责 | 内部依赖 |
+| --- | --- | --- |
+| [`ai`](ai/) | 模型、消息、流、工具、取消及 Provider runtime 抽象 | 无 |
+| [`ai-providers`](ai-providers/) | 具体 Provider adapter；当前提供 OpenAI Responses API | `ai` |
+| [`agent-core`](agent-core/) | Agent Loop、状态、事件、队列、hook 与工具执行管道 | `ai` |
+| [`coding-agent`](coding-agent/) | 编码产品门面、项目上下文、system prompt 与本地工具 | `ai`、`agent-core` |
+
+Maven Enforcer 会在构建阶段检查这些依赖边界。
+
+## 快速开始
+
+### 环境要求
+
+- JDK 21
+- 系统安装的 Apache Maven（仓库不包含 Maven Wrapper）
+- 可选：使用 `grep`、`find` 工具时需要显式配置 [ripgrep](https://github.com/BurntSushi/ripgrep) 可执行文件
+
+### 获取并构建
+
+```bash
+git clone https://github.com/YPQuinn/Jcode.git
+cd Jcode
+mvn clean install
+```
+
+常用校验命令：
+
+```bash
+# 运行全部测试
+mvn test
+
+# 完整项目校验
+mvn verify
+
+# 只测试指定模块及其依赖
+mvn -pl coding-agent -am test
+```
+
+## 嵌入应用
+
+当前仓库未配置公共 Maven 制品发布。执行 `mvn clean install` 后，可从本地 Maven 仓库引用产品内核和 Provider 实现：
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>site.pplee.jcode</groupId>
+        <artifactId>coding-agent</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+        <groupId>site.pplee.jcode</groupId>
+        <artifactId>ai-providers</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </dependency>
+</dependencies>
+```
+
+下面的示例创建一个只读 Coding Agent。Provider 不会自动读取环境变量；示例由宿主应用读取 `OPENAI_API_KEY`，再显式传入凭证。
+
+```java
+// 省略 import；请将模型 ID 替换为账号可用的 OpenAI Responses 模型。
+var model = new Model("openai", "openai-responses", "gpt-5", "GPT-5");
+var providerConfig = OpenAiProviderConfig.responses(
+        OpenAiCredentials.apiKey(System.getenv("OPENAI_API_KEY")),
+        List.of(model));
+
+try (var provider = new OpenAiProvider(providerConfig)) {
+    var models = new DefaultModels(List.of(provider));
+    var config = new CodingAgentConfig(
+            Path.of("."),
+            model.toRef(),
+            models,
+            new ObjectMapper(),
+            ThinkingLevel.PROVIDER_DEFAULT,
+            ModelRequestOptions.defaults(),
+            QueueMode.ONE_AT_A_TIME,
+            QueueMode.ONE_AT_A_TIME,
+            null,                              // 使用默认 system prompt
+            null,                              // 不追加额外 system prompt
+            CodingAgentEventSink.noop(),
+            Clock.systemUTC(),
+            CodingToolConfig.readOnly(),
+            ProjectContextConfig.project());
+
+    try (var session = new CodingAgentSession(config)) {
+        var result = session.prompt("概括当前项目的模块边界")
+                .toCompletableFuture()
+                .join();
+        System.out.println(result.finalMessage().content());
+    }
+}
+```
+
+`CodingAgentSession` 还提供：
+
+- `steer(String)`：向正在运行的任务加入 steering 消息；
+- `followUp(String)`：排队后续任务；
+- `abort()`：取消当前运行；
+- `state()` / `isRunning()`：读取不可变状态快照；
+- `reloadProjectContext()`：在空闲边界重新发现项目指令。
+
+### 配置本地工具
+
+默认 `CodingToolConfig.readOnly()` 仅启用 `read`。写文件、编辑文件和执行 shell 必须显式开启；搜索工具还需要提供独立的 `rg` 配置。典型工厂方法包括：
+
+| 配置 | 启用工具 |
+| --- | --- |
+| `CodingToolConfig.readOnly()` | `read` |
+| `CodingToolConfig.coding(bashConfig)` | `read`、`write`、`edit`、`bash` |
+| `CodingToolConfig.codingWithSearch(bashConfig, searchConfig)` | 全部内置工具 |
+| `new CodingToolConfig(...)` | 自定义工具集合、配置与 `CodingToolPolicy` |
+
+> [!WARNING]
+> `workingDirectory` 用于路径解析和项目上下文发现，**不是文件系统 sandbox**。文件与 shell 工具以宿主 Java 进程的操作系统权限运行。处理不受信任的项目或提示词时，应通过 `CodingToolPolicy`、运行时 hook 和操作系统隔离实施授权与防护。
+
+## 运行时模型
+
+一次典型运行遵循以下边界：
+
+1. 宿主应用显式选择 `ModelRef`、`ModelClient`、工具和策略。
+2. `CodingAgentSession` 加载项目指令并构造 system prompt。
+3. `agent-core` 驱动模型流，按背压顺序发布生命周期事件。
+4. 模型提出的工具调用进入统一工具管道，可并行执行，但结果按原调用顺序稳定回填。
+5. steering 与 follow-up 队列决定下一轮输入；取消信号由当前 run 独占。
+6. Session 返回防御性复制的 `CodingAgentRunResult` 和状态快照。
+
+这些约束让底层协议、运行时和产品层可以分别测试，也避免具体 Provider 或 UI 语义渗入通用 Agent Loop。
+
+## 项目结构
+
+```text
+Jcode/
+├── ai/                 # Provider-neutral 协议
+├── ai-providers/       # Provider adapters
+├── agent-core/         # 通用 Agent Runtime
+├── coding-agent/       # Headless 编码产品内核
+├── docs/
+│   ├── architecture/   # 架构解读
+│   ├── agents/         # 仓库开发约定
+│   └── plans/          # 产品路线图与阶段计划
+└── pom.xml             # Maven reactor 与依赖约束
+```
+
+## 文档
+
+- [架构文档入口](docs/architecture/src/index.md)
+- [项目全局视图](docs/architecture/src/00-overview.md)
+- [Coding Agent 开发路线图](docs/plans/coding-agent-development-roadmap.md)
+- [模块结构说明](docs/agents/project-structure.md)
+- [架构与依赖边界](docs/agents/architecture-boundaries.md)
+- [运行时正确性契约](docs/agents/runtime-contracts.md)
+- [构建与测试指南](docs/agents/build-and-testing.md)
