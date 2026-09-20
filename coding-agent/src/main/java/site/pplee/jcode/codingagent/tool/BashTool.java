@@ -69,8 +69,8 @@ public final class BashTool implements AgentTool<BashToolArguments>, AutoCloseab
     @Override
     public String description() {
         return "Execute one command with an explicitly configured POSIX Bash in the working directory. "
-                + "The shell is started with --noprofile --norc, stderr is merged into stdout, "
-                + "and only a bounded output tail is returned. Timeout is in whole seconds.";
+                + "The shell is started with -c, stderr is merged into stdout, "
+                + "and only a bounded output tail is returned. Timeout is optional, in whole seconds; no timeout is imposed unless configured.";
     }
 
     @Override
@@ -99,10 +99,12 @@ public final class BashTool implements AgentTool<BashToolArguments>, AutoCloseab
         FileToolSupport.utf8Length(command.textValue(), MAX_COMMAND_BYTES, "command");
 
         JsonNode timeout = prepared.get("timeout");
-        long timeoutSeconds;
+        Long timeoutSeconds;
         if (timeout == null) {
-            timeoutSeconds = config.defaultTimeout().toSeconds();
-            prepared.put("timeout", timeoutSeconds);
+            timeoutSeconds = configuredTimeoutSeconds();
+            if (timeoutSeconds != null) {
+                prepared.put("timeout", timeoutSeconds);
+            }
         } else {
             if (!timeout.isIntegralNumber() || !timeout.canConvertToLong()) {
                 throw new IllegalArgumentException("timeout must be an integer");
@@ -132,11 +134,11 @@ public final class BashTool implements AgentTool<BashToolArguments>, AutoCloseab
             return completed(ToolExecutionResult.failure("bash failed: tool is closed"));
         }
 
-        final long timeoutSeconds;
+        final Long timeoutSeconds;
         try {
             validateCommand(arguments.command());
             timeoutSeconds = arguments.timeout() == null
-                    ? config.defaultTimeout().toSeconds()
+                    ? configuredTimeoutSeconds()
                     : arguments.timeout();
             validateTimeout(timeoutSeconds);
         } catch (IllegalArgumentException e) {
@@ -156,10 +158,10 @@ public final class BashTool implements AgentTool<BashToolArguments>, AutoCloseab
             try {
                 var request = new ProcessRequest(
                         List.of(config.executable().toString(),
-                                "--noprofile", "--norc", "-c", arguments.command()),
+                                "-c", arguments.command()),
                         workingDirectory,
                         config.environment(),
-                        Duration.ofSeconds(timeoutSeconds),
+                        timeoutSeconds == null ? null : Duration.ofSeconds(timeoutSeconds),
                         ProcessRequest.OutputMode.MERGED);
                 processResult = processExecutor.run(request,
                         (channel, bytes, offset, length) -> {
@@ -190,7 +192,7 @@ public final class BashTool implements AgentTool<BashToolArguments>, AutoCloseab
     private ToolExecutionResult toToolResult(
             ProcessRunResult result,
             ProcessOutputSnapshot output,
-            long timeoutSeconds
+            Long timeoutSeconds
     ) {
         String status = switch (result.termination()) {
             case EXITED -> "Process exited with code " + result.exitCode();
@@ -298,11 +300,25 @@ public final class BashTool implements AgentTool<BashToolArguments>, AutoCloseab
         return absolute;
     }
 
-    private void validateTimeout(long timeoutSeconds) {
-        long maximum = config.maximumTimeout().toSeconds();
-        if (timeoutSeconds < 1 || timeoutSeconds > maximum) {
-            throw new IllegalArgumentException(
-                    "timeout must be between 1 and " + maximum + " seconds");
+    private Long configuredTimeoutSeconds() {
+        Duration timeout = config.defaultTimeout() != null ? config.defaultTimeout() : config.maximumTimeout();
+        return timeout == null ? null : timeout.toSeconds();
+    }
+
+    private void validateTimeout(Long timeoutSeconds) {
+        if (timeoutSeconds == null) {
+            return;
+        }
+        if (timeoutSeconds < 1) {
+            throw new IllegalArgumentException("timeout must be positive");
+        }
+        if (config.maximumTimeout() != null && timeoutSeconds > config.maximumTimeout().toSeconds()) {
+            throw new IllegalArgumentException("timeout exceeds the configured maximum");
+        }
+        try {
+            Duration.ofSeconds(timeoutSeconds).toNanos();
+        } catch (ArithmeticException failure) {
+            throw new IllegalArgumentException("timeout exceeds the scheduler range", failure);
         }
     }
 
@@ -331,7 +347,7 @@ public final class BashTool implements AgentTool<BashToolArguments>, AutoCloseab
         properties.putObject("timeout")
                 .put("type", "integer")
                 .put("minimum", 1)
-                .put("description", "Timeout in whole seconds; defaults to the configured value");
+                .put("description", "Optional timeout in whole seconds; unbounded unless a default or maximum is configured");
         root.putArray("required").add("command");
         return root;
     }

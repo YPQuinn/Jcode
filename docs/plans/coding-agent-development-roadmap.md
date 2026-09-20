@@ -309,7 +309,7 @@ caller
 
 ## 7. 阶段二：编码工具集
 
-详细实施记录见已归档的 [`coding-agent-phase-2-local-tools.md`](archived/coding-agent-phase-2-local-tools.md)。PR 1 已完成工具集合、产品 policy、显式装配、旧 Config 兼容与 prompt 同源；PR 2 已完成可显式启用的 `write`/`edit` 和原子文件 mutation；PR 3 已完成受控 `bash`、有界进程/输出生命周期及显式 coding profile；PR 4 已完成有界 record formatter、路径 glob 和可独立显式启用的 `ls`；PR 5 已完成显式 ripgrep backend、有界 NDJSON/NUL parser、`grep/find` 及 search profile；PR 6 已完成全工具 Git 工作区闭环、可恢复故障矩阵、资源清理证据和严格 native smoke。阶段二已完成。
+阶段二已完成全部七个本地工具、显式 profile/policy、fake-model 工作区闭环及 native 验证。原始实施记录见 [`coding-agent-phase-2-local-tools.md`](archived/coding-agent-phase-2-local-tools.md)；后续按参考行为收敛的当前契约见 [`local-tools-behavior-alignment.md`](archived/local-tools-behavior-alignment.md)。后者替代原子 mutation、严格匹配、自研 glob 和固定 Bash 限制等原始选择。
 
 ### 7.1 目标
 
@@ -323,7 +323,7 @@ caller
 
 - `read`：阶段一能力继续作为统一读取入口；
 - `write`：创建父目录并完整写入文件；
-- `edit`：基于唯一、精确文本匹配执行一个或多个不重叠 replacement；
+- `edit`：精确匹配优先、规范化回退，执行唯一且不重叠的 replacement；
 - `bash`：执行命令、流式 stdout/stderr、支持 timeout 和 cancellation。
 
 结构化搜索工具：
@@ -332,7 +332,7 @@ caller
 - `find`：有界文件匹配，返回相对搜索根的路径；
 - `ls`：稳定排序、有界目录列表。
 
-首批使用显式 POSIX Bash profile；PowerShell 作为后续适配，不得在不匹配的平台宣传不可执行的工具。搜索建议统一使用显式配置的 ripgrep 后端，不自动下载依赖、不重写 Git ignore。
+首批使用显式 POSIX Bash profile；PowerShell 作为后续适配，不得在不匹配的平台宣传不可执行的工具。搜索显式配置 rg 与 fd，复用进程 runner；分别保留原生 glob/ignore 语义，不维护自己的 glob 方言，不自动下载依赖。
 
 ### 7.3 工具共同约束
 
@@ -340,11 +340,11 @@ caller
 - 输出统一受 line/byte 上限保护；
 - `write/edit/bash` 声明 `SEQUENTIAL`，复用 core 整批源序执行；不建立静态跨 Session 文件锁；
 - 产品 policy 经 defensive snapshot 适配 `BeforeToolCall`，不泄漏底层工具/context；副作用工具显式启用；
-- 文件修改先完整规划再原子替换，不支持原子移动时失败；不宣称跨进程 CAS 或磁盘回滚；
-- `edit` 仅兼容换行表示，保留 BOM 和未改动字节，拒绝零匹配、多匹配、重复或重叠 edit；
+- 文件修改使用原生直接写入，不做旧文件 CAS、权限复核、临时文件或强制原子替换；write 不读取旧文件，失败不承诺回滚；
+- `edit` 精确优先，必要时在 NFKC/空白/引号规范化视图匹配，按受影响行回写；保留 BOM、未触及行，拒绝零匹配、多匹配及重叠 edit，仍对整文件编辑保留内存预算；
 - `bash` 取消必须终止直接活动进程、尽力回收可观察的普通前台子进程，并有界 drain 已接收输出；不承诺回收逃逸后代；
 - 输出采集与事件 publisher 分离：慢 sink 可阻塞 run 完成，但不得阻碍进程 timeout/cancel；不默认保存无限完整日志；
-- 命令超时和用户取消产生不同的可诊断结果；
+- Bash 环境可继承或显式替换，timeout 可缺省；调用方可显式设置默认和上限，不设 3600 秒政策限制或初始化变量禁令。超时和用户取消产生不同的可诊断结果；
 - 默认实现只使用调用用户权限，不声称提供 sandbox；
 - I/O seam 应允许 deterministic test double，但不提前创建独立 storage 模块。
 
@@ -353,16 +353,26 @@ caller
 - 默认 `read/bash/edit/write` 组成一个完整 coding turn；
 - 工具 schema、边界值、截断、换行、并发、取消和错误均有测试；
 - 对临时 Git 仓库完成一次“定位—读取—修改—测试”的 fake-model 集成流程；
-- `mvn clean verify` 与显式注入 Bash/rg 的严格 native smoke 均通过；不以 skip 代替平台支持证据；
+- `mvn clean verify` 与显式注入 Bash/rg/fd 的严格 native smoke 均通过；不以 skip 代替平台支持证据；
 - 框架输出缓冲、事件排队和搜索记录处理无界增长被测试阻止；不把此保证夸大为任意子进程的 OS 内存沙箱。
 
-### 7.5 完成状态（2026-09-19）
+### 7.5 原始交付记录（2026-09-19）
+
+以下为当时的实现与验收记录，不代表后续对齐后的当前契约；更新见 §7.6。
 
 阶段二 PR 1～6 已完成：`CodingAgentConfig` 增加末尾工具配置且保留旧构造的 read-only 行为；Session 仅装配显式启用且已实现的工具；产品 policy 接收参数深拷贝并在 core prepare 阶段执行；prompt 与模型请求共享实际工具列表。`write`/`edit` 使用强类型参数、严格边界校验和 `SEQUENTIAL` 模式，统一经 8 MiB 有界 reader/writer、同目录临时文件和单次原子替换提交；`edit` 基于同一原始视图规划，保留 BOM、换行风格、未触及文本和已有 POSIX 权限。`bash` 使用绝对 executable、无 profile 启动和完全替换的环境快照；有界 runner 最多运行 4 个进程，持续 drain 合并输出并保留 2000 行/50 KiB tail，timeout/cancel 终止进程树，Session close 回收活跃进程。更新发布与采集解耦，最多一个 update 在途且 sink 失败不归一为工具错误。`ls` 使用 `DirectoryStream` 与有界 top-N heap；`grep/find` 共享经 capability probe 的显式 ripgrep 14+ backend和每 Session 进程预算，以有界 NDJSON/NUL parser 处理结构化结果。
 
 最终 fake-model Git 工作区测试通过唯一产品 Session 使用全部七个工具，验证真实定位、读取、修改、命令失败、再次修改和命令成功，并确认进程退出及 mutation 临时文件清理；同一 Session 的 policy 拒绝、edit 冲突和搜索失败均可恢复。`local-tools-smoke` profile 要求显式绝对 Bash/ripgrep 路径并禁止以 assumption skip 代替严格证据。Darwin arm64、Java 21.0.10 LTS、Maven 3.9.14、GNU Bash 3.2.57、ripgrep 15.2.0 环境下，严格 native verify 与全仓 `mvn clean verify` 均通过；审查修复后全仓共 721 个测试，其中 `coding-agent` 181 个，0 failure/error/skipped。进程/sink 生命周期回归连续三次复验通过。阶段二计划已归档。
 
 PR 2～6 审查发现的五项问题均已修复并补齐回归：进程终止保留已观察后代句柄，等待整棵已观察树退出且保留有界强杀 deadline；sink 失败立即通过工具自有取消源停止进程，清理后传播原异常；显式 grep 文件预检 8 MiB 上限并添加 `./` 防止 `-` 被当 stdin；glob 正确处理文件名中的字面星号。
+
+### 7.6 行为对齐收口（2026-09-20）
+
+- 移除文件事务与自研 glob，实现原生直接写入、hardlink 保持、write 大文件覆盖、edit 规范化匹配及有效错误诊断。
+- grep 使用 rg `--glob --hidden`，显式 glob 可覆盖 ignore；find 使用 fd 原生 glob 并遵守 ignore，Git 边界与无仓库根场景分别测试。取消 rg 14+ 和 help 文本握手、单文件 8 MiB 搜索上限。
+- `SearchConfig(rg, fd, environment)` 支持独立 binary；旧二参数构造用于 grep-only，启用 find 时必须补充 fd。Bash 环境/timeout 可缺省，显式旧配置仍受支持。
+- 保留 core 调度、policy、进程树清理、背压和有界输出；不新增完整输出文件或通用存储机制。当前 Java 特有边界与未覆盖差异详见[对齐记录](archived/local-tools-behavior-alignment.md)。
+- 全仓 `mvn clean verify -Djcode.test.fd=...`：772 tests（本模块 230），0 failure/error/skipped；显式 Bash/rg/fd 的严格 native smoke 通过。第一批 10 个对齐回归先在旧实现失败，再随调整通过；旧事务和禁令测试改为当前行为契约。
 
 ## 8. 阶段三：项目上下文与 System Prompt
 

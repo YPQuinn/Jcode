@@ -96,7 +96,7 @@ class CodingToolConfigurationTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new BashConfig(Path.of("/bin/bash"), Map.of(),
                         Duration.ZERO, Duration.ofSeconds(2)));
-        assertThrows(IllegalArgumentException.class,
+        assertDoesNotThrow(
                 () -> new BashConfig(Path.of("/bin/bash"), Map.of(),
                         Duration.ofMinutes(1), Duration.ofSeconds(3_601)));
         assertThrows(IllegalArgumentException.class,
@@ -105,9 +105,9 @@ class CodingToolConfigurationTest {
     }
 
     @Test
-    void rejectsEnvironmentVariablesThatEnableImplicitShellInitialization() {
+    void acceptsExplicitShellInitializationVariables() {
         for (String name : Set.of("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")) {
-            assertThrows(IllegalArgumentException.class,
+            assertDoesNotThrow(
                     () -> new BashConfig(Path.of("/bin/bash"), Map.of(name, "/tmp/startup"),
                             Duration.ofSeconds(1), Duration.ofSeconds(2)), name);
         }

@@ -6,31 +6,36 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
-/** Explicit process configuration reserved for the built-in bash tool. */
+/**
+ * Explicit Bash configuration. A null environment inherits the host environment;
+ * a non-null map replaces it. With both timeout values null, execution is unbounded.
+ * An omitted call timeout uses the default, then the optional maximum.
+ */
 public record BashConfig(
         Path executable,
         Map<String, String> environment,
         Duration defaultTimeout,
         Duration maximumTimeout
 ) {
-    private static final Duration HARD_TIMEOUT_LIMIT = Duration.ofSeconds(3_600);
-    private static final Set<String> IMPLICIT_INITIALIZATION_VARIABLES =
-            Set.of("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS");
-
     public BashConfig {
         executable = absolutePath(executable, "executable");
-        environment = environmentSnapshot(environment);
-        rejectImplicitInitialization(environment);
+        environment = environment == null ? null : environmentSnapshot(environment);
         defaultTimeout = positiveDuration(defaultTimeout, "defaultTimeout");
         maximumTimeout = positiveDuration(maximumTimeout, "maximumTimeout");
-        if (maximumTimeout.compareTo(HARD_TIMEOUT_LIMIT) > 0) {
-            throw new IllegalArgumentException("maximumTimeout must not exceed 3600 seconds");
-        }
-        if (defaultTimeout.compareTo(maximumTimeout) > 0) {
+        if (defaultTimeout != null && maximumTimeout != null && defaultTimeout.compareTo(maximumTimeout) > 0) {
             throw new IllegalArgumentException("defaultTimeout must not exceed maximumTimeout");
         }
+    }
+
+    /** Use the normal shell environment with no default timeout. */
+    public BashConfig(Path executable) {
+        this(executable, null, null, null);
+    }
+
+    /** Use a chosen environment with no default timeout. */
+    public BashConfig(Path executable, Map<String, String> environment) {
+        this(executable, environment, null, null);
     }
 
     @Override
@@ -58,22 +63,20 @@ public record BashConfig(
         return Collections.unmodifiableMap(snapshot);
     }
 
-    private static void rejectImplicitInitialization(Map<String, String> environment) {
-        for (String name : IMPLICIT_INITIALIZATION_VARIABLES) {
-            if (environment.containsKey(name)) {
-                throw new IllegalArgumentException(
-                        "environment must not contain shell initialization variable: " + name);
-            }
-        }
-    }
-
     private static Duration positiveDuration(Duration duration, String name) {
-        Objects.requireNonNull(duration, name + " must not be null");
+        if (duration == null) {
+            return null;
+        }
         if (duration.isZero() || duration.isNegative()) {
             throw new IllegalArgumentException(name + " must be positive");
         }
         if (duration.getNano() != 0) {
             throw new IllegalArgumentException(name + " must use whole seconds");
+        }
+        try {
+            duration.toNanos();
+        } catch (ArithmeticException failure) {
+            throw new IllegalArgumentException(name + " exceeds the scheduler range", failure);
         }
         return duration;
     }

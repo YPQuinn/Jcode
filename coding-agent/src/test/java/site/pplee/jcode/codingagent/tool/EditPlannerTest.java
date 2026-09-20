@@ -109,6 +109,47 @@ class EditPlannerTest {
                         .toList()));
     }
 
+    @Test
+    void exactMatchWinsOverNormalizationAliases() {
+        var plan = planner.plan(bytes("name\nｎａｍｅ\n"), List.of(new EditReplacement("name", "exact")));
+        assertArrayEquals(bytes("exact\nｎａｍｅ\n"), plan.finalBytes());
+    }
+
+    @Test
+    void normalizationRejectsAmbiguousOrOverlappingMatches() {
+        assertFailure("more than once", "Ａ\nＡ\n", List.of(new EditReplacement("A", "x")));
+        assertFailure("overlap", "ＡＢＣＤ", List.of(
+                new EditReplacement("ABC", "x"), new EditReplacement("BCD", "y")));
+    }
+
+    @Test
+    void normalizedEditsOnOneLineShareOneOriginalLineOverlay() {
+        var plan = planner.plan(bytes("keep   \nＡＢ — ＣＤ\nkeep　\n"), List.of(
+                new EditReplacement("AB", "left"), new EditReplacement("- CD", "right")));
+        assertArrayEquals(bytes("keep   \nleft right\nkeep　\n"), plan.finalBytes());
+    }
+
+    @Test
+    void normalizationExpansionCanReplacePartOfACompatibilityCharacter() {
+        var plan = planner.plan(bytes("ﬃ"), List.of(new EditReplacement("ff", "x")));
+        assertArrayEquals(bytes("xi"), plan.finalBytes());
+    }
+
+    @Test
+    void normalizedLineInsertionDoesNotShiftSubsequentOriginalRanges() {
+        var plan = planner.plan(bytes("Ａ\nkeep  \nＣ\n"), List.of(
+                new EditReplacement("A", "one\ntwo"), new EditReplacement("C", "last")));
+        assertArrayEquals(bytes("one\ntwo\nkeep  \nlast\n"), plan.finalBytes());
+    }
+
+    @Test
+    void normalizingALongWhitespaceRunPreservesIndentationAndUntouchedTail() {
+        String indentation = " ".repeat(100_000);
+        var plan = planner.plan(bytes(indentation + "“target”\nafter  "),
+                List.of(new EditReplacement("\"target\"", "changed")));
+        assertArrayEquals(bytes(indentation + "changed\nafter  "), plan.finalBytes());
+    }
+
     private void assertFailure(String message, String original, List<EditReplacement> edits) {
         var failure = assertThrows(IllegalArgumentException.class,
                 () -> planner.plan(bytes(original), edits));

@@ -20,26 +20,22 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-/** Atomic exact-replacement editor exposed as the {@code edit} agent tool. */
+/** Text-replacement editor exposed as the {@code edit} agent tool. */
 public final class EditTool implements AgentTool<EditToolArguments> {
     private static final Set<String> ARGUMENT_FIELDS = Set.of("path", "edits");
     private static final Set<String> REPLACEMENT_FIELDS = Set.of("oldText", "newText");
     private static final JsonNode SCHEMA = createSchema();
 
-    private final FileMutationWriter writer;
+    private final LocalFileAccess writer;
     private final EditPlanner planner;
 
     public EditTool(Path workingDirectory) {
-        this(workingDirectory, NioFileMutationOperations.INSTANCE);
-    }
-
-    EditTool(Path workingDirectory, FileMutationOperations operations) {
         Objects.requireNonNull(workingDirectory, "workingDirectory must not be null");
         Path absolute = workingDirectory.toAbsolutePath().normalize();
         if (!Files.isDirectory(absolute)) {
             throw new IllegalArgumentException("workingDirectory must be an existing directory");
         }
-        this.writer = new FileMutationWriter(absolute, operations);
+        this.writer = new LocalFileAccess(absolute);
         this.planner = new EditPlanner();
     }
 
@@ -55,10 +51,10 @@ public final class EditTool implements AgentTool<EditToolArguments> {
 
     @Override
     public String description() {
-        return "Edit one existing UTF-8 file with 1 to 100 exact, unique, non-overlapping replacements. "
-                + "Every oldText is matched against the original file. CRLF, CR, and LF match as LF; "
+        return "Edit one existing UTF-8 file with 1 to 100 unique, non-overlapping replacements. "
+                + "Every oldText is matched against the original file: exact first, then normalized whitespace/Unicode. CRLF, CR, and LF match as LF; "
                 + "newText uses the replaced region's first newline style, then the file's first style. "
-                + "The original and final file are each limited to 8 MiB and commit uses an atomic move.";
+                + "The original and final file are each limited to 8 MiB and updates use native file writes.";
     }
 
     @Override
@@ -83,7 +79,7 @@ public final class EditTool implements AgentTool<EditToolArguments> {
             throw new IllegalArgumentException("edits must contain between 1 and 100 replacements");
         }
 
-        int remainingBytes = FileMutationWriter.MAX_FILE_BYTES;
+        int remainingBytes = LocalFileAccess.MAX_EDIT_BYTES;
         for (int index = 0; index < edits.size(); index++) {
             JsonNode edit = edits.get(index);
             if (!edit.isObject()) {
@@ -121,14 +117,14 @@ public final class EditTool implements AgentTool<EditToolArguments> {
         Objects.requireNonNull(cancellation, "cancellation must not be null");
         try {
             cancellation.throwIfCancelled();
-            var snapshot = writer.readExisting(arguments.path(), cancellation);
-            var plan = planner.plan(snapshot.originalBytes(), arguments.edits());
+            var original = writer.readForEdit(arguments.path(), cancellation);
+            var plan = planner.plan(original, arguments.edits());
             cancellation.throwIfCancelled();
             if (!plan.changed()) {
                 return completed(ToolExecutionResult.success(List.of(
                         new Content.Text("No changes were needed."))));
             }
-            writer.commit(snapshot, plan.finalBytes(), cancellation);
+            writer.write(arguments.path(), plan.finalBytes(), cancellation);
             return completed(ToolExecutionResult.success(List.of(new Content.Text(
                     "Applied " + plan.replacementCount() + " replacements; first changed line "
                             + plan.firstChangedLine() + '.'))));
@@ -179,7 +175,7 @@ public final class EditTool implements AgentTool<EditToolArguments> {
         edits.put("type", "array");
         edits.put("minItems", 1);
         edits.put("maxItems", EditToolArguments.MAX_REPLACEMENTS);
-        edits.put("description", "Exact replacements, all matched against the original file");
+        edits.put("description", "Replacements, all matched against the original file");
         var item = edits.putObject("items");
         item.put("type", "object");
         item.put("additionalProperties", false);
@@ -187,7 +183,7 @@ public final class EditTool implements AgentTool<EditToolArguments> {
         itemProperties.putObject("oldText")
                 .put("type", "string")
                 .put("minLength", 1)
-                .put("description", "Unique exact text in the original file; newline forms are equivalent");
+                .put("description", "Unique original text; exact matching precedes whitespace and Unicode normalization");
         itemProperties.putObject("newText")
                 .put("type", "string")
                 .put("description", "Replacement text; newline style follows the replaced region or file");

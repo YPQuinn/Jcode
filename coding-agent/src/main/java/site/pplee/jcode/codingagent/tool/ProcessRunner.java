@@ -90,8 +90,10 @@ final class ProcessRunner implements ProcessExecutor {
         try {
             cancellationRegistration = cancellation.onCancellation(
                     () -> execution.requestStop(ProcessRunResult.Termination.CANCELLED));
-            deadline = scheduler.schedule(request.timeout(),
-                    () -> execution.requestStop(ProcessRunResult.Termination.TIMED_OUT));
+            if (request.timeout() != null) {
+                deadline = scheduler.schedule(request.timeout(),
+                        () -> execution.requestStop(ProcessRunResult.Termination.TIMED_OUT));
+            }
             if (execution.terminal.get() != null) {
                 return execution.result();
             }

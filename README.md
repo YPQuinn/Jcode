@@ -63,7 +63,7 @@ Maven Enforcer 会在构建阶段检查这些依赖边界。
 
 - JDK 21
 - 系统安装的 Apache Maven（仓库不包含 Maven Wrapper）
-- 可选：使用 `grep`、`find` 工具时需要显式配置 [ripgrep](https://github.com/BurntSushi/ripgrep) 可执行文件
+- 可选：`grep` 需要显式配置 [ripgrep](https://github.com/BurntSushi/ripgrep)，`find` 需要显式配置 [fd](https://github.com/sharkdp/fd)
 
 ### 获取并构建
 
@@ -151,7 +151,7 @@ try (var provider = new OpenAiProvider(providerConfig)) {
 
 ### 配置本地工具
 
-默认 `CodingToolConfig.readOnly()` 仅启用 `read`。写文件、编辑文件和执行 shell 必须显式开启；搜索工具还需要提供独立的 `rg` 配置。典型工厂方法包括：
+默认 `CodingToolConfig.readOnly()` 仅启用 `read`。写文件、编辑文件和执行 shell 必须显式开启；搜索工具还需要分别提供 `rg`、`fd` 配置。典型工厂方法包括：
 
 | 配置 | 启用工具 |
 | --- | --- |
@@ -159,6 +159,26 @@ try (var provider = new OpenAiProvider(providerConfig)) {
 | `CodingToolConfig.coding(bashConfig)` | `read`、`write`、`edit`、`bash` |
 | `CodingToolConfig.codingWithSearch(bashConfig, searchConfig)` | 全部内置工具 |
 | `new CodingToolConfig(...)` | 自定义工具集合、配置与 `CodingToolPolicy` |
+
+```java
+var tools = CodingToolConfig.codingWithSearch(
+        new BashConfig(Path.of("/bin/bash")),
+        new SearchConfig(Path.of("/absolute/path/to/rg"),
+                Path.of("/absolute/path/to/fd"), null));
+```
+
+以上配置继承进程环境，Bash 无默认 timeout。非 null environment map 表示完全替换环境；旧四参数 `BashConfig` 仍可显式设置默认和最大 timeout。旧 `SearchConfig(rg, environment)` 仅配置 grep，启用 find 或完整 search profile 时需提供 fd。
+
+`write/edit` 使用原生文件写入，不承诺原子替换或失败回滚；edit 支持精确优先、规范化回退匹配。搜索默认包含 hidden，glob/ignore 语义由 rg/fd 处理，grep 的显式 glob 可包含被 ignore 的文件。
+
+严格 native 验证示例：
+
+```bash
+mvn -pl coding-agent -am verify -Plocal-tools-smoke \
+  -Djcode.test.bash=/bin/bash \
+  -Djcode.test.rg=/absolute/path/to/rg \
+  -Djcode.test.fd=/absolute/path/to/fd
+```
 
 > [!WARNING]
 > `workingDirectory` 用于路径解析和项目上下文发现，**不是文件系统 sandbox**。文件与 shell 工具以宿主 Java 进程的操作系统权限运行。处理不受信任的项目或提示词时，应通过 `CodingToolPolicy`、运行时 hook 和操作系统隔离实施授权与防护。

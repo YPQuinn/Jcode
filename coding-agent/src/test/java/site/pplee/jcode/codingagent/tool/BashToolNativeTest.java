@@ -24,6 +24,43 @@ class BashToolNativeTest {
     Path directory;
 
     @Test
+    void explicitStartupFileRunsWithNoDefaultTimeout() throws Exception {
+        var startup = Files.writeString(directory.resolve("startup.sh"), "export STARTUP_VALUE=loaded\n");
+        var configuration = new BashConfig(NativeToolTestSupport.requireBash(),
+                Map.of("BASH_ENV", startup.toString()));
+        try (var tool = new BashTool(directory, configuration)) {
+            var result = tool.execute("startup", new BashToolArguments("printf '%s' \"$STARTUP_VALUE\"", null),
+                    ToolUpdateSink.noop(), new MutableCancellationSignal()).toCompletableFuture().join();
+            assertFalse(result.error(), () -> ToolTestSupport.text(result));
+            assertTrue(ToolTestSupport.text(result).startsWith("loaded"));
+        }
+    }
+
+    @Test
+    void executionWithoutDeadlineStillCancelsAndDrainsTheProcess() throws Exception {
+        NativeToolTestSupport.requirePosixProcessSupport();
+        var cancellation = new MutableCancellationSignal();
+        Path pidFile = directory.resolve("no-deadline.pid");
+        try (var tool = new BashTool(directory, new BashConfig(NativeToolTestSupport.requireBash()));
+             var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            try {
+                var result = executor.submit(() -> tool.execute("cancel",
+                        new BashToolArguments("printf '%s' $$ > no-deadline.pid; printf ready; /bin/sleep 30", null),
+                        update -> {
+                            cancellation.cancel();
+                            return CompletableFuture.completedFuture(null);
+                        }, cancellation).toCompletableFuture().join()).get(5, TimeUnit.SECONDS);
+                assertTrue(result.error());
+                assertTrue(ToolTestSupport.text(result).contains("cancelled"));
+                long pid = Long.parseLong(Files.readString(pidFile));
+                assertTrue(ProcessHandle.of(pid).isEmpty() || !ProcessHandle.of(pid).orElseThrow().isAlive());
+            } finally {
+                cancellation.cancel();
+            }
+        }
+    }
+
+    @Test
     void runsRealBashWithMergedOutputEnvironmentAndExitStatus() {
         var config = config(Map.of("VALUE", "configured"));
 

@@ -37,7 +37,7 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
 
     public GrepTool(Path workingDirectory, SearchConfig config) {
         this.workingDirectory = validateWorkingDirectory(workingDirectory);
-        this.backend = RipgrepBackend.open(this.workingDirectory, config);
+        this.backend = SearchProcessBackend.open(this.workingDirectory, config);
         this.ownsBackend = true;
     }
 
@@ -60,9 +60,9 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
     @Override
     public String description() {
         return "Search UTF-8 text with ignore-aware ripgrep semantics. Supports Rust regexes or "
-                + "literal matching, optional case-insensitive matching, and a post-filter glob. "
+                + "literal matching, optional case-insensitive matching, and a native glob filter. "
                 + "Returns at most 1000 complete path/line records with 500-code-point summaries; "
-                + "files larger than 8 MiB, hidden files, and ignored files are excluded.";
+                + "hidden files are included; explicit glob rules can override ignore rules.";
     }
 
     @Override
@@ -113,10 +113,7 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
             cancellation.throwIfCancelled();
             var target = SearchToolSupport.resolveTarget(
                     workingDirectory, arguments.path(), true);
-            SearchGlob glob = arguments.glob() == null
-                    ? null
-                    : SearchGlob.compile(arguments.glob());
-            var collector = new GrepCollector(arguments.limit(), glob);
+            var collector = new GrepCollector(arguments.limit());
             var command = grepCommand(arguments, target.backendPath());
             var execution = backend.execute(
                     target.workingDirectory(), command, collector, cancellation);
@@ -149,12 +146,11 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
     private static List<String> grepCommand(GrepToolArguments arguments, String backendPath) {
         var command = new ArrayList<String>();
         command.add("--json");
-        command.add("--no-config");
-        command.add("--no-ignore-global");
-        command.add("--threads");
-        command.add(SearchToolSupport.SEARCH_THREADS_ARGUMENT);
-        command.add("--max-filesize");
-        command.add(SearchToolSupport.MAX_FILE_SIZE_ARGUMENT);
+        command.add("--hidden");
+        if (arguments.glob() != null) {
+            command.add("--glob");
+            command.add(arguments.glob());
+        }
         if (arguments.ignoreCase()) {
             command.add("--ignore-case");
         }
@@ -227,9 +223,9 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
                 .put("maxLength", FileToolSupport.MAX_PATH_CHARACTERS));
         properties.set("glob", factory.objectNode()
                 .put("type", "string")
-                .put("description", "Post-filter glob using *, ?, and whole-segment **")
+                .put("description", "Native glob filter; supports braces, character groups and negation")
                 .put("minLength", 1)
-                .put("maxLength", SearchGlob.MAX_PATTERN_CHARACTERS));
+                .put("maxLength", SearchToolSupport.MAX_PATTERN_CHARACTERS));
         properties.set("ignoreCase", factory.objectNode()
                 .put("type", "boolean")
                 .put("description", "Use case-insensitive matching; defaults to false"));
@@ -259,16 +255,14 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
                 MAX_MATCHES, SearchToolSupport.MAX_OUTPUT_BYTES);
         private final BoundedByteRecordReader records;
         private final int matchLimit;
-        private final SearchGlob glob;
         private final AtomicReference<SearchBackend.StopReason> stopReason = new AtomicReference<>();
 
         private int matches;
         private int unsafeOrOversizedRecords;
         private boolean outputByteLimitReached;
 
-        private GrepCollector(int matchLimit, SearchGlob glob) {
+        private GrepCollector(int matchLimit) {
             this.matchLimit = matchLimit;
-            this.glob = glob;
             this.records = new BoundedByteRecordReader(
                     (byte) '\n',
                     SearchToolSupport.MAX_STRUCTURED_RECORD_BYTES,
@@ -327,7 +321,6 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
                 notices.add(omitted
                         + " matches omitted because a complete safe record could not be represented");
             }
-            notices.add(SearchToolSupport.FILE_SIZE_NOTICE);
             return List.copyOf(notices);
         }
 
@@ -372,9 +365,6 @@ public final class GrepTool implements AgentTool<GrepToolArguments>, AutoCloseab
             if (lineNumber == null || !lineNumber.isIntegralNumber()
                     || !lineNumber.canConvertToLong() || lineNumber.longValue() < 1) {
                 throw new IllegalArgumentException("match line number is invalid");
-            }
-            if (glob != null && !glob.matches(path)) {
-                return;
             }
             String summary = SearchToolSupport.truncateCodePoints(
                     SearchToolSupport.stripLineEnding(line), MAX_LINE_CODE_POINTS);

@@ -7,7 +7,6 @@ public record FindToolArguments(String pattern, String path, Integer limit) {
 
     public FindToolArguments {
         pattern = SearchToolSupport.validateRequiredPattern(pattern);
-        SearchGlob.compile(pattern);
         path = FileToolSupport.validatePath(path == null ? DEFAULT_PATH : path);
         limit = limit == null ? DEFAULT_LIMIT : limit;
         if (limit < 1) {

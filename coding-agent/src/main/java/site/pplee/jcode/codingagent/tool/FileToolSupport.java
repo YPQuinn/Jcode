@@ -1,33 +1,18 @@
 package site.pplee.jcode.codingagent.tool;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.InvalidPathException;
-import java.util.List;
+import java.nio.file.FileSystemException;
 import java.util.Objects;
 
 /** Shared validation and bounded UTF-8 helpers for local file tools. */
 final class FileToolSupport {
     static final int MAX_PATH_CHARACTERS = 4096;
     static final int MAX_DIAGNOSTIC_CHARACTERS = 1024;
-    private static final List<String> SAFE_IO_MESSAGE_PREFIXES = List.of(
-            "atomic replacement is not supported",
-            "target must have a parent directory and file name",
-            "target file does not exist",
-            "target parent is not a directory",
-            "target appeared while preparing mutation",
-            "target is a broken symbolic link or no longer exists",
-            "target is not a regular file",
-            "existing file exceeds the 8 MiB limit",
-            "file exceeds the 8 MiB limit",
-            "file changed while it was being read",
-            "target changed before commit",
-            "target permissions changed before commit");
-
     private FileToolSupport() {
     }
 
@@ -100,8 +85,8 @@ final class FileToolSupport {
             diagnostic = "invalid path";
         } else if (failure instanceof SecurityException) {
             diagnostic = "filesystem operation was denied";
-        } else if (failure instanceof IOException) {
-            diagnostic = safeIoMessage(failure.getMessage());
+        } else if (failure instanceof FileSystemException) {
+            diagnostic = failure.getClass().getSimpleName() + ": " + failure.getMessage();
         } else {
             String message = failure.getMessage();
             diagnostic = message == null || message.isBlank()
@@ -112,17 +97,6 @@ final class FileToolSupport {
             return diagnostic;
         }
         return diagnostic.substring(0, MAX_DIAGNOSTIC_CHARACTERS - 3) + "...";
-    }
-
-    private static String safeIoMessage(String message) {
-        if (message != null) {
-            for (String prefix : SAFE_IO_MESSAGE_PREFIXES) {
-                if (message.startsWith(prefix)) {
-                    return message;
-                }
-            }
-        }
-        return "filesystem I/O failure";
     }
 
     private static void validateWellFormedUtf16(String value, String label) {

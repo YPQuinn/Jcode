@@ -30,7 +30,7 @@ class FindToolTest {
                 () -> tool.prepareArguments(factory.objectNode()));
         assertThrows(IllegalArgumentException.class,
                 () -> tool.prepareArguments(factory.objectNode().putNull("pattern")));
-        assertThrows(IllegalArgumentException.class,
+        assertDoesNotThrow(
                 () -> tool.prepareArguments(factory.objectNode().put("pattern", "[ab]")));
         assertThrows(IllegalArgumentException.class,
                 () -> tool.prepareArguments(factory.objectNode()
@@ -46,7 +46,7 @@ class FindToolTest {
     @Test
     void parsesChunkedNulRecordsAndReturnsJsonQuotedRelativePaths() {
         var backend = new FakeSearchBackend();
-        byte[] output = "./src/Main.java\0./special\nname.java\0./README.md\0"
+        byte[] output = "./src/Main.java\0./special\nname.java\0"
                 .getBytes(StandardCharsets.UTF_8);
         backend.outputChunks.add(java.util.Arrays.copyOfRange(output, 0, 11));
         backend.outputChunks.add(java.util.Arrays.copyOfRange(output, 11, output.length));
@@ -61,8 +61,8 @@ class FindToolTest {
         assertFalse(text.contains("README.md"));
         assertEquals(directory.resolve(".").toAbsolutePath(), backend.workingDirectory);
         assertEquals(List.of(
-                "--files", "--null", "--no-config", "--no-ignore-global",
-                "--threads", "2", "--max-filesize", "8M", "--", "."),
+                "--glob", "--color=never", "--hidden", "--print0", "--no-require-git",
+                "--full-path", "--exclude", ".git", "--exclude", "node_modules", "--", "**/*.java", "."),
                 backend.arguments);
     }
 
@@ -164,7 +164,7 @@ class FindToolTest {
     }
 
     @Test
-    void requiresDirectoryAndMapsBackendFailureWithoutEchoingPath() throws Exception {
+    void requiresDirectoryAndPreservesBackendFailureReason() throws Exception {
         Files.writeString(directory.resolve("private-file"), "x");
         var tool = tool(new FakeSearchBackend());
 
@@ -178,8 +178,8 @@ class FindToolTest {
         backend.standardError = "permission denied: /private/path";
         var failed = execute(tool(backend), new FindToolArguments("*", ".", 10));
         assertTrue(failed.error());
-        assertTrue(ToolTestSupport.text(failed).contains("search path could not be read"));
-        assertFalse(ToolTestSupport.text(failed).contains("/private/path"));
+        assertTrue(ToolTestSupport.text(failed).contains("permission denied"));
+        assertTrue(ToolTestSupport.text(failed).contains("/private/path"));
     }
 
     @Test

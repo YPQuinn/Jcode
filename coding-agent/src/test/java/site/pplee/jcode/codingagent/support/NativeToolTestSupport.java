@@ -31,7 +31,13 @@ public final class NativeToolTestSupport {
                         Path.of("/opt/homebrew/bin/rg"),
                         Path.of("/usr/local/bin/rg"),
                         Path.of("/usr/bin/rg")),
-                "ripgrep 14+ is required");
+                "ripgrep is required");
+    }
+
+    /** Return the explicit file-finder executable, without downloading tools. */
+    public static Path requireFd() {
+        return requireExecutable("jcode.test.fd", List.of(Path.of("/opt/homebrew/bin/fd"),
+                Path.of("/usr/local/bin/fd"), Path.of("/usr/bin/fd")), "fd is required");
     }
 
     /** Require the POSIX process facilities exercised by the native process tests. */

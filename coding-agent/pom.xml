@@ -99,6 +99,14 @@
                                                 -Djcode.test.rg=/absolute/path/to/rg
                                             </message>
                                         </requireProperty>
+                                        <requireProperty>
+                                            <property>jcode.test.fd</property>
+                                            <regex>/.+</regex>
+                                            <message>
+                                                local-tools-smoke requires
+                                                -Djcode.test.fd=/absolute/path/to/fd
+                                            </message>
+                                        </requireProperty>
                                     </rules>
                                 </configuration>
                             </execution>

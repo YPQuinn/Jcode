@@ -6,6 +6,8 @@ import site.pplee.jcode.codingagent.tool.CodingTool;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 import site.pplee.jcode.codingagent.tool.ConfiguredSearchTools;
 import site.pplee.jcode.codingagent.tool.EditTool;
+import site.pplee.jcode.codingagent.tool.GrepTool;
+import site.pplee.jcode.codingagent.tool.FindTool;
 import site.pplee.jcode.codingagent.tool.LsTool;
 import site.pplee.jcode.codingagent.tool.ReadTool;
 import site.pplee.jcode.codingagent.tool.WriteTool;
@@ -30,7 +32,7 @@ final class BuiltInTools {
         try {
             ConfiguredSearchTools searchTools = null;
             if (config.enabledTools().contains(CodingTool.GREP)
-                    || config.enabledTools().contains(CodingTool.FIND)) {
+                    && config.enabledTools().contains(CodingTool.FIND)) {
                 searchTools = ConfiguredSearchTools.open(workingDirectory, config.search());
                 resources.add(searchTools);
             }
@@ -47,8 +49,20 @@ final class BuiltInTools {
                         tools.add(bash);
                         resources.add(bash);
                     }
-                    case GREP -> tools.add(searchTools.grep());
-                    case FIND -> tools.add(searchTools.find());
+                    case GREP -> {
+                        var grep = searchTools == null ? new GrepTool(workingDirectory, config.search()) : searchTools.grep();
+                        tools.add(grep);
+                        if (searchTools == null) {
+                            resources.add(grep);
+                        }
+                    }
+                    case FIND -> {
+                        var find = searchTools == null ? new FindTool(workingDirectory, config.search()) : searchTools.find();
+                        tools.add(find);
+                        if (searchTools == null) {
+                            resources.add(find);
+                        }
+                    }
                     case LS -> tools.add(new LsTool(workingDirectory));
                 }
             }
@@ -73,11 +87,19 @@ final class BuiltInTools {
                 throw new IllegalArgumentException(
                         "search configuration is required when grep or find is enabled");
             }
-            validateExecutable(config.search().executable(), "search");
+            if (config.enabledTools().contains(CodingTool.GREP)) {
+                validateExecutable(config.search().executable(), "grep");
+            }
+            if (config.enabledTools().contains(CodingTool.FIND)) {
+                validateExecutable(config.search().findExecutable(), "find");
+            }
         }
     }
 
     private static void validateExecutable(Path executable, String role) {
+        if (executable == null) {
+            throw new IllegalArgumentException(role + " requires an explicit executable");
+        }
         if (!Files.isRegularFile(executable)) {
             throw new IllegalArgumentException(role + " executable is not a regular file");
         }

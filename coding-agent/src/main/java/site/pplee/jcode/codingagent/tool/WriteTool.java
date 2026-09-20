@@ -20,20 +20,16 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-/** Atomic, bounded whole-file writer exposed as the {@code write} agent tool. */
+/** Native whole-file writer exposed as the {@code write} agent tool. */
 public final class WriteTool implements AgentTool<WriteToolArguments> {
     private static final Set<String> ARGUMENT_FIELDS = Set.of("path", "content");
     private static final JsonNode SCHEMA = createSchema();
 
-    private final FileMutationWriter writer;
+    private final LocalFileAccess writer;
 
     public WriteTool(Path workingDirectory) {
-        this(workingDirectory, NioFileMutationOperations.INSTANCE);
-    }
-
-    WriteTool(Path workingDirectory, FileMutationOperations operations) {
         Path validatedDirectory = validateWorkingDirectory(workingDirectory);
-        this.writer = new FileMutationWriter(validatedDirectory, operations);
+        this.writer = new LocalFileAccess(validatedDirectory);
     }
 
     @Override
@@ -48,9 +44,8 @@ public final class WriteTool implements AgentTool<WriteToolArguments> {
 
     @Override
     public String description() {
-        return "Create or completely replace one UTF-8 file, creating parent directories when needed. "
-                + "Content must be well-formed Unicode and the final file is limited to 8 MiB. "
-                + "Existing POSIX permissions are preserved and replacement requires an atomic move.";
+        return "Write UTF-8 content to a file, creating parent directories when needed. "
+                + "Creates a missing file or overwrites an existing file.";
     }
 
     @Override
@@ -66,7 +61,7 @@ public final class WriteTool implements AgentTool<WriteToolArguments> {
         JsonNode content = requireText(prepared, "content");
         FileToolSupport.validatePath(path.textValue());
         FileToolSupport.utf8Length(
-                content.textValue(), FileMutationWriter.MAX_FILE_BYTES, "content");
+                content.textValue(), Integer.MAX_VALUE, "content");
         return prepared;
     }
 
@@ -87,7 +82,7 @@ public final class WriteTool implements AgentTool<WriteToolArguments> {
         try {
             cancellation.throwIfCancelled();
             byte[] content = FileToolSupport.encodeUtf8(
-                    arguments.content(), FileMutationWriter.MAX_FILE_BYTES, "content");
+                    arguments.content(), Integer.MAX_VALUE, "content");
             writer.write(arguments.path(), content, cancellation);
             return completed(ToolExecutionResult.success(List.of(
                     new Content.Text("Wrote " + content.length + " bytes."))));
@@ -147,8 +142,7 @@ public final class WriteTool implements AgentTool<WriteToolArguments> {
                 .put("description", "Path to create or replace, relative to the working directory or absolute");
         properties.putObject("content")
                 .put("type", "string")
-                .put("maxLength", FileMutationWriter.MAX_FILE_BYTES)
-                .put("description", "Complete UTF-8 file content, limited to 8 MiB after encoding");
+                .put("description", "Complete UTF-8 file content");
         root.putArray("required").add("path").add("content");
         return root;
     }

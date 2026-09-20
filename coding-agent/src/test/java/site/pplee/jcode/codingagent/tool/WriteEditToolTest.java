@@ -11,7 +11,6 @@ import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
 import site.pplee.jcode.agentcore.tool.ToolUpdateSink;
 import site.pplee.jcode.codingagent.support.MutableCancellationSignal;
 
-import java.nio.ByteBuffer;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,8 +20,6 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.Set;
 
-import static java.nio.file.StandardOpenOption.CREATE;
-import static java.nio.file.StandardOpenOption.WRITE;
 import static org.junit.jupiter.api.Assertions.*;
 
 class WriteEditToolTest {
@@ -57,7 +54,7 @@ class WriteEditToolTest {
     }
 
     @Test
-    void writesNewNestedFileAndAtomicallyOverwritesExistingFile() throws Exception {
+    void writesNewNestedFileAndOverwritesExistingFile() throws Exception {
         var tool = new WriteTool(directory);
 
         var created = execute(tool, new WriteToolArguments("nested/source.txt", "hello\n"));
@@ -71,27 +68,12 @@ class WriteEditToolTest {
     }
 
     @Test
-    void rejectsMalformedUtf16OversizedContentAndOversizedExistingFileWithoutChangingTarget()
-            throws Exception {
+    void rejectsMalformedUtf16BeforeChangingTarget() throws Exception {
         Path target = directory.resolve("target.txt");
         Files.writeString(target, "original");
-        var tool = new WriteTool(directory);
-
-        var malformed = execute(tool, new WriteToolArguments("target.txt", "bad\ud800text"));
-        var oversized = execute(tool, new WriteToolArguments(
-                "target.txt", "x".repeat(FileMutationWriter.MAX_FILE_BYTES + 1)));
-        Path huge = directory.resolve("huge.txt");
-        try (var channel = Files.newByteChannel(huge, CREATE, WRITE)) {
-            channel.position(FileMutationWriter.MAX_FILE_BYTES);
-            channel.write(ByteBuffer.wrap(new byte[] {1}));
-        }
-        var oversizedExisting = execute(tool, new WriteToolArguments("huge.txt", "small"));
-
-        assertTrue(malformed.error());
-        assertTrue(oversized.error());
-        assertTrue(oversizedExisting.error());
+        var result = execute(new WriteTool(directory), new WriteToolArguments("target.txt", "bad\ud800text"));
+        assertTrue(result.error());
         assertEquals("original", Files.readString(target));
-        assertEquals(FileMutationWriter.MAX_FILE_BYTES + 1L, Files.size(huge));
     }
 
     @Test
@@ -196,7 +178,7 @@ class WriteEditToolTest {
     }
 
     @Test
-    void rejectsMissingBrokenLinkAndNonRegularTargets() throws Exception {
+    void rejectsMissingEditTargetsButWriteCanCreateDanglingLinkReferent() throws Exception {
         var edit = new EditTool(directory);
         var write = new WriteTool(directory);
         Path broken = directory.resolve("broken.txt");
@@ -211,7 +193,7 @@ class WriteEditToolTest {
         assertTrue(execute(edit, new EditToolArguments(".", List.of(
                 new EditReplacement("a", "b")))).error());
         assertTrue(execute(write, new WriteToolArguments(".", "content")).error());
-        assertTrue(execute(write, new WriteToolArguments("broken.txt", "content")).error());
+        assertFalse(execute(write, new WriteToolArguments("broken.txt", "content")).error());
         assertTrue(Files.isSymbolicLink(broken));
     }
 

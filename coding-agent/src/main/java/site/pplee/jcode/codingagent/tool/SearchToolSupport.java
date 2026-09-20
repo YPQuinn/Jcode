@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
 import java.io.File;
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -14,7 +13,6 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -28,10 +26,6 @@ final class SearchToolSupport {
     static final int MAX_OUTPUT_BYTES = 50 * 1_024;
     static final int MAX_STATUS_LINES = 4;
     static final int MAX_STATUS_BYTES = 1_024;
-    static final int MAX_FILE_BYTES = 8 * 1_024 * 1_024;
-    static final String MAX_FILE_SIZE_ARGUMENT = "8M";
-    static final String SEARCH_THREADS_ARGUMENT = "2";
-    static final String FILE_SIZE_NOTICE = "Search excludes files larger than 8 MiB";
 
     private SearchToolSupport() {
     }
@@ -55,8 +49,7 @@ final class SearchToolSupport {
         if (glob == null) {
             return null;
         }
-        SearchGlob.compile(glob);
-        return glob;
+        return validateRequiredPattern(glob);
     }
 
     static SearchTarget resolveTarget(Path workingDirectory, String input, boolean allowFile) {
@@ -75,8 +68,6 @@ final class SearchToolSupport {
             return new SearchTarget(resolved, ".", true);
         }
         if (allowFile && Files.isRegularFile(resolved)) {
-            // ripgrep applies --max-filesize to discovered files, not explicit file operands.
-            validateExplicitFileSize(resolved);
             Path parent = resolved.getParent();
             Path fileName = resolved.getFileName();
             if (parent == null || fileName == null) {
@@ -90,19 +81,12 @@ final class SearchToolSupport {
                         : "search path is not a directory");
     }
 
-    private static void validateExplicitFileSize(Path path) {
-        final long size;
-        try {
-            size = Files.size(path);
-        } catch (IOException e) {
-            throw new IllegalArgumentException("search file could not be inspected", e);
-        }
-        if (size > MAX_FILE_BYTES) {
-            throw new IllegalArgumentException("search file exceeds the 8 MiB limit");
-        }
+    static Optional<String> backendFailure(SearchBackend.ExecutionResult execution) {
+        return backendFailure(execution, true);
     }
 
-    static Optional<String> backendFailure(SearchBackend.ExecutionResult execution) {
+    /** Only text search uses exit code one for a successful search with no matches. */
+    static Optional<String> backendFailure(SearchBackend.ExecutionResult execution, boolean acceptsNoMatchExit) {
         if (execution.stopOrigin() == SearchBackend.StopOrigin.CALLER_CANCELLATION) {
             return Optional.of("search cancelled");
         }
@@ -116,11 +100,11 @@ final class SearchToolSupport {
                 && collectorReason.get() != SearchBackend.StopReason.PARSE_FAILURE
                 && (result.termination() == ProcessRunResult.Termination.CANCELLED
                 || (result.termination() == ProcessRunResult.Termination.EXITED
-                && (result.exitCode() == 0 || result.exitCode() == 1)))) {
+                && (result.exitCode() == 0 || acceptsNoMatchExit && result.exitCode() == 1)))) {
             return Optional.empty();
         }
         return switch (result.termination()) {
-            case EXITED -> result.exitCode() == 0 || result.exitCode() == 1
+            case EXITED -> result.exitCode() == 0 || acceptsNoMatchExit && result.exitCode() == 1
                     ? Optional.empty()
                     : Optional.of(classifyBackendError(execution.standardError()));
             case TIMED_OUT -> Optional.of("search timed out after 30 seconds");
@@ -174,7 +158,7 @@ final class SearchToolSupport {
                 || normalized.equals("..") || normalized.startsWith("../")) {
             throw new IllegalArgumentException("search backend returned a non-relative path");
         }
-        if (normalized.length() > SearchGlob.MAX_PATH_CHARACTERS) {
+        if (normalized.length() > FileToolSupport.MAX_PATH_CHARACTERS) {
             throw new IllegalArgumentException("search result path exceeds the length limit");
         }
         if (normalized.indexOf('\0') >= 0) {
@@ -221,15 +205,9 @@ final class SearchToolSupport {
     }
 
     private static String classifyBackendError(String standardError) {
-        String normalized = standardError.toLowerCase(Locale.ROOT);
-        if (normalized.contains("regex parse error")
-                || normalized.contains("error parsing regex")) {
-            return "invalid search pattern";
-        }
-        if (normalized.contains("permission denied") || normalized.contains("access is denied")) {
-            return "search path could not be read";
-        }
-        return "search backend reported an error";
+        String diagnostic = standardError.strip().replace("\r", "").replace("\n", " | ");
+        return diagnostic.isEmpty() ? "search backend reported an error"
+                : truncateCodePoints(diagnostic, MAX_STATUS_BYTES);
     }
 
     record SearchTarget(Path workingDirectory, String backendPath, boolean directory) {

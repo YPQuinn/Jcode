@@ -17,8 +17,10 @@ final class LocalProcessLauncher implements ProcessLauncher {
         var builder = new ProcessBuilder(request.command());
         builder.directory(request.workingDirectory().toFile());
         builder.redirectErrorStream(request.outputMode() == ProcessRequest.OutputMode.MERGED);
-        builder.environment().clear();
-        builder.environment().putAll(request.environment());
+        if (request.environment() != null) {
+            builder.environment().clear();
+            builder.environment().putAll(request.environment());
+        }
         Process process = builder.start();
         try {
             process.getOutputStream().close();

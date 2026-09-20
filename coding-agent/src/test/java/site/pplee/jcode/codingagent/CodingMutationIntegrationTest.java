@@ -175,7 +175,7 @@ class CodingMutationIntegrationTest {
                 });
         var tools = new CodingToolConfig(
                 Set.of(CodingTool.GREP, CodingTool.FIND, CodingTool.LS),
-                null, new SearchConfig(ripgrep, Map.of()), null);
+                null, new SearchConfig(ripgrep, NativeToolTestSupport.requireFd(), Map.of()), null);
 
         try (var session = new CodingAgentSession(config(client, tools))) {
             var result = session.prompt("find source").toCompletableFuture().join();

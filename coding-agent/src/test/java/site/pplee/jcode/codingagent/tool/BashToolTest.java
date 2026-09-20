@@ -36,6 +36,19 @@ class BashToolTest {
     }
 
     @Test
+    void omittingTimeoutDoesNotInventADeadlineOrEnvironmentSnapshot() {
+        var executor = new FakeProcessExecutor(ProcessRunResult.exited(0));
+        tool = new BashTool(directory, new BashConfig(Path.of("/configured/bash")), executor);
+        var prepared = tool.prepareArguments(JsonNodeFactory.instance.objectNode().put("command", "true"));
+        assertFalse(prepared.has("timeout"));
+        var result = tool.execute("call", new BashToolArguments("true", null), ToolUpdateSink.noop(),
+                new MutableCancellationSignal()).toCompletableFuture().join();
+        assertFalse(result.error());
+        assertNull(executor.request.timeout());
+        assertNull(executor.request.environment());
+    }
+
+    @Test
     void preparesDefaultsAndRejectsLooseOrOversizedArguments() {
         tool = tool(new FakeProcessExecutor(ProcessRunResult.exited(0)));
         var factory = JsonNodeFactory.instance;
@@ -60,7 +73,7 @@ class BashToolTest {
     }
 
     @Test
-    void launchesConfiguredBashWithoutProfilesAndWithAnEnvironmentSnapshot() {
+    void launchesConfiguredBashWithAnExplicitEnvironmentSnapshot() {
         var executor = new FakeProcessExecutor(ProcessRunResult.exited(0));
         executor.output = "ok\n".getBytes(StandardCharsets.UTF_8);
         tool = tool(executor);
@@ -76,7 +89,7 @@ class BashToolTest {
         assertEquals("ok\n\n[Process exited with code 0]", ToolTestSupport.text(result));
         assertEquals(directory.toAbsolutePath().normalize(), executor.request.workingDirectory());
         assertEquals(
-                java.util.List.of("/configured/bash", "--noprofile", "--norc", "-c", "printf ok"),
+                java.util.List.of("/configured/bash", "-c", "printf ok"),
                 executor.request.command());
         assertEquals(Map.of("TOKEN", "value"), executor.request.environment());
         assertEquals(Duration.ofSeconds(7), executor.request.timeout());

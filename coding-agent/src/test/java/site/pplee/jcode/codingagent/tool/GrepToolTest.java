@@ -54,12 +54,11 @@ class GrepToolTest {
     }
 
     @Test
-    void usesArgumentVectorAndPostFiltersIgnoreAwareResults() throws Exception {
+    void delegatesGlobToNativeArgumentVector() throws Exception {
         Files.writeString(directory.resolve("-input.txt"), "-Needle\n");
         var backend = new FakeSearchBackend();
         backend.outputChunks.add(events(
-                matchText("-input.txt", 1, "-Needle\n"),
-                matchText("other.java", 2, "-Needle\n")));
+                matchText("-input.txt", 1, "-Needle\n")));
         var tool = tool(backend);
 
         var result = execute(tool, new GrepToolArguments(
@@ -70,30 +69,22 @@ class GrepToolTest {
         assertFalse(ToolTestSupport.text(result).contains("other.java"));
         assertEquals(directory.toAbsolutePath().normalize(), backend.workingDirectory);
         assertEquals(List.of(
-                "--json", "--no-config", "--no-ignore-global",
-                "--threads", "2", "--max-filesize", "8M",
+                "--json", "--hidden", "--glob", "*.txt",
                 "--ignore-case", "--fixed-strings",
                 "-e", "-needle", "--", "./-input.txt"), backend.arguments);
     }
 
     @Test
-    void checksExplicitFileSizeBeforeStartingBackendAndAcceptsTheBoundary() throws Exception {
+    void explicitLargeFileStillReachesTheBackend() throws Exception {
         var backend = new FakeSearchBackend();
-        var tool = tool(backend);
         Path path = directory.resolve("large.txt");
         try (var file = new RandomAccessFile(path.toFile(), "rw")) {
-            file.setLength(SearchToolSupport.MAX_FILE_BYTES + 1L);
-            var rejected = execute(tool,
+            file.setLength(8 * 1024 * 1024 + 1L);
+            var result = execute(tool(backend),
                     new GrepToolArguments("needle", "large.txt", null, false, true, 10));
-            assertTrue(rejected.error());
-            assertTrue(ToolTestSupport.text(rejected).contains("8 MiB"));
-            assertNull(backend.arguments, "oversized input must not reach the backend");
-
-            file.setLength(SearchToolSupport.MAX_FILE_BYTES);
-            var accepted = execute(tool,
-                    new GrepToolArguments("needle", "large.txt", null, false, true, 10));
-            assertFalse(accepted.error());
+            assertFalse(result.error());
             assertNotNull(backend.arguments);
+            assertFalse(backend.arguments.contains("--max-filesize"));
         }
     }
 
@@ -121,7 +112,7 @@ class GrepToolTest {
         assertFalse(result.error());
         assertTrue(output.contains("\"special:name\\nfile.txt\":7:"));
         assertTrue(output.contains("… [truncated]"));
-        String summaryJson = output.substring(output.indexOf(":7: ") + 4, output.indexOf("\n\n"));
+        String summaryJson = output.substring(output.indexOf(":7: ") + 4).split("\n\n", 2)[0];
         String summary = assertDoesNotThrow(() -> mapper.readValue(summaryJson, String.class));
         assertEquals(GrepTool.MAX_LINE_CODE_POINTS,
                 summary.codePointCount(0, summary.length()));
@@ -183,7 +174,7 @@ class GrepToolTest {
     }
 
     @Test
-    void mapsNoMatchesBackendErrorsAndCancellationWithoutLeakingDiagnostics() {
+    void mapsNoMatchesAndCancellationWhilePreservingBackendDiagnostics() {
         var noMatches = new FakeSearchBackend();
         noMatches.processResult = ProcessRunResult.exited(1);
         var noMatchResult = execute(tool(noMatches),
@@ -197,8 +188,8 @@ class GrepToolTest {
         var invalidResult = execute(tool(invalidPattern),
                 new GrepToolArguments("[", ".", null, false, false, 10));
         assertTrue(invalidResult.error());
-        assertTrue(ToolTestSupport.text(invalidResult).contains("invalid search pattern"));
-        assertFalse(ToolTestSupport.text(invalidResult).contains("private-pattern"));
+        assertTrue(ToolTestSupport.text(invalidResult).contains("regex parse error"));
+        assertTrue(ToolTestSupport.text(invalidResult).contains("private-pattern"));
 
         var cancelled = new FakeSearchBackend();
         cancelled.stopOrigin = SearchBackend.StopOrigin.CALLER_CANCELLATION;
@@ -222,8 +213,8 @@ class GrepToolTest {
 
         assertTrue(result.error());
         assertTrue(ToolTestSupport.text(result).contains("partial.txt"));
-        assertTrue(ToolTestSupport.text(result).contains("search path could not be read"));
-        assertFalse(ToolTestSupport.text(result).contains("/private/path"));
+        assertTrue(ToolTestSupport.text(result).contains("permission denied"));
+        assertTrue(ToolTestSupport.text(result).contains("/private/path"));
     }
 
     @Test

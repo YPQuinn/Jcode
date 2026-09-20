@@ -19,7 +19,7 @@ class SearchToolsNativeTest {
     @TempDir
     Path directory;
 
-    private RipgrepBackend backend;
+    private ConfiguredSearchTools backend;
 
     @AfterEach
     void closeBackend() {
@@ -29,7 +29,7 @@ class SearchToolsNativeTest {
     }
 
     @Test
-    void realRipgrepHonorsIgnorePostFilterSpecialPathsAndErrorSemantics() throws Exception {
+    void nativeToolsDelegateGlobHiddenIgnoreAndErrorSemantics() throws Exception {
         Path executable = NativeToolTestSupport.requireRipgrep();
         Files.createDirectory(directory.resolve(".git"));
         Files.writeString(directory.resolve(".gitignore"), "ignored.java\n");
@@ -41,27 +41,27 @@ class SearchToolsNativeTest {
         Files.writeString(directory.resolve("special\nname.txt"), "$HOME [literal]\n");
         try (var file = new RandomAccessFile(directory.resolve("large.java").toFile(), "rw")) {
             file.writeBytes("needle\n");
-            file.setLength(SearchToolSupport.MAX_FILE_BYTES + 1L);
+            file.setLength((8 * 1024 * 1024) + 1L);
         }
 
-        backend = RipgrepBackend.open(directory, new SearchConfig(executable, Map.of()));
-        var find = new FindTool(directory, backend);
-        var grep = new GrepTool(directory, backend);
+        backend = ConfiguredSearchTools.open(directory, new SearchConfig(executable, NativeToolTestSupport.requireFd(), Map.of()));
+        var find = backend.find();
+        var grep = backend.grep();
 
         String found = text(executeFind(find, new FindToolArguments("**/*.java", ".", 100)));
         assertTrue(found.contains("\"kept.java\""));
         assertFalse(found.contains("ignored.java"));
         assertFalse(found.contains("ignored-too.java"));
-        assertFalse(found.contains(".hidden.java"));
-        assertFalse(found.contains("large.java"));
+        assertTrue(found.contains(".hidden.java"));
+        assertTrue(found.contains("large.java"));
 
         String matches = text(executeGrep(grep,
                 new GrepToolArguments("needle", ".", "*.java", false, false, 100)));
         assertTrue(matches.contains("\"kept.java\":1: \"needle\""));
-        assertFalse(matches.contains("ignored.java"));
-        assertFalse(matches.contains("ignored-too.java"));
-        assertFalse(matches.contains(".hidden.java"));
-        assertFalse(matches.contains("large.java"));
+        assertTrue(matches.contains("ignored.java"));
+        assertTrue(matches.contains("ignored-too.java"));
+        assertTrue(matches.contains(".hidden.java"));
+        // The sparse file is binary; rg retains its native binary-file behavior.
 
         String explicitlyRequestedIgnoredFile = text(executeGrep(grep,
                 new GrepToolArguments(
@@ -75,7 +75,7 @@ class SearchToolsNativeTest {
         var invalid = executeGrep(grep,
                 new GrepToolArguments("[", ".", null, false, false, 10));
         assertTrue(invalid.error());
-        assertTrue(text(invalid).contains("invalid search pattern"));
+        assertTrue(text(invalid).contains("regex parse error"));
 
         var noMatch = executeGrep(grep,
                 new GrepToolArguments("absent", ".", null, false, true, 10));
@@ -84,13 +84,13 @@ class SearchToolsNativeTest {
     }
 
     @Test
-    void explicitFilesKeepSizeBoundsAndNeverSelectStdin() throws Exception {
+    void explicitFilesAreNotSizeLimitedAndNeverSelectStdin() throws Exception {
         Path executable = NativeToolTestSupport.requireRipgrep();
         Files.writeString(directory.resolve("-"), "needle\n");
         Files.writeString(directory.resolve("large.txt"),
-                "needle\n" + "x".repeat(SearchToolSupport.MAX_FILE_BYTES));
-        backend = RipgrepBackend.open(directory, new SearchConfig(executable, Map.of()));
-        var grep = new GrepTool(directory, backend);
+                "needle\n" + "x".repeat((8 * 1024 * 1024)));
+        backend = ConfiguredSearchTools.open(directory, new SearchConfig(executable, NativeToolTestSupport.requireFd(), Map.of()));
+        var grep = backend.grep();
 
         var dash = executeGrep(grep,
                 new GrepToolArguments("needle", "-", null, false, true, 10));
@@ -98,22 +98,50 @@ class SearchToolsNativeTest {
         assertTrue(text(dash).contains("\"-\":1: \"needle\""));
         var oversized = executeGrep(grep,
                 new GrepToolArguments("needle", "large.txt", null, false, true, 10));
-        assertTrue(oversized.error());
-        assertTrue(text(oversized).contains("8 MiB"));
-        assertFalse(text(oversized).contains("\"large.txt\":1:"));
+        assertFalse(oversized.error(), () -> text(oversized));
+        assertTrue(text(oversized).contains("\"large.txt\":1:"));
     }
 
     @Test
     void globFiltersIncludeFileNamesContainingLiteralStars() throws Exception {
         Path executable = NativeToolTestSupport.requireRipgrep();
         Files.writeString(directory.resolve("*report.txt"), "needle\n");
-        backend = RipgrepBackend.open(directory, new SearchConfig(executable, Map.of()));
-        var found = executeFind(new FindTool(directory, backend),
+        backend = ConfiguredSearchTools.open(directory, new SearchConfig(executable, NativeToolTestSupport.requireFd(), Map.of()));
+        var found = executeFind(backend.find(),
                 new FindToolArguments("*", ".", 10));
         assertTrue(text(found).contains("\"*report.txt\""));
-        var matches = executeGrep(new GrepTool(directory, backend),
+        var matches = executeGrep(backend.grep(),
                 new GrepToolArguments("needle", ".", "*.txt", false, true, 10));
         assertTrue(text(matches).contains("\"*report.txt\":1:"));
+    }
+
+    @Test
+    void fileFinderHonorsIgnoreOutsideRepositoriesAndReportsInvalidGlobs() throws Exception {
+        Files.writeString(directory.resolve(".gitignore"), "ignored.txt\n");
+        Files.writeString(directory.resolve("ignored.txt"), "ignored");
+        Files.writeString(directory.resolve("kept.txt"), "kept");
+        backend = ConfiguredSearchTools.open(directory, new SearchConfig(
+                NativeToolTestSupport.requireRipgrep(), NativeToolTestSupport.requireFd(), Map.of()));
+        var found = executeFind(backend.find(), new FindToolArguments("*.txt", ".", 10));
+        assertFalse(found.error(), () -> text(found));
+        assertTrue(text(found).contains("kept.txt"));
+        assertFalse(text(found).contains("ignored.txt"));
+        var invalid = executeFind(backend.find(), new FindToolArguments("[", ".", 10));
+        assertTrue(invalid.error(), () -> text(invalid));
+        assertTrue(text(invalid).contains("glob"), () -> text(invalid));
+    }
+
+    @Test
+    void fileFinderStopsParentIgnoreRulesAtNestedRepositoryBoundary() throws Exception {
+        Files.createDirectory(directory.resolve(".git"));
+        Files.writeString(directory.resolve(".gitignore"), "*.txt\n");
+        Path nested = Files.createDirectories(directory.resolve("nested/.git")).getParent();
+        Files.writeString(nested.resolve("kept.txt"), "kept");
+        backend = ConfiguredSearchTools.open(nested, new SearchConfig(
+                NativeToolTestSupport.requireRipgrep(), NativeToolTestSupport.requireFd(), Map.of()));
+        var result = executeFind(backend.find(), new FindToolArguments("*.txt", ".", 10));
+        assertFalse(result.error(), () -> text(result));
+        assertTrue(text(result).contains("kept.txt"));
     }
 
     private static ToolExecutionResult executeFind(FindTool tool, FindToolArguments arguments) {

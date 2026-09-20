@@ -104,7 +104,7 @@ class LocalToolsWorkspaceIntegrationTest {
 
         var tools = CodingToolConfig.codingWithSearch(
                 new BashConfig(bash, Map.of(), Duration.ofSeconds(5), Duration.ofSeconds(20)),
-                new SearchConfig(ripgrep, Map.of()));
+                new SearchConfig(ripgrep, NativeToolTestSupport.requireFd(), Map.of()));
 
         try (var session = new CodingAgentSession(config(client, tools))) {
             var result = session.prompt("locate, update, and verify the project")
@@ -158,7 +158,7 @@ class LocalToolsWorkspaceIntegrationTest {
         var tools = new CodingToolConfig(
                 EnumSet.allOf(CodingTool.class),
                 new BashConfig(bash, Map.of(), Duration.ofSeconds(5), Duration.ofSeconds(20)),
-                new SearchConfig(ripgrep, Map.of()),
+                new SearchConfig(ripgrep, NativeToolTestSupport.requireFd(), Map.of()),
                 policy);
 
         try (var session = new CodingAgentSession(config(client, tools))) {

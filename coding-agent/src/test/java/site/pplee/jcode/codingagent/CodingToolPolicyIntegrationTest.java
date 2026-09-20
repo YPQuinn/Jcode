@@ -142,20 +142,18 @@ class CodingToolPolicyIntegrationTest {
     }
 
     @Test
-    void enabledSearchToolsRejectAnExecutableWithoutRipgrepCapabilities() {
+    void standaloneSearchProfilesOnlyRequireTheirOwnExecutableAndDoNotProbe() {
         Path executable = Path.of("/usr/bin/true");
         Assumptions.assumeTrue(Files.isExecutable(executable), "/usr/bin/true is required");
-        var client = new ScriptedModelClient();
-        var tools = new CodingToolConfig(
-                Set.of(CodingTool.FIND), null,
-                new SearchConfig(executable, Map.of()), null);
-
-        var failure = assertThrows(IllegalArgumentException.class,
-                () -> new CodingAgentSession(config(client, tools)));
-
-        assertTrue(failure.getMessage().contains("capability probe failed")
-                || failure.getMessage().contains("not a supported ripgrep"));
-        assertFalse(failure.getMessage().contains(executable.toString()));
+        for (var enabled : List.of(CodingTool.GREP, CodingTool.FIND)) {
+            var search = enabled == CodingTool.GREP
+                    ? new SearchConfig(executable, Map.of())
+                    : new SearchConfig(null, executable, Map.of());
+            var tools = new CodingToolConfig(Set.of(enabled), null, search, null);
+            try (var session = new CodingAgentSession(config(new ScriptedModelClient(), tools))) {
+                assertFalse(session.isRunning());
+            }
+        }
     }
 
     @Test

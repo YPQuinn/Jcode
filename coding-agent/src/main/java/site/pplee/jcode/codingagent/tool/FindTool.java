@@ -33,7 +33,7 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
 
     public FindTool(Path workingDirectory, SearchConfig config) {
         this.workingDirectory = validateWorkingDirectory(workingDirectory);
-        this.backend = RipgrepBackend.open(this.workingDirectory, config);
+        this.backend = new SearchProcessBackend(config.requireFindExecutable(), config.environment(), new ProcessRunner());
         this.ownsBackend = true;
     }
 
@@ -55,9 +55,8 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
 
     @Override
     public String description() {
-        return "Discover ignore-aware regular file paths using a bounded glob post-filter. "
-                + "Supports *, ?, and whole-segment **, returns at most 2000 complete JSON-quoted "
-                + "relative paths, and excludes hidden, ignored, and larger-than-8-MiB files.";
+        return "Find file paths by native glob pattern, including hidden files and respecting ignore files. "
+                + "Supports braces, character groups and path patterns. Returns bounded JSON-quoted paths.";
     }
 
     @Override
@@ -81,7 +80,6 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
             throw new IllegalArgumentException("pattern must be a string");
         }
         SearchToolSupport.validateRequiredPattern(pattern.textValue());
-        SearchGlob.compile(pattern.textValue());
         JsonNode path = prepared.get("path");
         if (path == null) {
             prepared.put("path", FindToolArguments.DEFAULT_PATH);
@@ -114,14 +112,13 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
             cancellation.throwIfCancelled();
             var target = SearchToolSupport.resolveTarget(
                     workingDirectory, arguments.path(), false);
-            var collector = new FindCollector(
-                    arguments.limit(), SearchGlob.compile(arguments.pattern()));
+            var collector = new FindCollector(arguments.limit());
             var execution = backend.execute(
-                    target.workingDirectory(), findCommand(target.backendPath()),
+                    target.workingDirectory(), findCommand(arguments.pattern(), target),
                     collector, cancellation);
             String body = collector.body();
             var notices = collector.notices();
-            Optional<String> failure = SearchToolSupport.backendFailure(execution);
+            Optional<String> failure = SearchToolSupport.backendFailure(execution, false);
             if (failure.isPresent()) {
                 String output = SearchToolSupport.failureOutput(body, notices, failure.orElseThrow());
                 return completed(new ToolExecutionResult(
@@ -145,16 +142,35 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
         }
     }
 
-    private static List<String> findCommand(String backendPath) {
-        return List.of(
-                "--files",
-                "--null",
-                "--no-config",
-                "--no-ignore-global",
-                "--threads", SearchToolSupport.SEARCH_THREADS_ARGUMENT,
-                "--max-filesize", SearchToolSupport.MAX_FILE_SIZE_ARGUMENT,
-                "--",
-                backendPath);
+    private static List<String> findCommand(String pattern, SearchToolSupport.SearchTarget target) {
+        var command = new ArrayList<String>(List.of("--glob", "--color=never", "--hidden", "--print0"));
+        boolean insideGitRepository = false;
+        for (Path current = target.workingDirectory(); current != null; current = current.getParent()) {
+            if (Files.exists(current.resolve(".git"))) {
+                insideGitRepository = true;
+                break;
+            }
+        }
+        if (!insideGitRepository) {
+            command.add("--no-require-git");
+        }
+        if (pattern.contains("/")) {
+            command.add("--full-path");
+            if (!pattern.startsWith("/") && !pattern.startsWith("**/")) {
+                pattern = "**/" + pattern;
+            }
+        }
+        if (java.io.File.separatorChar == '\\') {
+            pattern = pattern.replace('/', '\\');
+        }
+        command.add("--exclude");
+        command.add(".git");
+        command.add("--exclude");
+        command.add("node_modules");
+        command.add("--");
+        command.add(pattern);
+        command.add(target.backendPath());
+        return List.copyOf(command);
     }
 
     private static Path validateWorkingDirectory(Path workingDirectory) {
@@ -176,9 +192,9 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
         var properties = factory.objectNode();
         properties.set("pattern", factory.objectNode()
                 .put("type", "string")
-                .put("description", "Glob using *, ?, and whole-segment **")
+                .put("description", "Native glob pattern, including braces and character groups")
                 .put("minLength", 1)
-                .put("maxLength", SearchGlob.MAX_PATTERN_CHARACTERS));
+                .put("maxLength", SearchToolSupport.MAX_PATTERN_CHARACTERS));
         properties.set("path", factory.objectNode()
                 .put("type", "string")
                 .put("description", "Directory to search; defaults to the working directory")
@@ -205,16 +221,14 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
                 MAX_FILES, SearchToolSupport.MAX_OUTPUT_BYTES);
         private final BoundedByteRecordReader records;
         private final int fileLimit;
-        private final SearchGlob pattern;
         private final AtomicReference<SearchBackend.StopReason> stopReason = new AtomicReference<>();
 
         private int files;
         private int unsafeOrOversizedRecords;
         private boolean outputByteLimitReached;
 
-        private FindCollector(int fileLimit, SearchGlob pattern) {
+        private FindCollector(int fileLimit) {
             this.fileLimit = fileLimit;
-            this.pattern = pattern;
             this.records = new BoundedByteRecordReader(
                     (byte) 0,
                     SearchToolSupport.MAX_STRUCTURED_RECORD_BYTES,
@@ -273,7 +287,6 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
                 notices.add(omitted
                         + " files omitted because a complete safe path could not be represented");
             }
-            notices.add(SearchToolSupport.FILE_SIZE_NOTICE);
             return List.copyOf(notices);
         }
 
@@ -285,9 +298,6 @@ public final class FindTool implements AgentTool<FindToolArguments>, AutoCloseab
             try {
                 path = SearchToolSupport.normalizeRelativePath(
                         SearchToolSupport.decodeUtf8(record, "search result path"));
-                if (!pattern.matches(path)) {
-                    return;
-                }
             } catch (IllegalArgumentException e) {
                 unsafeOrOversizedRecords++;
                 return;

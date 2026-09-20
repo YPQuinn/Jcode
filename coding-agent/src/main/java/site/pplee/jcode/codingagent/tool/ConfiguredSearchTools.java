@@ -4,35 +4,37 @@ import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Session-owned grep/find pair sharing one verified ripgrep backend. */
+/** Session-owned grep/find pair sharing one process runner. */
 public final class ConfiguredSearchTools implements AutoCloseable {
-    private final RipgrepBackend backend;
+    private final ProcessRunner runner;
     private final GrepTool grep;
     private final FindTool find;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     private ConfiguredSearchTools(
-            RipgrepBackend backend,
+            ProcessRunner runner,
             GrepTool grep,
             FindTool find
     ) {
-        this.backend = backend;
+        this.runner = runner;
         this.grep = grep;
         this.find = find;
     }
 
-    /** Verify the configured executable and create tools sharing one process budget. */
+    /** Use the configured executables and create tools sharing one process budget. */
     public static ConfiguredSearchTools open(Path workingDirectory, SearchConfig config) {
         Objects.requireNonNull(workingDirectory, "workingDirectory must not be null");
         Objects.requireNonNull(config, "config must not be null");
-        var backend = RipgrepBackend.open(workingDirectory, config);
+        var runner = new ProcessRunner();
         try {
             return new ConfiguredSearchTools(
-                    backend,
-                    new GrepTool(workingDirectory, backend),
-                    new FindTool(workingDirectory, backend));
+                    runner,
+                    new GrepTool(workingDirectory, new SearchProcessBackend(
+                            config.requireGrepExecutable(), config.environment(), runner)),
+                    new FindTool(workingDirectory, new SearchProcessBackend(
+                            config.requireFindExecutable(), config.environment(), runner)));
         } catch (RuntimeException e) {
-            backend.close();
+            runner.close();
             throw e;
         }
     }
@@ -50,7 +52,7 @@ public final class ConfiguredSearchTools implements AutoCloseable {
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
-            backend.close();
+            runner.close();
         }
     }
 }

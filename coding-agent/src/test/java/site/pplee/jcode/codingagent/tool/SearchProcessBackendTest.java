@@ -16,45 +16,15 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class RipgrepBackendTest {
-    private static final String REQUIRED_HELP = String.join(" ",
-            "--json", "--null", "--files", "--no-config", "--no-ignore-global",
-            "--max-filesize", "--threads");
-
+class SearchProcessBackendTest {
     @TempDir
     Path directory;
 
     @Test
-    void capabilityProbeRequiresSupportedVersionAndOptions() {
+    void constructingBackendDoesNotSpawnCapabilityProbes() {
         var executor = new ScriptedExecutor();
-        executor.add(ProcessRunResult.exited(0), "ripgrep 14.1.0\n", "");
-        executor.add(ProcessRunResult.exited(0), REQUIRED_HELP, "");
-        var backend = backend(executor);
-
-        backend.verifyCapabilities(directory);
-
-        assertEquals(List.of("/configured/rg", "--version"),
-                executor.requests.get(0).command());
-        assertEquals(List.of("/configured/rg", "--help"),
-                executor.requests.get(1).command());
-        assertEquals(Map.of("LANG", "C"), executor.requests.get(0).environment());
-        assertEquals(ProcessRequest.OutputMode.MERGED, executor.requests.get(0).outputMode());
-    }
-
-    @Test
-    void capabilityProbeRejectsOldOrIncompleteExecutablesWithoutEchoingOutput() {
-        var oldExecutor = new ScriptedExecutor();
-        oldExecutor.add(ProcessRunResult.exited(0), "ripgrep 13.0.0 private\n", "");
-        var oldFailure = assertThrows(IllegalArgumentException.class,
-                () -> backend(oldExecutor).verifyCapabilities(directory));
-        assertFalse(oldFailure.getMessage().contains("private"));
-
-        var incomplete = new ScriptedExecutor();
-        incomplete.add(ProcessRunResult.exited(0), "ripgrep 14.0.0\n", "");
-        incomplete.add(ProcessRunResult.exited(0), "--json --files", "");
-        var capabilityFailure = assertThrows(IllegalArgumentException.class,
-                () -> backend(incomplete).verifyCapabilities(directory));
-        assertTrue(capabilityFailure.getMessage().contains("required capability"));
+        assertNotNull(backend(executor));
+        assertTrue(executor.requests.isEmpty());
     }
 
     @Test
@@ -99,15 +69,15 @@ class RipgrepBackendTest {
 
         var request = executor.requests.getFirst();
         assertEquals("/configured/rg", request.command().getFirst());
-        assertEquals(RipgrepBackend.SEARCH_TIMEOUT, request.timeout());
+        assertEquals(SearchProcessBackend.SEARCH_TIMEOUT, request.timeout());
         assertEquals(Map.of("LANG", "C"), request.environment());
         assertFalse(request.toString().contains("secret"));
         assertFalse(request.toString().contains("/configured/rg"));
     }
 
-    private static RipgrepBackend backend(ProcessExecutor executor) {
-        return new RipgrepBackend(
-                new SearchConfig(Path.of("/configured/rg"), Map.of("LANG", "C")), executor);
+    private static SearchProcessBackend backend(ProcessExecutor executor) {
+        return new SearchProcessBackend(
+                Path.of("/configured/rg"), Map.of("LANG", "C"), executor);
     }
 
     private static class CollectingCollector implements SearchBackend.OutputCollector {
