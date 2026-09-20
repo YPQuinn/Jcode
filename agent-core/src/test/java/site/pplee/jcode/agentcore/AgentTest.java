@@ -143,6 +143,56 @@ class AgentTest {
         }
     }
 
+    @Test
+    void updateSystemPromptPreservesTranscriptAndUpdatesPublicState() throws Exception {
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("done", StopReason.STOP));
+        var agent = new Agent(configWith(client, AgentEventSink.noop()));
+        agent.prompt(user("hello")).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        var messages = agent.context().messages();
+
+        agent.updateSystemPrompt("replacement");
+
+        assertEquals("replacement", agent.context().systemPrompt());
+        assertEquals(messages, agent.context().messages());
+        assertEquals(agent.context(), agent.state().context());
+        assertFalse(agent.state().streaming());
+        agent.close();
+        assertThrows(IllegalStateException.class, () -> agent.updateSystemPrompt("after-close"));
+    }
+
+    @Test
+    void updateSystemPromptRejectsActiveRunWithoutChangingContext() throws Exception {
+        var started = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var blockingClient = new ModelClient() {
+            @Override
+            public AssistantMessageStream stream(ModelRequest request, CancellationSignal cancellation) {
+                started.countDown();
+                var stream = new AssistantMessageStream();
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        release.await(2, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    var message = assistantText("slow", StopReason.STOP);
+                    stream.push(new AssistantMessageEvent.Start(message));
+                    stream.push(new AssistantMessageEvent.Done(StopReason.STOP, message));
+                });
+                return stream;
+            }
+        };
+        try (var agent = new Agent(configWith(blockingClient, AgentEventSink.noop()))) {
+            var run = agent.prompt(user("hello"));
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            assertThrows(IllegalStateException.class, () -> agent.updateSystemPrompt("replacement"));
+            assertEquals("sys", agent.context().systemPrompt());
+            release.countDown();
+            run.toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
     // --- active-run protection ---
 
     @Test

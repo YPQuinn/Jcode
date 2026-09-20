@@ -6,6 +6,7 @@ import site.pplee.jcode.ai.client.ModelRequestOptions;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.agentcore.queue.QueueMode;
+import site.pplee.jcode.codingagent.context.ProjectContextConfig;
 import site.pplee.jcode.codingagent.event.CodingAgentEventSink;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 
@@ -28,7 +29,8 @@ public record CodingAgentConfig(
         String appendSystemPrompt,
         CodingAgentEventSink eventSink,
         Clock clock,
-        CodingToolConfig tools
+        CodingToolConfig tools,
+        ProjectContextConfig projectContext
 ) {
     public CodingAgentConfig {
         Objects.requireNonNull(workingDirectory, "workingDirectory must not be null");
@@ -46,6 +48,28 @@ public record CodingAgentConfig(
         eventSink = eventSink == null ? CodingAgentEventSink.noop() : eventSink;
         clock = clock == null ? Clock.systemUTC() : clock;
         tools = tools == null ? CodingToolConfig.readOnly() : tools;
+        projectContext = projectContext == null ? ProjectContextConfig.disabled() : projectContext;
+    }
+
+    /** Compatibility constructor that preserves explicit tool configuration. */
+    public CodingAgentConfig(
+            Path workingDirectory,
+            ModelRef model,
+            ModelClient modelClient,
+            ObjectMapper objectMapper,
+            ThinkingLevel thinkingLevel,
+            ModelRequestOptions requestOptions,
+            QueueMode steeringMode,
+            QueueMode followUpMode,
+            String customSystemPrompt,
+            String appendSystemPrompt,
+            CodingAgentEventSink eventSink,
+            Clock clock,
+            CodingToolConfig tools
+    ) {
+        this(workingDirectory, model, modelClient, objectMapper, thinkingLevel,
+                requestOptions, steeringMode, followUpMode, customSystemPrompt,
+                appendSystemPrompt, eventSink, clock, tools, ProjectContextConfig.disabled());
     }
 
     /** Compatibility constructor that preserves the original read-only tool set. */
@@ -65,7 +89,8 @@ public record CodingAgentConfig(
     ) {
         this(workingDirectory, model, modelClient, objectMapper, thinkingLevel,
                 requestOptions, steeringMode, followUpMode, customSystemPrompt,
-                appendSystemPrompt, eventSink, clock, CodingToolConfig.readOnly());
+                appendSystemPrompt, eventSink, clock, CodingToolConfig.readOnly(),
+                ProjectContextConfig.disabled());
     }
 
     @Override
@@ -82,6 +107,7 @@ public record CodingAgentConfig(
                 + ", appendSystemPrompt=" + (appendSystemPrompt == null ? "absent" : "present")
                 + ", eventSink=" + eventSink.getClass().getName()
                 + ", clock=" + clock.getClass().getName()
-                + ", tools=" + tools + ']';
+                + ", tools=" + tools
+                + ", projectContext=" + projectContext + ']';
     }
 }

@@ -10,7 +10,7 @@
 | 理解流式消费 | `AgentLoop.java` → `consumeStream()`（Start → deltas → Done/Error，emit MessageStarted/MessageUpdated） |
 | 理解工具三阶段管道 | `ToolCallExecutor.java` → `prepareCall()`/`executeAndFinalize()`（prepare → execute → finalize；并行批次双排序） |
 | 工具执行编排 | `ToolCallExecutor.java`（pkg-private，三阶段管道 + 顺序/并行分发 + `ExecutorCompletionService` 完成序投递 + `LoopToolUpdateSink` close-and-drain + `ToolOutcome`） |
-| 公开 API | `Agent.java`：`prompt()`/`continueRun()`/`steer()`/`followUp()`/`abort()`/`context()`/`state()`/`close()` |
+| 公开 API | `Agent.java`：`prompt()`/`continueRun()`/`updateSystemPrompt()`/`steer()`/`followUp()`/`abort()`/`context()`/`state()`/`close()` |
 | 实时状态快照 | `AgentState.java`（public record：streaming/streamingMessage/pendingToolCalls/errorMessage） |
 | 事件归约器 | `Agent.java` → `reduceState()`（`AtomicReference<AgentState>` + CAS；先归约 AgentState，再委托用户 sink） |
 | 构造 Agent | `AgentConfig.java`（record，含 beforeToolCall/afterToolCall 默认 noop，以及固定 `ModelRequestOptions`） |
@@ -41,7 +41,9 @@
 - `pom.xml` 声明本模块自己的 `enforce-module-boundaries` execution：仅允许依赖 `ai`，禁止 `ai-providers`、`coding-agent` 及更高产品模块；根 POM 只管理插件版本。
 - `AgentContext` 不可变；可变状态只在 `LoopState`（核心层唯一例外）。`AgentState` 是公开不可变快照，由 `Agent` 的归约器在每次事件时原子替换。
 - `Agent` 持有 `Executors.newVirtualThreadPerTaskExecutor()`，实现 `AutoCloseable`；公开 API 返回 `CompletionStage`，内部 loop 在虚拟线程上顺序控制流。
-- 每个 `Agent` 同时最多一个 active run（`AtomicReference<ActiveRun>` CAS 保护）；`close()` 协作式 abort + drain executor。
+- 每个 `Agent` 同时最多一个 active run；run 接纳、`updateSystemPrompt()` 和 close 通过 admission lock 线性化，`close()` 协作式 abort + drain executor。
+- `updateSystemPrompt()` 仅在 idle 接纳，busy/closed 同步拒绝；它只替换 `AgentContext.systemPrompt`，同步更新公开 `AgentState.context`，保留 messages、tools、pending queues 和错误快照，不调用模型或发送事件。
+- 阶段三 idle prompt 更新接入验收：本模块 204 个测试、全仓 762 个测试通过；`AgentTest` 与产品 reload/加载边界回归连续三轮通过。产品加载/取消/close 的资源生命周期仍由 `coding-agent` 持有，不扩展到 core。
 - 事件归约：`Agent` 内部包装用户 `AgentEventSink` 为归约 sink。归约器先 `reduceState(event)` 以 `AtomicReference<AgentState>` CAS 更新 `AgentState`，再委托用户 sink。用户 sink 看到事件时状态已完成归约。`AgentCompleted` 事件的 sink 完成前 loop 不返回（`emit().join()` 保证）。归约原子化不锁用户 sink；并行工具下 `ToolUpdate` 与生命周期事件可并发归约。
 - 流式消费：`AgentLoop.consumeStream()` 消费 `AssistantMessageStream`，在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终 `Message.Assistant`。partial 不进入 context；final 才 append。
 - 事件投递：`AgentLoopConfig` 持有 `RunEventEmitter`（持有一个 `AgentEventSink`）。loop 和 `ToolCallExecutor` 内的 `LoopToolUpdateSink` 通过 `RunEventEmitter.emit(event)` 投递事件——该方法 `delegate.emit(event).toCompletableFuture().join()`，等待 sink 的 `CompletionStage` 完成后才返回。慢 sink 阻塞 run。异常不捕获不包装，沿 `.join()` 传播；`invokeModelSafely` 的 RuntimeException 归一边界仅覆盖模型调用，不包含流式事件投递。sink 同步抛出、failed stage、null stage 均使 run 异常退出，不提交 transcript、不合成 model error。`Agent` 异常退出先取消在途 provider，再重置 state/activeRun 并异常完成 future；取消清理异常以 suppressed 保留，不覆盖原始失败。
@@ -61,7 +63,7 @@
 
 - executor 已关闭时（`RejectedExecutionException`）不伪造 ABORTED assistant——loop 从未运行，context 不变。
 - `continueRun()` 在最后消息是 assistant 时失败（要求用 `prompt()`）。
-- 成功时先赋 context 再清 activeRun ref（Oracle F 顺序），保证并发可见性。
+- 成功时先发布 context 再在 admission lock 内清 activeRun ref，保证后续 run 或 prompt 更新看到完整状态。
 - Schema 失败/Before hook 阻止 → error result，不执行工具。
 - Before hook 同步抛/failed stage/null stage/null decision → immediate failure；execute 同步抛/failed stage/null stage/null result → error result；After hook 同步抛/failed stage/null stage/null result → 保留原 result。
 - `ToolUpdateSink` settle 后的迟到 update 被静默丢弃。

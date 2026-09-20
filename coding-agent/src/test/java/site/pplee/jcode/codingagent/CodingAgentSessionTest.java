@@ -10,6 +10,7 @@ import site.pplee.jcode.ai.client.ModelRequest;
 import site.pplee.jcode.ai.client.ModelRequestOptions;
 import site.pplee.jcode.ai.client.PromptCacheOptions;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
+import site.pplee.jcode.ai.concurrent.CancellationRegistration;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
@@ -21,8 +22,12 @@ import site.pplee.jcode.agentcore.AgentContext;
 import site.pplee.jcode.agentcore.LoopResult;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
+import site.pplee.jcode.codingagent.context.ProjectContextConfig;
+import site.pplee.jcode.codingagent.context.ProjectContextFailureMode;
+import site.pplee.jcode.codingagent.context.ProjectContextLoadException;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
 import site.pplee.jcode.codingagent.support.ScriptedModelClient;
+import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -58,6 +63,7 @@ class CodingAgentSessionTest {
         assertNotNull(config.requestOptions());
         assertNotNull(config.eventSink());
         assertNotNull(config.clock());
+        assertFalse(config.projectContext().enabled());
     }
 
     @Test
@@ -109,6 +115,131 @@ class CodingAgentSessionTest {
                 null, null, null, null, null, null, null, null))) {
             assertThrows(IllegalArgumentException.class, () -> session.prompt(""));
             assertEquals("ok", text(session.prompt("   ").toCompletableFuture().join().finalMessage()));
+        }
+    }
+
+    @Test
+    void compatibilityConfigDoesNotDiscoverProjectInstructions() throws Exception {
+        Files.writeString(directory.resolve("AGENTS.md"), "must stay disabled");
+        var client = new ScriptedModelClient(request -> assistant("ok"));
+        try (var session = new CodingAgentSession(new CodingAgentConfig(
+                directory, MODEL, client, new ObjectMapper(),
+                null, null, null, null, null, null, null, null))) {
+            assertEquals(0, session.projectContext().revision());
+            assertTrue(session.projectContext().files().isEmpty());
+            assertTrue(session.projectContextDiagnostics().isEmpty());
+            assertThrows(IllegalStateException.class, session::reloadProjectContext);
+            session.prompt("hello").toCompletableFuture().join();
+            assertFalse(client.requests().getFirst().systemPrompt().contains("must stay disabled"));
+        }
+    }
+
+    @Test
+    void loadsAndReloadsProjectInstructionsWithoutReplacingTranscriptOrTools() throws Exception {
+        var instructions = Files.writeString(directory.resolve("AGENTS.md"), "first rules");
+        var client = new ScriptedModelClient(request -> assistant("one"), request -> assistant("two"));
+        try (var session = new CodingAgentSession(contextConfig(client, ProjectContextFailureMode.FAIL))) {
+            assertEquals(1, session.projectContext().revision());
+            assertEquals("first rules", session.projectContext().files().getFirst().content());
+            session.prompt("first").toCompletableFuture().join();
+            assertTrue(client.requests().getFirst().systemPrompt().contains("first rules"));
+
+            Files.writeString(instructions, "second rules");
+            var reloaded = session.reloadProjectContext().toCompletableFuture().join();
+            assertEquals(2, reloaded.revision());
+            assertFalse(session.isReloading());
+            session.prompt("second").toCompletableFuture().join();
+
+            var second = client.requests().get(1);
+            assertTrue(second.systemPrompt().contains("second rules"));
+            assertFalse(second.systemPrompt().contains("first rules"));
+            assertEquals(3, second.messages().size());
+            assertEquals(client.requests().getFirst().tools(), second.tools());
+        }
+    }
+
+    @Test
+    void failedReloadKeepsPreviouslyAppliedSnapshotAndPrompt() throws Exception {
+        var instructions = Files.writeString(directory.resolve("AGENTS.md"), "stable rules");
+        var client = new ScriptedModelClient(request -> assistant("one"), request -> assistant("two"));
+        try (var session = new CodingAgentSession(contextConfig(client, ProjectContextFailureMode.FAIL))) {
+            session.prompt("first").toCompletableFuture().join();
+            Files.write(instructions, new byte[]{(byte) 0xc3, 0x28});
+
+            var failure = assertThrows(CompletionException.class,
+                    () -> session.reloadProjectContext().toCompletableFuture().join());
+            assertInstanceOf(ProjectContextLoadException.class, failure.getCause());
+            assertEquals(1, session.projectContext().revision());
+            session.prompt("second").toCompletableFuture().join();
+            assertTrue(client.requests().get(1).systemPrompt().contains("stable rules"));
+        }
+    }
+
+    @Test
+    void reloadObservationCancellationDoesNotCancelAcceptedOperation() throws Exception {
+        Files.writeString(directory.resolve("AGENTS.md"), "rules");
+        var client = new ScriptedModelClient(request -> assistant("ok"));
+        try (var session = new CodingAgentSession(contextConfig(client, ProjectContextFailureMode.FAIL))) {
+            var observation = session.reloadProjectContext().toCompletableFuture();
+            observation.cancel(true);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (session.projectContext().revision() != 2 && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(2, session.projectContext().revision());
+            assertFalse(session.isReloading());
+        }
+    }
+
+    @Test
+    void abortCancelsReloadAndPreservesAppliedSnapshot() throws Exception {
+        Files.writeString(directory.resolve("AGENTS.md"), "stable rules");
+        var client = new ScriptedModelClient(request -> assistant("ok"));
+        var loader = new BlockingReloadLoader();
+        try (var session = new CodingAgentSession(contextConfig(client, ProjectContextFailureMode.FAIL), loader)) {
+            var reload = session.reloadProjectContext().toCompletableFuture();
+            assertTrue(loader.started.await(5, TimeUnit.SECONDS));
+            assertTrue(session.isReloading());
+            assertThrows(IllegalStateException.class, () -> session.prompt("blocked"));
+
+            session.abort();
+
+            var failure = assertThrows(CompletionException.class, reload::join);
+            assertInstanceOf(java.util.concurrent.CancellationException.class, failure.getCause());
+            assertFalse(session.isReloading());
+            assertEquals(1, session.projectContext().revision());
+            assertEquals("stable rules", session.projectContext().files().getFirst().content());
+        }
+    }
+
+    @Test
+    void closeCancelsAndWaitsForAcceptedReload() throws Exception {
+        Files.writeString(directory.resolve("AGENTS.md"), "stable rules");
+        var client = new ScriptedModelClient(request -> assistant("ok"));
+        var loader = new BlockingReloadLoader();
+        var session = new CodingAgentSession(contextConfig(client, ProjectContextFailureMode.FAIL), loader);
+        var reload = session.reloadProjectContext().toCompletableFuture();
+        assertTrue(loader.started.await(5, TimeUnit.SECONDS));
+
+        session.close();
+
+        var failure = assertThrows(CompletionException.class, reload::join);
+        assertInstanceOf(java.util.concurrent.CancellationException.class, failure.getCause());
+        assertFalse(session.isReloading());
+        assertEquals(1, session.projectContext().revision());
+        assertThrows(IllegalStateException.class, session::reloadProjectContext);
+    }
+
+    @Test
+    void reloadIsRejectedDuringActiveRun() throws Exception {
+        Files.writeString(directory.resolve("AGENTS.md"), "rules");
+        var client = new BlockingModelClient();
+        try (var session = new CodingAgentSession(contextConfig(client, ProjectContextFailureMode.FAIL))) {
+            var run = session.prompt("first");
+            assertTrue(client.started.await(5, TimeUnit.SECONDS));
+            assertThrows(IllegalStateException.class, session::reloadProjectContext);
+            client.complete();
+            run.toCompletableFuture().join();
         }
     }
 
@@ -376,6 +507,17 @@ class CodingAgentSessionTest {
         }
     }
 
+    private CodingAgentConfig contextConfig(
+            ModelClient client,
+            ProjectContextFailureMode failureMode
+    ) {
+        return new CodingAgentConfig(
+                directory, MODEL, client, new ObjectMapper(),
+                null, null, null, null, null, null, null, null,
+                CodingToolConfig.readOnly(),
+                new ProjectContextConfig(true, null, directory, failureMode));
+    }
+
     private static Message.Assistant assistant(String text) {
         return new Message.Assistant(List.of(new Content.Text(text)), StopReason.STOP,
                 null, Usage.zero(), Instant.EPOCH, MODEL);
@@ -400,6 +542,34 @@ class CodingAgentSessionTest {
                 List.of(), StopReason.STOP, null, Usage.zero(), Instant.EPOCH, MODEL)));
         stream.push(new AssistantMessageEvent.Done(assistant.stopReason(), assistant));
         return stream;
+    }
+
+    private static final class BlockingReloadLoader implements CodingAgentSession.ContextLoader {
+        private final CountDownLatch started = new CountDownLatch(1);
+
+        @Override
+        public site.pplee.jcode.codingagent.context.ProjectContextSnapshot load(
+                Path workingDirectory,
+                ProjectContextConfig config,
+                long revision,
+                CancellationSignal cancellation
+        ) {
+            if (revision == 1) {
+                return site.pplee.jcode.codingagent.context.ProjectContextLoader.load(
+                        workingDirectory, config, revision, cancellation);
+            }
+            var cancelled = new CountDownLatch(1);
+            try (CancellationRegistration ignored = cancellation.onCancellation(cancelled::countDown)) {
+                started.countDown();
+                try {
+                    cancelled.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                cancellation.throwIfCancelled();
+                throw new AssertionError("reload was not cancelled");
+            }
+        }
     }
 
     private static final class BlockingModelClient implements ModelClient {

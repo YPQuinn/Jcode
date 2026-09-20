@@ -50,6 +50,7 @@ public final class Agent implements AutoCloseable {
     private final AgentLoop loop;
     private final PendingMessageQueue steeringQueue;
     private final PendingMessageQueue followUpQueue;
+    private final Object admissionLock = new Object();
     private final AtomicReference<ActiveRun> activeRun = new AtomicReference<>(null);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private volatile AgentContext context;
@@ -96,17 +97,44 @@ public final class Agent implements AutoCloseable {
 
     /** Current context; replaced atomically after each successful run. */
     public AgentContext context() {
-        return context;
+        synchronized (admissionLock) {
+            return context;
+        }
     }
 
     /** Real-time agent state snapshot; updated before each event reaches the user sink. */
     public AgentState state() {
-        return state.get();
+        synchronized (admissionLock) {
+            return state.get();
+        }
     }
 
     /** True while a run is active. */
     public boolean isRunning() {
         return activeRun.get() != null;
+    }
+
+    /**
+     * Replace only the system prompt while this agent is idle.
+     *
+     * <p>The transcript and registered tool instances are retained. The
+     * context and public state snapshots are updated within the same admission
+     * boundary, so a newly admitted run cannot observe a partial update.
+     */
+    public void updateSystemPrompt(String systemPrompt) {
+        Objects.requireNonNull(systemPrompt, "systemPrompt must not be null");
+        synchronized (admissionLock) {
+            if (closed.get()) {
+                throw new IllegalStateException("Agent is closed");
+            }
+            if (activeRun.get() != null) {
+                throw new IllegalStateException("Agent is already running");
+            }
+            var current = context;
+            var updated = new AgentContext(systemPrompt, current.messages(), current.tools());
+            context = updated;
+            state.updateAndGet(snapshot -> new AgentState(updated, false, null, Set.of(), snapshot.errorMessage()));
+        }
     }
 
     public QueueMode steeringMode() {
@@ -127,8 +155,10 @@ public final class Agent implements AutoCloseable {
 
     @Override
     public void close() {
-        if (!closed.compareAndSet(false, true)) {
-            return;
+        synchronized (admissionLock) {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
         }
         var run = activeRun.get();
         if (run != null) {
@@ -147,28 +177,33 @@ public final class Agent implements AutoCloseable {
     }
 
     private CompletableFuture<LoopResult> submit(Message.User message, boolean isContinue) {
-        if (closed.get()) {
-            return CompletableFuture.failedFuture(new IllegalStateException("Agent is closed"));
-        }
         var source = new CancellationSource();
         var future = new CompletableFuture<LoopResult>();
         var run = new ActiveRun(source, future);
-        if (!activeRun.compareAndSet(null, run)) {
-            future.completeExceptionally(new IllegalStateException("Agent is already running"));
-            return future;
+        AgentContext snapshot;
+        synchronized (admissionLock) {
+            if (closed.get()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Agent is closed"));
+            }
+            if (!activeRun.compareAndSet(null, run)) {
+                future.completeExceptionally(new IllegalStateException("Agent is already running"));
+                return future;
+            }
+            snapshot = context;
         }
-        // CAS succeeded — we own the slot. Read snapshot AFTER CAS so a prior run's
-        // context update (which happens before its ref clear) is visible.
-        var snapshot = context;
         if (isContinue) {
             if (snapshot.messages().isEmpty()) {
-                activeRun.compareAndSet(run, null);
+                synchronized (admissionLock) {
+                    activeRun.compareAndSet(run, null);
+                }
                 future.completeExceptionally(new IllegalStateException("no messages to continue from"));
                 return future;
             }
             var last = snapshot.messages().getLast();
             if (isStandardAssistant(last)) {
-                activeRun.compareAndSet(run, null);
+                synchronized (admissionLock) {
+                    activeRun.compareAndSet(run, null);
+                }
                 future.completeExceptionally(new IllegalStateException("last message is assistant; use prompt() instead"));
                 return future;
             }
@@ -182,9 +217,10 @@ public final class Agent implements AutoCloseable {
                     result = isContinue
                             ? loop.continueRun(snapshot, loopConfig, source.signal())
                             : loop.runPrompt(List.of(StandardAgentMessage.of(message)), snapshot, loopConfig, source.signal());
-                    // Oracle F order: assign context (success only) before clearing ref,
-                    // so a new run that CASes in after our clear sees the updated context.
-                    context = result.context();
+                    // Publish the successful context before releasing admission.
+                    synchronized (admissionLock) {
+                        context = result.context();
+                    }
                 } catch (Throwable t) {
                     failure = t;
                     // Stop in-flight provider work without masking the original run failure.
@@ -203,7 +239,9 @@ public final class Agent implements AutoCloseable {
                         runFailure == null ? current.errorMessage() : null));
                 // clear ref → complete future. isRunning() flips to false before the
                 // caller's thenAccept fires.
-                activeRun.compareAndSet(run, null);
+                synchronized (admissionLock) {
+                    activeRun.compareAndSet(run, null);
+                }
                 if (failure != null) {
                     future.completeExceptionally(failure);
                 } else {
@@ -214,7 +252,9 @@ public final class Agent implements AutoCloseable {
             // close() shut down the executor between CAS and execute; the task never
             // runs, so its finally never fires. Clean up here; do NOT synthesize an
             // ABORTED assistant — the loop never ran, so context stays unchanged.
-            activeRun.compareAndSet(run, null);
+            synchronized (admissionLock) {
+                activeRun.compareAndSet(run, null);
+            }
             future.completeExceptionally(new IllegalStateException("Agent is closed", rej));
         }
         return future;
