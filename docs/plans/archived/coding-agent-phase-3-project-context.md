@@ -1,5 +1,7 @@
 # Coding Agent 第三阶段：项目上下文与 System Prompt
 
+> **现行行为说明：第 1—11 节保留原实施历史；与第 12 节存在冲突时，以第 12 节及当前源码为准。最新行为纠偏与验证记录见第 12 节。**
+
 > 状态：已实施并归档（2026-09-19）
 >
 > 验证：审查修复后全仓 `mvn clean verify` 762 个测试（`coding-agent` 220 个），0 failure/error/skipped；严格 `local-tools-smoke` 与生命周期/加载边界三轮复验通过
@@ -426,8 +428,14 @@ git diff --check
 - `<project_context>` / `<project_instructions>` 只是 prompt 来源边界。`path` 属性继续单独轻量转义，来源正文与 pi 一致逐字拼接；删除正文 XML 转义、XML 字符合法性检查和渲染后字节预算。正文即使包含标签样式文本、控制字符或 `&` 也不由 builder 改写。
 - 同目录候选按 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD` 逐个检查并读取。缺失、非普通文件、悬空链接、不可读或非法 UTF-8 的高优先级候选不再阻断较低优先级候选；`FAIL` 仅在该目录确有候选失败且最终没有任何候选成功时抛出，并保留底层 cause。显式全局目录真正缺失表示没有全局来源。
 - 发现沿调用方配置的 working directory 词法祖先链进行，不再把 real path 祖先链当成用户可见继承关系。real path 仅用于物理身份去重和 worktree 关系比较。
-- 只保留普通文件检查、严格 UTF-8/BOM 与一个易解释的 1 MiB 聚合实际读取上限。删除 64 KiB 单文件、256 KiB 保留内容、64 来源、128 祖先、路径、诊断、Git 次数、渲染和五秒 deadline 等重叠限制，也删除多阶段属性/identity 稳定性协议及其 `InputOpener` 测试 seam；不以锁、hash 或另一套可配置安全框架替代。
+- 只保留普通文件检查、严格 UTF-8/BOM 与一个易解释的 1 MiB 聚合实际读取上限。该上限统计去重前的实际读取量，重复来源同样消耗额度，并不表示可保留 1 MiB 有效 Prompt 正文。删除 64 KiB 单文件、256 KiB 保留内容、64 来源、128 祖先、路径、诊断、Git 次数、渲染和五秒 deadline 等重叠限制，也删除多阶段属性/identity 稳定性协议及其 `InputOpener` 测试 seam；不以锁、hash 或另一套可配置安全框架替代。
 - linked-worktree 识别改为 best-effort。Git 元数据损坏或关系识别失败只记录诊断并按普通祖先来源继续加载；只有 worktree 根来源已经成功加载时才应用遮蔽，而且只遮蔽主工作树中的同名候选，不扩张为跨候选文件名遮蔽。
 - 不可变 snapshot、来源元数据、严格 idle 接纳、reload 原子发布、失败/取消保留旧快照、close 后迟到结果防护、完成回调重入和观察 Future 隔离全部保留。项目上下文关闭时不再创建闲置 reload executor。
 
-对应测试删除了 `ProjectContextBoundaryTest` 中只证明上述旧附加契约的用例，改为直接覆盖候选回退、缺失全局目录、词法祖先、正文原样拼接、单一聚合上限、best-effort Git 识别与同名 worktree 遮蔽；`CodingAgentReloadLifecycleTest` 和 Session 生命周期回归继续保留。针对性命令 `mvn -pl coding-agent -am -Dtest=ProjectContextLoaderTest,SystemPromptBuilderTest,CodingAgentSessionTest,CodingAgentReloadLifecycleTest -Dsurefire.failIfNoSpecifiedTests=false test` 运行 44 个测试，0 failure/error/skipped。全仓 `mvn verify` 运行 762 个测试，0 failure/error，常规配置下 10 个需显式本机工具的测试按预期 skipped；Enforcer 与打包通过。
+对应测试删除了 `ProjectContextBoundaryTest` 中只证明上述旧附加契约的用例，改为直接覆盖候选回退、空或仅 BOM override、缺失全局目录、词法祖先、正文原样拼接、单一聚合上限、best-effort Git 识别、worktree 根加载失败不遮蔽、普通嵌套仓库和同名 worktree 遮蔽；`CodingAgentReloadLifecycleTest` 和 Session 生命周期回归继续保留。观察 Future 取消回归使用已有 `ReloadGate` 确认 reload 已在途，断言观察副本取消成功及 Session 仍占用 reload 接纳，再释放 gate 并 join reload worker，不使用自旋轮询。
+
+最新验证结果：
+
+- 针对性命令 `mvn -pl coding-agent -am -Dtest=ProjectContextLoaderTest,SystemPromptBuilderTest,CodingAgentSessionTest,CodingAgentReloadLifecycleTest -Dsurefire.failIfNoSpecifiedTests=false test`：47 个测试，0 failure/error/skipped。
+- 全仓 `mvn verify`：765 个测试，0 failure/error；常规配置下 10 个需显式本机工具的测试按预期 skipped，Enforcer 与打包通过。
+- `mvn -pl coding-agent -am verify -Plocal-tools-smoke -Djcode.test.bash=/bin/bash -Djcode.test.rg=/opt/homebrew/bin/rg -Djcode.test.fd="$(command -v fd)"`：498 个测试，0 failure/error/skipped；Bash、rg、fd 严格 native smoke 通过。

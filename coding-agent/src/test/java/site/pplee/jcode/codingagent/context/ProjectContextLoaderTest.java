@@ -91,6 +91,25 @@ class ProjectContextLoaderTest {
     }
 
     @Test
+    void emptyOrBomOnlyOverrideIsSelectedWithoutFallingBack() throws Exception {
+        var child = Files.createDirectory(directory.resolve("child"));
+        Files.writeString(directory.resolve("AGENTS.override.md"), "");
+        Files.writeString(directory.resolve("AGENTS.md"), "root fallback");
+        Files.writeString(child.resolve("AGENTS.override.md"), "\uFEFF");
+        Files.writeString(child.resolve("AGENTS.md"), "child fallback");
+
+        var snapshot = load(child, new ProjectContextConfig(true, null, directory,
+                ProjectContextFailureMode.FAIL), 1);
+
+        assertEquals(List.of("", ""), contents(snapshot));
+        assertEquals(List.of("AGENTS.override.md", "AGENTS.override.md"), snapshot.files().stream()
+                .map(ProjectContextFile::discoveredPath)
+                .map(Path::getFileName)
+                .map(Path::toString)
+                .toList());
+    }
+
+    @Test
     void strictModeFailsOnlyWhenNoCandidateCanBeLoadedAndRetainsCause() throws Exception {
         Files.write(directory.resolve("AGENTS.override.md"), new byte[]{(byte) 0xc3, 0x28});
 
@@ -177,6 +196,34 @@ class ProjectContextLoaderTest {
                 ProjectContextFailureMode.FAIL), 2);
         assertEquals(List.of("main rules", "worktree rules"), contents(inherited));
         assertFalse(hasCode(inherited, ProjectContextDiagnostic.Code.SHADOWED_WORKTREE_SOURCE));
+    }
+
+    @Test
+    void failedWorktreeRootSourceDoesNotShadowMainSourceInWarningMode() throws Exception {
+        Worktree worktree = createNestedWorktree("AGENTS.md", "AGENTS.md");
+        Files.write(worktree.root().resolve("AGENTS.md"), new byte[]{(byte) 0xc3, 0x28});
+
+        var snapshot = load(worktree.root(), new ProjectContextConfig(true, null, worktree.main(),
+                ProjectContextFailureMode.WARN_AND_SKIP), 1);
+
+        assertEquals(List.of("main rules"), contents(snapshot));
+        assertTrue(hasCode(snapshot, ProjectContextDiagnostic.Code.INVALID_UTF8));
+        assertFalse(hasCode(snapshot, ProjectContextDiagnostic.Code.SHADOWED_WORKTREE_SOURCE));
+    }
+
+    @Test
+    void ordinaryNestedRepositoryKeepsOuterAndInnerSources() throws Exception {
+        var nested = Files.createDirectory(directory.resolve("nested"));
+        Files.createDirectory(nested.resolve(".git"));
+        Files.writeString(directory.resolve("AGENTS.md"), "outer rules");
+        Files.writeString(nested.resolve("AGENTS.md"), "inner rules");
+
+        var snapshot = load(nested, new ProjectContextConfig(true, null, directory,
+                ProjectContextFailureMode.FAIL), 1);
+
+        assertEquals(List.of("outer rules", "inner rules"), contents(snapshot));
+        assertFalse(hasCode(snapshot, ProjectContextDiagnostic.Code.SHADOWED_WORKTREE_SOURCE));
+        assertFalse(hasCode(snapshot, ProjectContextDiagnostic.Code.GIT_METADATA_INVALID));
     }
 
     @Test

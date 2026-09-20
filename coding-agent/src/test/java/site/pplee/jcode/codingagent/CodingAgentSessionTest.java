@@ -26,6 +26,7 @@ import site.pplee.jcode.codingagent.context.ProjectContextConfig;
 import site.pplee.jcode.codingagent.context.ProjectContextFailureMode;
 import site.pplee.jcode.codingagent.context.ProjectContextLoadException;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
+import site.pplee.jcode.codingagent.support.ReloadGate;
 import site.pplee.jcode.codingagent.support.ScriptedModelClient;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 
@@ -42,6 +43,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -179,13 +181,30 @@ class CodingAgentSessionTest {
     void reloadObservationCancellationDoesNotCancelAcceptedOperation() throws Exception {
         Files.writeString(directory.resolve("AGENTS.md"), "rules");
         var client = new ScriptedModelClient(request -> assistant("ok"));
-        try (var session = new CodingAgentSession(contextConfig(client, ProjectContextFailureMode.FAIL))) {
-            var observation = session.reloadProjectContext().toCompletableFuture();
-            observation.cancel(true);
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (session.projectContext().revision() != 2 && System.nanoTime() < deadline) {
-                Thread.onSpinWait();
+        var gate = new ReloadGate();
+        var reloadWorker = new AtomicReference<Thread>();
+        var config = contextConfig(client, ProjectContextFailureMode.FAIL);
+        try (var session = new CodingAgentSession(config, (cwd, options, revision, cancellation) -> {
+            if (revision > 1) {
+                reloadWorker.set(Thread.currentThread());
+                gate.awaitRelease();
             }
+            return site.pplee.jcode.codingagent.context.ProjectContextLoader.load(
+                    cwd, options, revision, cancellation);
+        }); gate) {
+            var observation = session.reloadProjectContext().toCompletableFuture();
+            gate.awaitEntered();
+
+            assertTrue(observation.cancel(true));
+            assertTrue(observation.isCancelled());
+            assertTrue(session.isReloading());
+            assertThrows(IllegalStateException.class, () -> session.prompt("still reloading"));
+
+            gate.close();
+            Thread worker = reloadWorker.get();
+            assertNotNull(worker);
+            worker.join(TimeUnit.SECONDS.toMillis(5));
+            assertFalse(worker.isAlive(), "reload worker must finish after the gate is released");
             assertEquals(2, session.projectContext().revision());
             assertFalse(session.isReloading());
         }
