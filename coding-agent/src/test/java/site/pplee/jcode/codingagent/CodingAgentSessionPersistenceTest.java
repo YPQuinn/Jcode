@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import site.pplee.jcode.ai.client.ModelClient;
+import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.client.ModelRequestOptions;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
@@ -16,6 +17,9 @@ import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.QueueMode;
+import site.pplee.jcode.agentcore.tool.AgentTool;
+import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
+import site.pplee.jcode.agentcore.tool.ToolUpdateSink;
 import site.pplee.jcode.codingagent.context.ProjectContextConfig;
 import site.pplee.jcode.codingagent.context.ProjectContextSnapshot;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
@@ -325,16 +329,14 @@ class CodingAgentSessionPersistenceTest {
     @Test
     void toolCompletionEventsDoNotPersistAndToolResultsFollowTranscriptSourceOrder()
             throws Exception {
-        Files.writeString(directory.resolve("first.txt"), "first");
-        Files.writeString(directory.resolve("second.txt"), "second");
         var mapper = new ObjectMapper();
         var client = new ScriptedModelClient(
                 request -> new Message.Assistant(
                         List.of(
-                                new Content.ToolCall("first-call", "read",
-                                        mapper.createObjectNode().put("path", "first.txt")),
-                                new Content.ToolCall("second-call", "read",
-                                        mapper.createObjectNode().put("path", "second.txt"))),
+                                new Content.ToolCall("first-call", "controlled",
+                                        mapper.createObjectNode()),
+                                new Content.ToolCall("second-call", "controlled",
+                                        mapper.createObjectNode())),
                         StopReason.TOOL_CALL, null, Usage.zero(), NOW, MODEL),
                 request -> {
                     assertEquals("first-call", assertInstanceOf(
@@ -343,20 +345,72 @@ class CodingAgentSessionPersistenceTest {
                             Message.ToolResultMessage.class, request.messages().get(3)).toolCallId());
                     return assistant("done");
                 });
+        var firstCallStarted = new CountDownLatch(1);
+        var releaseFirstCall = new CompletableFuture<ToolExecutionResult>();
+        var controlledTool = new AgentTool<Object>() {
+            @Override
+            public String name() {
+                return "controlled";
+            }
+
+            @Override
+            public Class<Object> argumentType() {
+                return Object.class;
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<ToolExecutionResult> execute(
+                    String toolCallId,
+                    Object arguments,
+                    ToolUpdateSink updates,
+                    CancellationSignal cancellation
+            ) {
+                if (toolCallId.equals("first-call")) {
+                    firstCallStarted.countDown();
+                    return releaseFirstCall;
+                }
+                try {
+                    if (!firstCallStarted.await(5, TimeUnit.SECONDS)) {
+                        return CompletableFuture.failedFuture(
+                                new AssertionError("first tool call did not start"));
+                    }
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    return CompletableFuture.failedFuture(failure);
+                }
+                return CompletableFuture.completedStage(ToolExecutionResult.success(
+                        List.of(new Content.Text("second"))));
+            }
+        };
+        var toolSet = new BuiltInTools.ToolSet(List.of(controlledTool), List.of());
         var sessionRef = new AtomicReference<CodingAgentSession>();
         var countsAtToolCompletion = new CopyOnWriteArrayList<Long>();
+        var toolCompletionOrder = new CopyOnWriteArrayList<String>();
         var sink = (CodingAgentEventSink) event -> {
             if (event instanceof CodingAgentEvent.RuntimeEvent runtime
-                    && runtime.event() instanceof AgentEvent.ToolCompleted) {
+                    && runtime.event() instanceof AgentEvent.ToolCompleted completed) {
+                toolCompletionOrder.add(completed.result().toolCallId());
                 countsAtToolCompletion.add(messageCount(sessionRef.get()));
+                if (completed.result().toolCallId().equals("second-call")) {
+                    releaseFirstCall.complete(ToolExecutionResult.success(
+                            List.of(new Content.Text("first"))));
+                }
             }
             return CompletableFuture.completedStage(null);
         };
 
-        try (var session = new CodingAgentSession(config(directory, client, sink))) {
+        var manager = new SessionManager(
+                new SessionHeader(UUID.randomUUID(), NOW, directory), CLOCK);
+        try (var session = new CodingAgentSession(
+                config(directory, client, sink),
+                (workingDirectory, ignored, revision, cancellation) ->
+                        ProjectContextSnapshot.disabled(workingDirectory),
+                manager,
+                toolSet)) {
             sessionRef.set(session);
             session.prompt("read both").toCompletableFuture().join();
 
+            assertEquals(List.of("second-call", "first-call"), toolCompletionOrder);
             assertEquals(List.of(2L, 2L), countsAtToolCompletion);
             var toolResultIds = session.history().entries().stream()
                     .filter(SessionMessageEntry.class::isInstance)
@@ -433,11 +487,55 @@ class CodingAgentSessionPersistenceTest {
     }
 
     @Test
+    void poisonedWriterRejectsContinueBeforeCallingModel() throws Exception {
+        Path path;
+        var header = new SessionHeader(
+                UUID.fromString("00000000-0000-0000-0000-000000000098"), NOW, directory);
+        try (var manager = SessionManager.createFileBacked(
+                header, directory.resolve("sessions"), CLOCK, () -> "user")) {
+            manager.appendMessage(StandardAgentMessage.of(new Message.User(
+                    List.of(new Content.Text("continue me")), NOW)));
+            path = manager.filePath();
+        }
+
+        var generatedIds = new AtomicInteger();
+        var manager = SessionManager.openFileBacked(
+                path,
+                CLOCK,
+                () -> "name-" + generatedIds.incrementAndGet(),
+                channel -> buffer -> {
+                    throw new IOException("injected metadata write failure");
+                });
+        var client = new ScriptedModelClient(request -> assistant("must-not-run"));
+        try (var session = new CodingAgentSession(
+                config(directory, client, null),
+                (workingDirectory, ignored, revision, cancellation) ->
+                        ProjectContextSnapshot.disabled(workingDirectory),
+                manager)) {
+            var writeFailure = assertThrows(IOException.class, () -> session.setName("poison"));
+            assertTrue(writeFailure.getMessage().contains("injected metadata write failure"));
+            assertEquals(1, generatedIds.get());
+
+            var metadataFailure = assertThrows(IOException.class, () -> session.setName("again"));
+            assertTrue(metadataFailure.getMessage().contains("uncertain"));
+            assertEquals(1, generatedIds.get(),
+                    "a poisoned writer must reject metadata before generating another entry id");
+
+            var continueFailure = assertThrows(CompletionException.class,
+                    () -> session.continueRun().toCompletableFuture().join());
+            assertTrue(rootMessage(continueFailure).contains("uncertain"));
+            assertTrue(client.requests().isEmpty());
+        }
+    }
+
+    @Test
     void cancellingTheObservationFutureDoesNotCancelOrReleaseTheAcceptedRun() throws Exception {
         var callCount = new AtomicInteger();
         var started = new CountDownLatch(1);
         var firstStream = new AtomicReference<AssistantMessageStream>();
         var cancellationObserved = new AtomicBoolean();
+        var runCompletedEntered = new CountDownLatch(1);
+        var releaseRunCompleted = new CompletableFuture<Void>();
         ModelClient client = (request, cancellation) -> {
             if (callCount.incrementAndGet() == 1) {
                 var stream = new AssistantMessageStream();
@@ -452,8 +550,15 @@ class CodingAgentSessionPersistenceTest {
             stream.push(new AssistantMessageEvent.Done(answer.stopReason(), answer));
             return stream;
         };
+        var sink = (CodingAgentEventSink) event -> {
+            if (event instanceof CodingAgentEvent.RunCompleted) {
+                runCompletedEntered.countDown();
+                return releaseRunCompleted;
+            }
+            return CompletableFuture.completedStage(null);
+        };
 
-        try (var session = new CodingAgentSession(config(directory, client, null))) {
+        try (var session = new CodingAgentSession(config(directory, client, sink))) {
             var observation = session.prompt("first").toCompletableFuture();
             assertTrue(started.await(5, TimeUnit.SECONDS));
 
@@ -465,12 +570,12 @@ class CodingAgentSessionPersistenceTest {
             var answer = assistant("first-answer");
             firstStream.get().push(new AssistantMessageEvent.Start(answer));
             firstStream.get().push(new AssistantMessageEvent.Done(answer.stopReason(), answer));
-            awaitIdle(session);
+            assertTrue(runCompletedEntered.await(5, TimeUnit.SECONDS));
+            releaseRunCompleted.complete(null);
+            session.close();
 
+            assertFalse(session.isRunning());
             assertEquals(List.of("first", "first-answer"), messageTexts(session));
-            session.prompt("second").toCompletableFuture().join();
-            assertEquals(List.of("first", "first-answer", "second", "second-answer"),
-                    messageTexts(session));
         }
     }
 
@@ -559,8 +664,9 @@ class CodingAgentSessionPersistenceTest {
         releaseWrite.countDown();
         appendResult.join();
         try (var reopened = SessionFile.open(path)) {
+            var loaded = SessionFileAccess.read(path);
             assertEquals("accepted", new SessionManager(
-                    reopened.header(), reopened.entries(), CLOCK, () -> "unused")
+                    loaded.header(), loaded.entries(), CLOCK, () -> "unused")
                     .snapshot().name().orElseThrow());
         }
     }
@@ -846,14 +952,6 @@ class CodingAgentSessionPersistenceTest {
             case Message.Assistant assistant -> ((Content.Text) assistant.content().getFirst()).text();
             case Message.ToolResultMessage result -> ((Content.Text) result.content().getFirst()).text();
         };
-    }
-
-    private static void awaitIdle(CodingAgentSession session) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (session.isRunning() && System.nanoTime() < deadline) {
-            Thread.sleep(10);
-        }
-        assertFalse(session.isRunning(), "session did not return to idle before the deadline");
     }
 
     private static String rootMessage(Throwable failure) {

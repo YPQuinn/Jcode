@@ -8,7 +8,9 @@ import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import site.pplee.jcode.ai.message.Content;
@@ -40,7 +42,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SessionCodecTest {
     private static final Instant T1 = Instant.parse("2026-09-20T00:00:00.123456Z");
     private static final ModelRef MODEL = new ModelRef("provider", "responses", "model-1");
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     private final SessionCodec codec = new SessionCodec();
 
@@ -71,7 +74,10 @@ class SessionCodecTest {
     void completeStandardMessagesAndOpaqueFieldsRoundTripExactly() throws Exception {
         var replay = new ModelReplayState(
                 "provider/replay-v1", "{\"opaque\":\"秘密\\nvalue\"}");
-        var arguments = MAPPER.readTree("{\"path\":\"目录/文件\",\"nested\":[1,true,null,{\"x\":2.5}]}");
+        var preciseArgument = new BigDecimal("0.12345678901234567890123456789");
+        var arguments = (ObjectNode) MAPPER.readTree(
+                "{\"path\":\"目录/文件\",\"nested\":[1,true,null,{\"x\":2.5}]}");
+        arguments.put("precise", preciseArgument);
         var cost = CostEstimate.of(
                 "USD",
                 new BigDecimal("0.0100"),
@@ -112,6 +118,7 @@ class SessionCodecTest {
                         .message().message());
         var decodedCall = assertInstanceOf(Content.ToolCall.class, decodedAssistant.content().get(2));
         assertEquals(arguments, decodedCall.arguments());
+        assertEquals(preciseArgument, decodedCall.arguments().required("precise").decimalValue());
         assertEquals(replay, ((Content.Text) decodedAssistant.content().getFirst()).replayState());
         assertEquals(cost, decodedAssistant.usage().cost().orElseThrow());
     }

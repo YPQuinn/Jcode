@@ -1,6 +1,5 @@
 package site.pplee.jcode.codingagent;
 
-import site.pplee.jcode.codingagent.session.SessionEntries;
 import site.pplee.jcode.codingagent.session.SessionEntry;
 import site.pplee.jcode.codingagent.session.SessionFileLockException;
 import site.pplee.jcode.codingagent.session.SessionHeader;
@@ -15,10 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 /** Exclusive owner of one append-only session JSONL file. */
@@ -35,12 +31,12 @@ final class SessionFile implements AutoCloseable {
     private final FileLock lock;
     private final SessionByteWriter writer;
     private final SessionHeader header;
-    private final List<SessionEntry> entries;
-    private final Map<String, SessionEntry> byId;
+    private final SessionFileAccess.WriterRegistration registration;
     private long appendOffset;
     private boolean needsSeparator;
     private SessionFileReader.TailRecovery recovery;
     private boolean writeFailed;
+    private boolean closing;
     private boolean closed;
 
     private SessionFile(
@@ -49,7 +45,8 @@ final class SessionFile implements AutoCloseable {
             FileChannel channel,
             FileLock lock,
             SessionByteWriter writer,
-            SessionFileReader.ReadResult loaded
+            SessionFileReader.ReadResult loaded,
+            SessionFileAccess.WriterRegistration registration
     ) {
         this.path = path;
         this.codec = codec;
@@ -57,9 +54,7 @@ final class SessionFile implements AutoCloseable {
         this.lock = lock;
         this.writer = writer;
         this.header = loaded.header();
-        this.entries = new ArrayList<>(SessionEntries.copyAll(loaded.entries()));
-        this.byId = new LinkedHashMap<>();
-        this.entries.forEach(entry -> byId.put(entry.id(), entry));
+        this.registration = registration;
         this.appendOffset = loaded.appendOffset();
         this.needsSeparator = loaded.needsSeparator();
         this.recovery = loaded.recovery();
@@ -71,6 +66,7 @@ final class SessionFile implements AutoCloseable {
         var normalizedDirectory = directory.toAbsolutePath().normalize();
         Files.createDirectories(normalizedDirectory);
         var path = normalizedDirectory.resolve(fileName(header));
+        var registration = SessionFileAccess.reserveWriter(path);
         var codec = new SessionCodec();
         FileChannel channel = null;
         FileLock lock = null;
@@ -86,9 +82,13 @@ final class SessionFile implements AutoCloseable {
             writeFully(channel::write, recordBuffer(false, headerBytes));
             var loaded = new SessionFileReader.ReadResult(
                     header, List.of(), channel.position(), false, null);
-            return new SessionFile(path, codec, channel, lock, channel::write, loaded);
+            var file = new SessionFile(
+                    path, codec, channel, lock, channel::write, loaded, registration);
+            SessionFileAccess.activate(registration, file);
+            return file;
         } catch (Throwable failure) {
             closeAfterFailure(lock, channel, failure);
+            SessionFileAccess.releaseFailed(registration);
             if (created) {
                 try {
                     Files.deleteIfExists(path);
@@ -101,13 +101,23 @@ final class SessionFile implements AutoCloseable {
     }
 
     static SessionFile open(Path path) throws IOException {
-        return open(path, channel -> channel::write);
+        return openLoaded(path, channel -> channel::write).file();
     }
 
     static SessionFile open(Path path, SessionByteWriterFactory writerFactory) throws IOException {
+        return openLoaded(path, writerFactory).file();
+    }
+
+    static Opened openLoaded(Path path) throws IOException {
+        return openLoaded(path, channel -> channel::write);
+    }
+
+    static Opened openLoaded(Path path, SessionByteWriterFactory writerFactory)
+            throws IOException {
         Objects.requireNonNull(path, "path must not be null");
         Objects.requireNonNull(writerFactory, "writerFactory must not be null");
         var normalized = path.toAbsolutePath().normalize();
+        var registration = SessionFileAccess.reserveWriter(normalized);
         var codec = new SessionCodec();
         FileChannel channel = null;
         FileLock lock = null;
@@ -118,18 +128,20 @@ final class SessionFile implements AutoCloseable {
             channel.position(loaded.appendOffset());
             var writer = Objects.requireNonNull(
                     writerFactory.create(channel), "writerFactory returned null");
-            return new SessionFile(normalized, codec, channel, lock, writer, loaded);
+            var file = new SessionFile(
+                    normalized, codec, channel, lock, writer, loaded, registration);
+            SessionFileAccess.activate(registration, file);
+            return new Opened(file, loaded);
         } catch (Throwable failure) {
             closeAfterFailure(lock, channel, failure);
+            SessionFileAccess.releaseFailed(registration);
             throw failure;
         }
     }
 
-    synchronized void append(SessionEntry source) throws IOException {
+    synchronized void append(SessionEntry entry) throws IOException {
         requireWritable();
-        var entry = SessionEntries.copy(source);
-        SessionEntries.validateNext(entry, byId);
-        var json = codec.encodeEntry(entry);
+        var json = codec.encodeEntry(Objects.requireNonNull(entry, "entry must not be null"));
         var buffer = recordBuffer(needsSeparator, json);
         try {
             if (recovery != null) {
@@ -142,8 +154,6 @@ final class SessionFile implements AutoCloseable {
             writeFailed = true;
             throw e;
         }
-        entries.add(entry);
-        byId.put(entry.id(), entry);
         recovery = null;
         needsSeparator = false;
     }
@@ -156,10 +166,6 @@ final class SessionFile implements AutoCloseable {
         return header;
     }
 
-    synchronized List<SessionEntry> entries() {
-        return SessionEntries.copyAll(entries);
-    }
-
     synchronized SessionFileReader.TailRecovery recovery() {
         return recovery;
     }
@@ -168,8 +174,41 @@ final class SessionFile implements AutoCloseable {
         return writeFailed;
     }
 
+    synchronized void requireWritable() throws IOException {
+        if (closed || closing) {
+            throw new IOException("session file is closed: " + path);
+        }
+        if (writeFailed) {
+            throw new IOException(
+                    "session file append state is uncertain after a prior write failure: " + path);
+        }
+    }
+
     @Override
-    public synchronized void close() throws IOException {
+    public void close() throws IOException {
+        synchronized (this) {
+            if (closed || closing) {
+                return;
+            }
+            closing = true;
+        }
+        SessionFileAccess.close(registration);
+    }
+
+    synchronized SessionFileReader.ReadResult readForDiscovery() throws IOException {
+        if (closed) {
+            throw new IOException("session file is closed: " + path);
+        }
+        try {
+            return new SessionFileReader(path, new SessionCodec()).read(channel);
+        } finally {
+            if (channel.isOpen()) {
+                channel.position(appendOffset);
+            }
+        }
+    }
+
+    synchronized void closeOwnedResources() throws IOException {
         if (closed) {
             return;
         }
@@ -193,15 +232,6 @@ final class SessionFile implements AutoCloseable {
         }
         if (failure != null) {
             throw failure;
-        }
-    }
-
-    private void requireWritable() throws IOException {
-        if (closed) {
-            throw new IOException("session file is closed: " + path);
-        }
-        if (writeFailed) {
-            throw new IOException("session file append state is uncertain after a prior write failure: " + path);
         }
     }
 
@@ -267,6 +297,9 @@ final class SessionFile implements AutoCloseable {
                 failure.addSuppressed(closeFailure);
             }
         }
+    }
+
+    record Opened(SessionFile file, SessionFileReader.ReadResult loaded) {
     }
 
     @FunctionalInterface

@@ -86,7 +86,7 @@
 | 未配对工具 | 请求转换层为缺失结果提供占位，不重跑工具 [P3] | 复用现有 `OpenAiTranscriptPlanner` 的请求局部配对与 replay 处理 [J4] | 不在 Session 层复制修复器，也不把占位输出保存成真实执行结果 |
 | 格式版本 | 有真实 v1→v2→v3 迁移 [P1] | 首版定义 Jcode version 1，检查版本 | 无已发布旧格式，不虚构历史迁移；不承诺 pi 文件互通 |
 | 残缺文件 | pi 的解析流程会跳过无法解析的行 [P1] | 仅容忍可确认的 EOF 截断尾片段；结构损坏报告位置 | Jcode 不能从缺失父链构造一份貌似完整的上下文；不顺带实现修复框架 |
-| 写入所有权 | 所核对的 SessionManager 直接写文件，无多写者合并协议 [P1] | 一个文件一个写所有者，用文件句柄 `tryLock()` 检测冲突 | Java 可被同进程多个宿主实例调用；仅检测冲突，不引入租约、心跳、重试 |
+| 写入所有权 | 所核对的 SessionManager 直接写文件，无多写者合并协议 [P1] | 一个文件一个写所有者，用文件句柄 `tryLock()` 检测跨进程冲突，并协调同 JVM 的同文件通道生命周期 | Java 关闭任一同文件通道可能释放进程已有锁；只增加窄的进程内 owner 注册，不引入租约、心跳、重试 |
 | 配置与资源 | SessionContext 解析选定路径的历史 model/thinking [P1] | 恢复数据；运行仍使用调用方显式 config/client/tools | 产品配置归第五阶段；Session 文件不成为可执行配置来源 |
 | 失败后的历史 | SessionManager 管理历史，运行时管理执行状态 [P1、P2] | 已接纳 Entry 为产品历史；运行异常后重新对齐运行时消息视图 | 当前 core 仅正常返回时发布长期 context，产品接入必须处理这一差异 [J3] |
 
@@ -109,9 +109,11 @@ Session 文件可能包含用户主动提供的敏感内容。禁止把宿主配
 | 组件 | 职责 |
 |---|---|
 | `SessionHeader` / `SessionEntry` | 固定首版数据结构与不可变访问 |
-| `SessionManager` | 内存 Entry 序列、索引、当前节点、追加和查询；由产品门面独占 |
+| `SessionManager` | 唯一长期持有内存 Entry 序列与索引，并管理当前节点、追加和查询；由产品门面独占 |
 | `SessionCodec` | 本阶段类型与 JSON 之间的显式转换；消息子 codec 按文件可读性拆分 |
-| `SessionFile` | 一个已打开文件的读取、尾部定位、追加、锁与关闭 |
+| `SessionFileReader` | 一次性读取、格式校验与尾部诊断；解析结果交给 Manager 后不保留历史副本 |
+| `SessionFile` | 一个已打开 writer 的通道、Header、尾部位置、追加失败状态、锁与关闭，不长期复制 Entry/索引 |
+| `SessionFileAccess` | 窄的进程内 writer reservation 与同文件通道生命周期协调；活动 owner 的发现读取复用 owner 通道 |
 | `SessionContextBuilder` | 指定节点的标准消息与历史模型/thinking 元信息投影 |
 | `SessionSnapshot` / `SessionInfo` | 对外只读结果，不包含 Agent、工具实例、writer 或可执行回调 |
 | `SessionFiles` | 显式目录内的只读列表、最近项与 cwd 过滤 |
@@ -164,7 +166,7 @@ Header 独占首行，不是树节点：
 
 User 保留完整内容与时间；Assistant 保留内容、stop reason、error message、usage、timestamp、sourceModel、ResponseMetadata；ToolResult 保留 toolCallId、toolName、内容、error 和 timestamp。`Content.Text`、`Thinking`、`ToolCall`、`Image` 全部覆盖，不能把多模态或工具消息降格成一段显示文本。[J5]
 
-Text/Thinking 的 `ModelReplayState.format/payload` 原样保存为不透明数据，只有相应 provider adapter 解释。图片保留现有 mediaType/base64Data；不另建附件仓库。工具参数保留 JSON 数据类型与嵌套结构，不经 `toString()` 再猜测解析。[J5、J6]
+Text/Thinking 的 `ModelReplayState.format/payload` 原样保存为不透明数据，只有相应 provider adapter 解释。图片保留现有 mediaType/base64Data；不另建附件仓库。工具参数保留 JSON 数据类型与嵌套结构，不经 `toString()` 再猜测解析；JSON 浮点数直接读取为 `BigDecimal`，不能先经 `double` 丢失十进制精度。[J5、J6]
 
 终结为 ERROR/ABORTED 的标准 assistant 是正式终结消息，应记录。它与 `MessageUpdated` 中尚未终结的 partial assistant 不同。是否把终结失败消息送入 provider 请求，继续由已有请求投影规则决定。
 
@@ -218,9 +220,11 @@ Jcode 还没有已发布历史格式，本阶段没有真实 migration。交付�
 
 文件句柄生命周期内持有独占 `tryLock()`；锁冲突或同 JVM 重叠锁应明确失败，不等待、不重试、不自动抢占。取得锁后读取当前文件，避免先读旧视图再取得所有权。
 
+Java 原生文件锁与通道关闭按进程相关联：同 JVM 若为列表读取或重复 open 另开并关闭同文件通道，可能使原 owner 的锁失效。因此所有产品内同文件通道经过窄的 `SessionFileAccess` 协调：writer 在开通道前 reservation，活动 owner 的发现读取复用其通道，无 owner 的临时读取在完整通道生命周期内阻止 writer 开通道。该机制只保护本进程通道生命周期，跨进程排他仍由原生锁证明。
+
 Manager 的线程内操作仍受产品接纳规则控制，不能用操作系统文件锁代替 Java 线程同步。文件锁只协调遵守相同约定的写者，不阻止外部编辑器或不遵守锁的程序修改文件，也不声称是安全隔离。[K1]
 
-不支持所需文件锁的文件系统应给出明确错误，而不是静默降级成多写者。首版不增加关闭锁检测的策略开关、全局静态路径注册表、锁文件、心跳或租约。
+不支持所需文件锁的文件系统应给出明确错误，而不是静默降级成多写者。首版不增加可配置路径注册服务、关闭锁检测策略、锁文件、心跳或租约。
 
 ### 6.3 尾行与损坏文件
 
@@ -434,8 +438,8 @@ SessionInfo 包含 path、id、创建 cwd、name、created、modified 和 messag
 | 顺序接入 | 两个工具反向完成仍按MessageCompleted的源顺序落盘；每条消息只保存一次；steer/follow-up只在实际消费后入历史 |
 | 半成品 | 大量delta不入Session；终结ERROR/ABORTED正确保存；工具进度不伪装成ToolResult |
 | 文件边界 | 真实临时文件顺序追加、短写、完整末行无LF、截断JSON/UTF8尾片段、首次恢复后追加不粘行；中部/结构损坏不改文件 |
-| 单写者 | 同一文件第二写者被拒绝；关闭后可重开；锁不可用错误明确；锁与Java接纳职责分开 |
-| 故障一致性 | user已入历史后模型流sink失败；tool结果已入历史后宿主失败；下次请求含已接纳前缀且不重复；写入不确定后禁止继续追加 |
+| 单写者 | 同一文件第二写者被拒绝；列表读取和重复 open 失败后由独立 JVM 证明 owner 锁仍有效；关闭后可重开；锁不可用错误明确；锁与Java接纳职责分开 |
+| 故障一致性 | user已入历史后模型流sink失败；tool结果已入历史后宿主失败；下次请求含已接纳前缀且不重复；写入不确定后 `prompt`/`continue`/元信息在 provider 或新 Entry id 前拒绝 |
 | 生命周期 | run/reload/branch/metadata互斥；取消观察Future不取消真实操作；close不提前释放在途writer；失败完成回调可以在允许状态下重入 |
 | 恢复与配置 | 相同输入恢复前后标准请求历史等价；当前显式cwd/model差异可诊断；旧replay保留、adapter选择规则不变 |
 | 工具中断 | 恢复到存在未完成tool call的历史不调用工具；现有planner只在请求视图提供占位，不修改JSONL |
@@ -504,11 +508,12 @@ git diff --check
 ## 16. 实施与验证记录
 
 - 实施日期：2026-09-20；环境：macOS 27.0 arm64、Java 21.0.10、Maven 3.9.14。
-- `mvn -pl coding-agent -am test`：通过，共 546 个测试，0 failures/errors，10 个本地工具环境相关 skip。
-- `mvn clean verify`：通过，共 813 个测试，0 failures/errors，10 个本地工具环境相关 skip。
-- 严格 native smoke 使用 `/bin/bash`、`/opt/homebrew/bin/rg`、`/Users/quinncypp/.pi/agent/bin/fd` 运行 `mvn -pl coding-agent -am verify -Plocal-tools-smoke ...`：通过，共 546 个测试，0 failures/errors/skips。
+- `mvn -pl coding-agent -am test`：通过，共 548 个测试，0 failures/errors，10 个本地工具环境相关 skip。
+- `mvn clean verify`：通过，共 815 个测试，0 failures/errors，10 个本地工具环境相关 skip。
+- 严格 native smoke 使用 `/bin/bash`、`/opt/homebrew/bin/rg`、`/Users/quinncypp/.pi/agent/bin/fd` 运行 `mvn -pl coding-agent -am verify -Plocal-tools-smoke ...`：通过，共 548 个测试，0 failures/errors/skips。
 - `git diff --check`：通过。
 - 实现包含 4A～4D 的模型、文件、产品接入、并发生命周期、分支/元数据与发现测试；未引入跨文件 fork、cursor sidecar、provider 热切换、Compaction、Extension 或 UI。
+- 提交后审查加固了同 JVM 通道生命周期（并用独立 JVM 验证原生锁）、writer 失效前置拒绝、工具参数 `BigDecimal` 精度、Manager 唯一历史所有权，以及并行工具逆序完成的确定性 gate/latch 回归；没有扩展为通用锁或存储框架。
 
 ## 17. 参考依据与查阅位置
 

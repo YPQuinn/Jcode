@@ -98,6 +98,27 @@ class SessionManagerTest {
     }
 
     @Test
+    void loadedConfigurationComesFromCurrentLeafAncestryNotAbandonedBranch() throws Exception {
+        var otherModel = new ModelRef("test", "responses", "model-2");
+        var entries = List.<SessionEntry>of(
+                new ModelChangeEntry("model-one", null, T1, MODEL),
+                new ThinkingLevelChangeEntry("thinking-high", "model-one", T1, ThinkingLevel.HIGH),
+                new SessionMessageEntry("user", "thinking-high", T1, user("question")),
+                new ModelChangeEntry("model-two", "user", T1, otherModel),
+                new ThinkingLevelChangeEntry("thinking-low", "model-two", T1, ThinkingLevel.LOW),
+                new SessionMessageEntry("abandoned", "thinking-low", T1, assistant("abandoned")),
+                new SessionMessageEntry("alternate", "user", T2, assistant("alternate")));
+        var manager = new SessionManager(header(), entries, CLOCK, ids("next")::remove);
+
+        manager.appendCompletedMessage(assistant("next"), MODEL, ThinkingLevel.HIGH);
+
+        var snapshot = manager.snapshot();
+        assertEquals(8, snapshot.entries().size(),
+                "matching branch-local configuration must not append redundant change entries");
+        assertInstanceOf(SessionMessageEntry.class, snapshot.entries().getLast());
+    }
+
+    @Test
     void namesAndLabelsUseLatestAppendGloballyButNeverEnterContext() throws Exception {
         var manager = new SessionManager(header(), List.of(), CLOCK,
                 ids("message", "name-one", "label-one", "name-clear", "label-clear")::remove);

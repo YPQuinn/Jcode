@@ -42,6 +42,8 @@ final class SessionManager implements AutoCloseable {
     private final Map<String, String> labels = new HashMap<>();
     private String currentEntryId;
     private String name;
+    private ModelRef currentModel;
+    private ThinkingLevel currentThinkingLevel;
     private boolean closed;
 
     SessionManager(SessionHeader header, Clock clock) {
@@ -70,6 +72,7 @@ final class SessionManager implements AutoCloseable {
         this.sessionFile = sessionFile;
         Objects.requireNonNull(entries, "entries must not be null");
         entries.forEach(this::acceptExisting);
+        refreshCurrentConfiguration();
     }
 
     static SessionManager createFileBacked(
@@ -87,7 +90,7 @@ final class SessionManager implements AutoCloseable {
             Supplier<String> idGenerator
     ) throws IOException {
         var file = SessionFile.create(directory, header);
-        return ownedFileManager(file, clock, idGenerator);
+        return ownedFileManager(file, header, List.of(), clock, idGenerator);
     }
 
     static SessionManager openFileBacked(Path path, Clock clock) throws IOException {
@@ -99,8 +102,9 @@ final class SessionManager implements AutoCloseable {
             Clock clock,
             Supplier<String> idGenerator
     ) throws IOException {
-        var file = SessionFile.open(path);
-        return ownedFileManager(file, clock, idGenerator);
+        var opened = SessionFile.openLoaded(path);
+        return ownedFileManager(
+                opened.file(), opened.loaded().header(), opened.loaded().entries(), clock, idGenerator);
     }
 
     static SessionManager openFileBacked(
@@ -109,8 +113,9 @@ final class SessionManager implements AutoCloseable {
             Supplier<String> idGenerator,
             SessionFile.SessionByteWriterFactory writerFactory
     ) throws IOException {
-        var file = SessionFile.open(path, writerFactory);
-        return ownedFileManager(file, clock, idGenerator);
+        var opened = SessionFile.openLoaded(path, writerFactory);
+        return ownedFileManager(
+                opened.file(), opened.loaded().header(), opened.loaded().entries(), clock, idGenerator);
     }
 
     synchronized SessionMessageEntry appendMessage(StandardAgentMessage message) throws IOException {
@@ -123,10 +128,10 @@ final class SessionManager implements AutoCloseable {
             ModelRef model,
             ThinkingLevel thinkingLevel
     ) throws IOException {
-        if (!Objects.equals(latestModelOnCurrentBranch(), model)) {
+        if (!Objects.equals(currentModel, model)) {
             appendModelChange(model);
         }
-        if (latestThinkingOnCurrentBranch() != thinkingLevel) {
+        if (currentThinkingLevel != thinkingLevel) {
             appendThinkingLevelChange(thinkingLevel);
         }
         return appendMessage(message);
@@ -148,7 +153,7 @@ final class SessionManager implements AutoCloseable {
     }
 
     synchronized LabelEntry setLabel(String targetId, String label) throws IOException {
-        requireOpen();
+        requireWritable();
         requireEntry(targetId);
         return append(id -> new LabelEntry(
                 id, currentEntryId, clock.instant(), targetId, label));
@@ -157,11 +162,14 @@ final class SessionManager implements AutoCloseable {
     synchronized void branch(String entryId) {
         requireOpen();
         currentEntryId = requireEntry(entryId).id();
+        refreshCurrentConfiguration();
     }
 
     synchronized void resetLeaf() {
         requireOpen();
         currentEntryId = null;
+        currentModel = null;
+        currentThinkingLevel = null;
     }
 
     synchronized SessionSnapshot snapshot() {
@@ -174,6 +182,13 @@ final class SessionManager implements AutoCloseable {
 
     SessionFileReader.TailRecovery recovery() {
         return sessionFile == null ? null : sessionFile.recovery();
+    }
+
+    synchronized void requireWritable() throws IOException {
+        requireOpen();
+        if (sessionFile != null) {
+            sessionFile.requireWritable();
+        }
     }
 
     @Override
@@ -189,7 +204,7 @@ final class SessionManager implements AutoCloseable {
 
     private <T extends SessionEntry> T append(java.util.function.Function<String, T> factory)
             throws IOException {
-        requireOpen();
+        requireWritable();
         var entry = factory.apply(nextId());
         SessionEntries.validateNext(entry, byId);
         if (sessionFile != null) {
@@ -206,32 +221,31 @@ final class SessionManager implements AutoCloseable {
         entries.add(entry);
         byId.put(entry.id(), entry);
         currentEntryId = entry.id();
-        applyMetadata(entry);
+        applyDerivedState(entry);
     }
 
-    private ModelRef latestModelOnCurrentBranch() {
+    private void refreshCurrentConfiguration() {
+        currentModel = null;
+        currentThinkingLevel = null;
         var entry = currentEntryId == null ? null : byId.get(currentEntryId);
-        while (entry != null) {
-            if (entry instanceof ModelChangeEntry modelChange) {
-                return modelChange.model();
+        while (entry != null && (currentModel == null || currentThinkingLevel == null)) {
+            if (currentModel == null && entry instanceof ModelChangeEntry modelChange) {
+                currentModel = modelChange.model();
+            }
+            if (currentThinkingLevel == null
+                    && entry instanceof ThinkingLevelChangeEntry thinkingChange) {
+                currentThinkingLevel = thinkingChange.thinkingLevel();
             }
             entry = entry.parentId() == null ? null : byId.get(entry.parentId());
         }
-        return null;
     }
 
-    private ThinkingLevel latestThinkingOnCurrentBranch() {
-        var entry = currentEntryId == null ? null : byId.get(currentEntryId);
-        while (entry != null) {
-            if (entry instanceof ThinkingLevelChangeEntry thinkingChange) {
-                return thinkingChange.thinkingLevel();
-            }
-            entry = entry.parentId() == null ? null : byId.get(entry.parentId());
+    private void applyDerivedState(SessionEntry entry) {
+        if (entry instanceof ModelChangeEntry modelChange) {
+            currentModel = modelChange.model();
+        } else if (entry instanceof ThinkingLevelChangeEntry thinkingChange) {
+            currentThinkingLevel = thinkingChange.thinkingLevel();
         }
-        return null;
-    }
-
-    private void applyMetadata(SessionEntry entry) {
         if (entry instanceof SessionInfoEntry info) {
             name = info.name();
         } else if (entry instanceof LabelEntry label) {
@@ -260,11 +274,13 @@ final class SessionManager implements AutoCloseable {
 
     private static SessionManager ownedFileManager(
             SessionFile file,
+            SessionHeader header,
+            List<? extends SessionEntry> entries,
             Clock clock,
             Supplier<String> idGenerator
     ) throws IOException {
         try {
-            return new SessionManager(file.header(), file.entries(), clock, idGenerator, file);
+            return new SessionManager(header, entries, clock, idGenerator, file);
         } catch (RuntimeException | Error failure) {
             try {
                 file.close();

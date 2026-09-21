@@ -28,7 +28,8 @@ final class SessionCodec {
 
     SessionCodec() {
         this.mapper = new ObjectMapper()
-                .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+                .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
         this.messages = new SessionMessageCodec(mapper);
     }
 

@@ -124,7 +124,7 @@ final class BuiltInTools {
         private final List<AutoCloseable> resources;
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        private ToolSet(List<AgentTool<?>> tools, List<AutoCloseable> resources) {
+        ToolSet(List<AgentTool<?>> tools, List<AutoCloseable> resources) {
             this.tools = List.copyOf(tools);
             this.resources = List.copyOf(resources);
         }

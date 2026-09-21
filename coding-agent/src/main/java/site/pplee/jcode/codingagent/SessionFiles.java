@@ -8,12 +8,10 @@ import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.NotDirectoryException;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -91,8 +89,8 @@ public final class SessionFiles {
             List<SessionInfo> sessions,
             List<SessionFileDiagnostic> diagnostics
     ) {
-        try (var channel = FileChannel.open(path, StandardOpenOption.READ)) {
-            var loaded = new SessionFileReader(path, new SessionCodec()).read(channel);
+        try {
+            var loaded = SessionFileAccess.read(path);
             var info = summarize(path, loaded);
             if (cwdFilter == null || info.cwd().equals(cwdFilter)) {
                 sessions.add(info);

@@ -22,6 +22,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -51,7 +52,7 @@ class SessionFileTest {
 
             file.append(message("one", null, "第一行\n第二行"));
             file.append(message("two", "one", "second"));
-            assertEquals(List.of("one", "two"), file.entries().stream().map(SessionEntry::id).toList());
+            assertEquals(List.of("one", "two"), entryIds(path));
         }
 
         var complete = Files.readAllBytes(path);
@@ -61,9 +62,7 @@ class SessionFileTest {
 
         try (var reopened = SessionFile.open(path)) {
             assertEquals(header, reopened.header());
-            assertEquals(List.of("one", "two"), reopened.entries().stream()
-                    .map(SessionEntry::id)
-                    .toList());
+            assertEquals(List.of("one", "two"), entryIds(path));
             assertNull(reopened.recovery());
         }
     }
@@ -104,16 +103,14 @@ class SessionFileTest {
             assertNotNull(recovery);
             assertEquals(SessionFileReader.TailReason.TRUNCATED_JSON, recovery.reason());
             assertArrayEquals(beforeOpen, Files.readAllBytes(path), "open must not repair the file");
-            assertEquals(List.of("one"), reopened.entries().stream().map(SessionEntry::id).toList());
+            assertEquals(List.of("one"), entryIds(path));
 
             reopened.append(message("two", "one", "two"));
             assertNull(reopened.recovery());
         }
 
         try (var verified = SessionFile.open(path)) {
-            assertEquals(List.of("one", "two"), verified.entries().stream()
-                    .map(SessionEntry::id)
-                    .toList());
+            assertEquals(List.of("one", "two"), entryIds(path));
         }
         assertFalse(Files.readString(path).contains("{\"type\":\"message\"{\"type\""));
     }
@@ -234,16 +231,25 @@ class SessionFileTest {
     }
 
     @Test
-    void fileHasOneWriterAndCanBeReopenedAfterOwnerCloses() throws Exception {
+    void readsAndRejectedDuplicateOpenDoNotReleaseOwnerLockInAnotherJvm() throws Exception {
         Path path;
         var owner = SessionFile.create(tempDir, header());
         path = owner.path();
         try {
+            assertFalse(externalProcessCanAcquire(path));
+
+            assertEquals(1, SessionFiles.list(tempDir).sessions().size());
+            assertFalse(externalProcessCanAcquire(path),
+                    "a discovery read must reuse the active owner's channel");
+
             assertThrows(SessionFileLockException.class, () -> SessionFile.open(path));
+            assertFalse(externalProcessCanAcquire(path),
+                    "a rejected duplicate writer must not open and close another channel");
         } finally {
             owner.close();
         }
 
+        assertTrue(externalProcessCanAcquire(path));
         try (var reopened = SessionFile.open(path)) {
             reopened.append(message("one", null, "one"));
         }
@@ -261,7 +267,7 @@ class SessionFileTest {
         }
 
         try (var verified = SessionFile.open(path)) {
-            assertEquals("one", verified.entries().getFirst().id());
+            assertEquals(List.of("one"), entryIds(path));
         }
     }
 
@@ -280,7 +286,7 @@ class SessionFileTest {
                     () -> file.append(message("one", null, "one")));
             assertTrue(first.getMessage().contains("injected"));
             assertTrue(file.writeFailed());
-            assertTrue(file.entries().isEmpty());
+            assertTrue(SessionFileAccess.read(path).entries().isEmpty());
             var sizeAfterFailure = Files.size(path);
 
             var second = assertThrows(IOException.class,
@@ -307,6 +313,34 @@ class SessionFileTest {
             assertTrue(failure.getMessage().contains("no progress"));
             assertTrue(file.writeFailed());
         }
+    }
+
+    private static boolean externalProcessCanAcquire(Path path) throws Exception {
+        var java = Path.of(System.getProperty("java.home"), "bin", "java");
+        var testClasses = Path.of(SessionLockProbe.class.getProtectionDomain()
+                .getCodeSource().getLocation().toURI());
+        var process = new ProcessBuilder(
+                java.toString(),
+                "-cp",
+                testClasses.toString(),
+                SessionLockProbe.class.getName(),
+                path.toString())
+                .redirectErrorStream(true)
+                .start();
+        if (!process.waitFor(10, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS),
+                    "session lock probe did not terminate after forced destruction");
+            throw new AssertionError("session lock probe timed out");
+        }
+        var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertTrue(process.exitValue() == 0 || process.exitValue() == 2,
+                () -> "unexpected session lock probe exit " + process.exitValue() + ": " + output);
+        return process.exitValue() == 0;
+    }
+
+    private static List<String> entryIds(Path path) throws IOException {
+        return SessionFileAccess.read(path).entries().stream().map(SessionEntry::id).toList();
     }
 
     private SessionHeader header() {

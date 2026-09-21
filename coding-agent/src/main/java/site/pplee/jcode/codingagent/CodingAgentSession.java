@@ -111,6 +111,15 @@ public final class CodingAgentSession implements AutoCloseable {
             ContextLoader contextLoader,
             SessionManager sessionManager
     ) {
+        this(config, contextLoader, sessionManager, null);
+    }
+
+    CodingAgentSession(
+            CodingAgentConfig config,
+            ContextLoader contextLoader,
+            SessionManager sessionManager,
+            BuiltInTools.ToolSet suppliedToolSet
+    ) {
         Objects.requireNonNull(config, "config must not be null");
         this.contextLoader = Objects.requireNonNull(contextLoader, "contextLoader must not be null");
         this.sessionManager = Objects.requireNonNull(sessionManager, "sessionManager must not be null");
@@ -127,7 +136,9 @@ public final class CodingAgentSession implements AutoCloseable {
         this.projectContext = projectContextConfig.enabled()
                 ? contextLoader.load(workingDirectory, projectContextConfig, 1, initialCancellation.signal())
                 : ProjectContextSnapshot.disabled(workingDirectory);
-        var createdToolSet = BuiltInTools.create(workingDirectory, config.tools());
+        var createdToolSet = suppliedToolSet == null
+                ? BuiltInTools.create(workingDirectory, config.tools())
+                : suppliedToolSet;
         Agent createdAgent;
         try {
             var tools = createdToolSet.tools();
@@ -197,6 +208,11 @@ public final class CodingAgentSession implements AutoCloseable {
             ensureOpen();
             if (running || reloading || historyOperation) {
                 throw new IllegalStateException("coding-agent session is busy");
+            }
+            try {
+                sessionManager.requireWritable();
+            } catch (IOException failure) {
+                return CompletableFuture.failedFuture(failure);
             }
             running = true;
             try {
