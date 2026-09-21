@@ -27,6 +27,7 @@ import site.pplee.jcode.codingagent.context.ProjectContextFailureMode;
 import site.pplee.jcode.codingagent.context.ProjectContextLoadException;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
 import site.pplee.jcode.codingagent.support.ReloadGate;
+import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.support.ScriptedModelClient;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 
@@ -199,6 +200,10 @@ class CodingAgentSessionTest {
             assertTrue(observation.isCancelled());
             assertTrue(session.isReloading());
             assertThrows(IllegalStateException.class, () -> session.prompt("still reloading"));
+            assertThrows(IllegalStateException.class, () -> session.branch("missing"));
+            assertThrows(IllegalStateException.class, session::resetLeaf);
+            assertThrows(IllegalStateException.class, () -> session.setName("busy"));
+            assertThrows(IllegalStateException.class, () -> session.setLabel("missing", "busy"));
 
             gate.close();
             Thread worker = reloadWorker.get();
@@ -368,6 +373,7 @@ class CodingAgentSessionTest {
             session.abort();
 
             assertTrue(result.toCompletableFuture().join().aborted());
+            assertEquals(StopReason.ABORTED, lastStoredAssistant(session).stopReason());
             assertEquals("done", text(session.prompt("next prompt").toCompletableFuture()
                     .join().finalMessage()));
             assertEquals(3, client.requests.size());
@@ -389,6 +395,7 @@ class CodingAgentSessionTest {
 
             var failureResult = failedRun.toCompletableFuture().join();
             assertEquals(StopReason.ERROR, failureResult.finalMessage().stopReason());
+            assertEquals(StopReason.ERROR, lastStoredAssistant(session).stopReason());
             assertEquals("model failed", session.state().errorMessage());
             assertEquals("done", text(session.prompt("next prompt").toCompletableFuture()
                     .join().finalMessage()));
@@ -409,6 +416,7 @@ class CodingAgentSessionTest {
         session.close();
 
         assertTrue(result.toCompletableFuture().join().aborted());
+        assertEquals(StopReason.ABORTED, lastStoredAssistant(session).stopReason());
         assertFalse(session.isRunning());
         assertThrows(IllegalStateException.class, () -> session.prompt("closed"));
     }
@@ -540,6 +548,17 @@ class CodingAgentSessionTest {
     private static Message.Assistant assistant(String text) {
         return new Message.Assistant(List.of(new Content.Text(text)), StopReason.STOP,
                 null, Usage.zero(), Instant.EPOCH, MODEL);
+    }
+
+    private static Message.Assistant lastStoredAssistant(CodingAgentSession session) {
+        return session.history().entries().stream()
+                .filter(SessionMessageEntry.class::isInstance)
+                .map(SessionMessageEntry.class::cast)
+                .map(entry -> entry.message().message())
+                .filter(Message.Assistant.class::isInstance)
+                .map(Message.Assistant.class::cast)
+                .reduce((ignored, latest) -> latest)
+                .orElseThrow();
     }
 
     private static String text(Message.Assistant assistant) {

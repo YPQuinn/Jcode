@@ -15,7 +15,7 @@
 Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它将模型协议、Provider 适配、通用 Agent Loop 与编码产品能力拆分为边界清晰的库模块，使应用可以显式选择模型、工具、权限策略、上下文与生命周期行为，而不依赖全局注册表或自动扫描。
 
 > [!IMPORTANT]
-> Jcode 当前处于开发阶段，版本为 `1.0-SNAPSHOT`，需要从源码构建。仓库只提供可嵌入的库模块，不包含 CLI、TUI、HTTP Server 或 Spring Boot 启动入口；Session 持久化、Compaction、产品级配置/凭证解析和 Extension 系统也尚未实现。
+> Jcode 当前处于开发阶段，版本为 `1.0-SNAPSHOT`，需要从源码构建。仓库只提供可嵌入的库模块，不包含 CLI、TUI、HTTP Server 或 Spring Boot 启动入口；Compaction、产品级配置/凭证解析和 Extension 系统也尚未实现。
 
 ## 核心特性
 
@@ -24,7 +24,8 @@ Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它�
 - **通用 Agent Runtime**：支持 steering、follow-up、背压事件、不可变状态快照与单 active run 生命周期。
 - **统一工具管道**：工具调用遵循 `prepare → execute → finalize`，支持顺序/并行执行及 `BeforeToolCall`、`AfterToolCall` hook。
 - **OpenAI Responses 适配**：基于 JDK `HttpClient` 与 Jackson 实现 HTTP/SSE，不依赖 Provider SDK；支持显式凭证、自定义 endpoint、兼容性、定价和有界重试配置。
-- **Headless 编码能力**：通过 `CodingAgentSession` 提供 prompt、steer、follow-up、abort、状态与产品事件接口。
+- **Headless 编码能力**：通过 `CodingAgentSession` 提供 prompt、continue、steer、follow-up、abort、状态与产品事件接口。
+- **Session 树与持久化**：支持默认内存历史、显式 JSONL create/open、append-only 分支、名称/标签、恢复诊断，以及显式目录的 list/latest/cwd 过滤。
 - **本地编码工具**：内置 `read`、`write`、`edit`、`bash`、`grep`、`find`、`ls`，工具集与授权策略均由调用方显式配置。
 - **项目指令发现**：沿配置工作目录的词法祖先链依次尝试 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，生成不可变上下文快照并组装 system prompt。
 
@@ -143,13 +144,18 @@ try (var provider = new OpenAiProvider(providerConfig)) {
 
 `CodingAgentSession` 还提供：
 
+- `continueRun()`：从当前 leaf 的历史继续运行，不追加新的用户输入；
 - `steer(String)`：向正在运行的任务加入 steering 消息；
 - `followUp(String)`：排队后续任务；
 - `abort()`：取消当前运行；
 - `state()` / `isRunning()`：读取不可变状态快照；
-- `reloadProjectContext()`：在空闲边界重新发现项目指令。
+- `reloadProjectContext()`：在空闲边界重新发现项目指令；
+- `history()`、`branch(entryId)`、`resetLeaf()`：读取或切换 append-only 历史分支；
+- `setName()`、`setLabel()`：追加名称或节点标签元数据。
 
-同目录中高优先级候选缺失、不是普通文件、不可读或不是合法 UTF-8 时，会继续尝试下一候选。System prompt 保留来源路径标记，但项目指令正文逐字拼接，不进行 XML 转义；总加载保留 1 MiB 聚合实际读取上限。Git worktree 识别失败不会阻止普通项目指令加载。
+默认构造只使用内存历史。文件模式必须由宿主显式调用 `CodingAgentSession.create(config, sessionDirectory)` 或 `open(config, sessionFile)`；可通过 `SessionFiles.list/latest` 扫描显式目录并按可选 cwd 过滤。`branch()` / `resetLeaf()` 不回滚工作区文件，`open()` 以调用方当前模型、工具和配置为准。普通 JSONL append 不逐条 `force()`，因此不承诺断电 durability。
+
+同目录中高优先级项目指令候选缺失、不是普通文件、不可读或不是合法 UTF-8 时，会继续尝试下一候选。System prompt 保留来源路径标记，但项目指令正文逐字拼接，不进行 XML 转义；总加载保留 1 MiB 聚合实际读取上限。Git worktree 识别失败不会阻止普通项目指令加载。
 
 ### 配置本地工具
 

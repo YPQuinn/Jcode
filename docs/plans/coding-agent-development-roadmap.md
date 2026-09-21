@@ -1,6 +1,6 @@
 # Coding Agent 总开发计划
 
-> 状态：进行中（阶段一、阶段二、阶段三已完成）
+> 状态：进行中（阶段一、阶段二、阶段三、阶段四已完成）
 >
 > Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
 >
@@ -15,6 +15,8 @@
 > 第二阶段实施计划（已完成）：[`archived/coding-agent-phase-2-local-tools.md`](archived/coding-agent-phase-2-local-tools.md)
 >
 > 第三阶段实施计划（已完成）：[`archived/coding-agent-phase-3-project-context.md`](archived/coding-agent-phase-3-project-context.md)
+>
+> 第四阶段实施计划（已完成）：[`archived/coding-agent-phase-4-session-persistence.md`](archived/coding-agent-phase-4-session-persistence.md)
 >
 > 实施范围：阶段一至阶段七；不包含 TUI、Server 或其他产品入口
 
@@ -104,10 +106,8 @@ Jcode 已通过第一阶段创建 `coding-agent`，把现有 provider-neutral �
 
 ### 2.2 产品层缺口
 
-第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果；第二阶段已补齐显式授权的本地编码工具闭环。当前仍需补齐：
+第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果；第二阶段已补齐显式授权的本地编码工具闭环；第三阶段已完成项目上下文发现；第四阶段已完成 append-only Session 树、固定 JSONL 持久化、显式 create/open、继续与分支、名称标签、坏文件隔离和 list/latest/cwd 过滤。当前仍需补齐：
 
-- AGENTS.md 等项目上下文发现；
-- Session 持久化、恢复与分支；
 - 产品设置、默认模型与凭证装配；
 - context window 策略和 compaction；
 - Skill、Prompt Template、Resource Loader、Extension；
@@ -127,7 +127,7 @@ pi 的 `AgentSession` 同时编排模型、工具、持久化、compaction、资
 |---|---|
 | `AgentSession` | `CodingAgentSession` 产品门面 |
 | `createAgentSession()` | 显式配置和 session factory |
-| `SessionManager` | append-only Session tree 与 JSONL codec |
+| `SessionManager` | append-only Session tree、JSONL codec 与单写者文件所有权 |
 | `ModelRuntime` | 优先复用 `ai.Models`；产品层只补配置和选择策略 |
 | `buildSystemPrompt()` | 纯 `SystemPromptBuilder` |
 | `ResourceLoader` | 有诊断结果的显式资源加载器 |
@@ -428,6 +428,8 @@ Prompt 中的项目来源标签只用于标记边界：路径属性单独转义�
 
 建立 append-only、可恢复、可分支的产品历史，不把数据库或 UI 引入核心路径。
 
+第四阶段已完成：包内提供内存/文件共用的 Session 树、固定显式 JSON codec、独占 writer 锁、顺序短写处理和可诊断 EOF 尾片段恢复。产品 `CodingAgentSession` 提供默认内存历史、显式文件 create/open、真实 `MessageCompleted` 持久化、恢复诊断、`continueRun()`、idle-only branch/reset/name/label；`SessionFiles` 提供显式目录的 list/latest/cwd 过滤和逐文件坏文件诊断。基础设施失败后会按已接纳历史对齐运行时 transcript，close 不会提前释放在途 writer。
+
 ### 9.2 数据模型
 
 Session 文件由一条 header 和多条 entry 组成：
@@ -437,19 +439,19 @@ SessionHeader
 SessionEntry(id, parentId, timestamp, type, payload)
 ```
 
-首批 entry 至少包括：
+首版 entry 固定为五种：
 
 - standard message；
 - model change；
 - thinking-level change；
-- compaction；
-- branch summary；
-- label/session info；
-- typed custom entry。
+- session info；
+- label。
+
+Compaction/branch summary 由阶段六增加；typed custom/custom message 由阶段七增加，并由对应阶段定义模型投影语义。
 
 ### 9.3 必须交付
 
-- schema version 和显式 migration；
+- 首版 schema version 和未知版本拒绝；出现真实旧版本后再增加实际 migration；
 - 短 id 生成与冲突检测；
 - append-only JSONL writer；
 - trailing partial line 和损坏 entry 的确定处理；
@@ -458,7 +460,7 @@ SessionEntry(id, parentId, timestamp, type, payload)
 - 从指定 leaf 重建模型 context；
 - Session 列表、最近 Session 和 cwd 过滤；
 - 消息完成后持久化，partial/update 不落盘；
-- 切换分支时在 idle 边界重建底层 Agent。
+- 同一会话切换分支时，在 idle 边界使用通用消息替换更新底层 Agent；只有 create/open 新对象才新建 Agent。
 
 ### 9.4 持久化边界
 
@@ -470,10 +472,11 @@ SessionEntry(id, parentId, timestamp, type, payload)
 
 ### 9.5 阶段门槛
 
-- 新建、追加、恢复、分支、迁移和损坏文件测试完整；
+- 新建、追加、恢复、分支、版本拒绝和损坏文件测试完整；
 - 恢复后的模型请求 transcript 与保存前等价；
-- 工具调用/结果配对不会因分支或恢复而破坏；
-- 进程中断不会使已完成 JSONL 行不可解析。
+- 分支与恢复不改写原始消息顺序和关系；中断产生的未配对历史由 provider 请求投影层处理，不重放工具、不伪造工具结果；
+- 正常追加保留既有完整 JSONL 行，EOF 截断有可诊断处理；不承诺断电 durability 或不合作外部写者的行为；
+- 文件句柄执行单写者检测，不实现多写者协同。
 
 ## 10. 阶段五：配置、模型与凭证装配
 

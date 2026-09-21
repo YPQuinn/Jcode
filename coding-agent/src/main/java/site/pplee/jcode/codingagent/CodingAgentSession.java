@@ -3,6 +3,8 @@ package site.pplee.jcode.codingagent;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.model.ModelRef;
+import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.ai.tool.ToolSpec;
 import site.pplee.jcode.agentcore.Agent;
 import site.pplee.jcode.agentcore.AgentConfig;
@@ -11,6 +13,7 @@ import site.pplee.jcode.agentcore.concurrent.CancellationSource;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.ContextTransformer;
 import site.pplee.jcode.agentcore.message.MessageProjector;
+import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.tool.AfterToolCall;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
 import site.pplee.jcode.agentcore.turn.PrepareNextTurn;
@@ -20,13 +23,24 @@ import site.pplee.jcode.codingagent.context.ProjectContextDiagnostic;
 import site.pplee.jcode.codingagent.context.ProjectContextLoader;
 import site.pplee.jcode.codingagent.context.ProjectContextSnapshot;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
+import site.pplee.jcode.codingagent.event.CodingAgentEventSink;
 import site.pplee.jcode.codingagent.internal.SnapshotMapper;
 import site.pplee.jcode.codingagent.prompt.SystemPromptBuilder;
+import site.pplee.jcode.codingagent.session.LabelEntry;
+import site.pplee.jcode.codingagent.session.SessionContextBuilder;
+import site.pplee.jcode.codingagent.session.SessionDiagnostic;
+import site.pplee.jcode.codingagent.session.SessionHeader;
+import site.pplee.jcode.codingagent.session.SessionInfoEntry;
+import site.pplee.jcode.codingagent.session.SessionSnapshot;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -46,6 +60,10 @@ public final class CodingAgentSession implements AutoCloseable {
     private final BuiltInTools.ToolSet toolSet;
     private final Path workingDirectory;
     private final Clock clock;
+    private final SessionManager sessionManager;
+    private final List<SessionDiagnostic> sessionDiagnostics;
+    private final ModelRef model;
+    private final ThinkingLevel thinkingLevel;
     private final ExecutorService reloadExecutor;
     // Remains set through callbacks, including callbacks that admit another reload.
     private final ThreadLocal<Boolean> reloadWorker = new ThreadLocal<>();
@@ -58,17 +76,49 @@ public final class CodingAgentSession implements AutoCloseable {
     private CancellationSource reloadSource;
     private boolean running;
     private boolean reloading;
+    private boolean historyOperation;
     private boolean closed;
 
     public CodingAgentSession(CodingAgentConfig config) {
-        this(config, ProjectContextLoader::load);
+        this(config, ProjectContextLoader::load, newInMemoryManager(config));
+    }
+
+    /** Create a new file-backed session and acquire exclusive ownership of its file. */
+    public static CodingAgentSession create(CodingAgentConfig config, Path sessionDirectory)
+            throws IOException {
+        Objects.requireNonNull(config, "config must not be null");
+        var header = new SessionHeader(
+                UUID.randomUUID(), config.clock().instant(), config.workingDirectory());
+        var manager = SessionManager.createFileBacked(
+                header, sessionDirectory, config.clock());
+        return constructWithOwnedManager(config, manager);
+    }
+
+    /** Open an existing file-backed session and acquire exclusive ownership of its file. */
+    public static CodingAgentSession open(CodingAgentConfig config, Path sessionFile)
+            throws IOException {
+        Objects.requireNonNull(config, "config must not be null");
+        var manager = SessionManager.openFileBacked(sessionFile, config.clock());
+        return constructWithOwnedManager(config, manager);
     }
 
     CodingAgentSession(CodingAgentConfig config, ContextLoader contextLoader) {
+        this(config, contextLoader, newInMemoryManager(config));
+    }
+
+    CodingAgentSession(
+            CodingAgentConfig config,
+            ContextLoader contextLoader,
+            SessionManager sessionManager
+    ) {
         Objects.requireNonNull(config, "config must not be null");
         this.contextLoader = Objects.requireNonNull(contextLoader, "contextLoader must not be null");
+        this.sessionManager = Objects.requireNonNull(sessionManager, "sessionManager must not be null");
         this.workingDirectory = config.workingDirectory();
+        this.sessionDiagnostics = buildSessionDiagnostics(sessionManager, workingDirectory);
         this.clock = config.clock();
+        this.model = config.model();
+        this.thinkingLevel = config.thinkingLevel();
         this.projectContextConfig = config.projectContext();
         this.customSystemPrompt = config.customSystemPrompt();
         this.appendSystemPrompt = config.appendSystemPrompt();
@@ -88,7 +138,8 @@ public final class CodingAgentSession implements AutoCloseable {
                     customSystemPrompt,
                     appendSystemPrompt,
                     projectContext.files());
-            var context = new AgentContext(systemPrompt, List.of(), tools);
+            var restored = SessionContextBuilder.build(sessionManager.snapshot());
+            var context = new AgentContext(systemPrompt, restored.messages(), tools);
             var eventSink = config.eventSink();
             createdAgent = new Agent(new AgentConfig(
                     context,
@@ -100,29 +151,20 @@ public final class CodingAgentSession implements AutoCloseable {
                     ToolExecutionMode.PARALLEL,
                     CodingToolPolicyAdapter.adapt(config.tools().policy(), workingDirectory),
                     AfterToolCall.noop(),
-                    event -> {
-                        CodingAgentEvent productEvent = event instanceof AgentEvent.AgentCompleted completed
-                                ? new CodingAgentEvent.RunCompleted(SnapshotMapper.runResult(completed.result()))
-                                : new CodingAgentEvent.RuntimeEvent(event);
-                        var stage = eventSink.emit(productEvent);
-                        if (stage == null) {
-                            throw new IllegalStateException("coding event sink returned null stage");
-                        }
-                        return stage;
-                    },
+                    event -> emitProductEvent(event, eventSink),
                     config.steeringMode(),
                     config.followUpMode(),
                     config.thinkingLevel(),
                     PrepareNextTurn.noop(),
                     ShouldStopAfterTurn.never(),
                     config.requestOptions()));
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error failure) {
             try {
                 createdToolSet.close();
-            } catch (RuntimeException closeFailure) {
-                e.addSuppressed(closeFailure);
+            } catch (RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
             }
-            throw e;
+            throw failure;
         }
         this.toolSet = createdToolSet;
         this.agent = createdAgent;
@@ -130,45 +172,83 @@ public final class CodingAgentSession implements AutoCloseable {
                 ? Executors.newVirtualThreadPerTaskExecutor() : null;
     }
 
-    /** Start a run with one text user message; concurrent runs fail fast. */
+    /**
+     * Start a run with one text user message; concurrent runs fail fast.
+     * Cancelling the returned observation stage does not cancel the accepted run.
+     */
     public CompletionStage<CodingAgentRunResult> prompt(String text) {
         Message.User message = userMessage(text);
+        return startRun(() -> agent.prompt(message));
+    }
+
+    /**
+     * Continue from a user or tool-result leaf without synthesizing another user message.
+     * Cancelling the returned observation stage does not cancel the accepted run.
+     */
+    public CompletionStage<CodingAgentRunResult> continueRun() {
+        return startRun(agent::continueRun);
+    }
+
+    private CompletionStage<CodingAgentRunResult> startRun(
+            java.util.function.Supplier<CompletionStage<site.pplee.jcode.agentcore.LoopResult>> starter
+    ) {
         CompletionStage<site.pplee.jcode.agentcore.LoopResult> runtimeStage;
         synchronized (lifecycleLock) {
             ensureOpen();
-            if (running || reloading) {
+            if (running || reloading || historyOperation) {
                 throw new IllegalStateException("coding-agent session is busy");
             }
             running = true;
             try {
-                runtimeStage = agent.prompt(message);
-            } catch (RuntimeException e) {
+                runtimeStage = starter.get();
+            } catch (RuntimeException | Error failure) {
                 running = false;
-                throw e;
+                throw failure;
             }
         }
 
         var productStage = new CompletableFuture<CodingAgentRunResult>();
-        runtimeStage.whenComplete((runtimeResult, failure) -> {
-            CodingAgentRunResult productResult = null;
-            Throwable completionFailure = failure;
-            if (completionFailure == null) {
+        runtimeStage.whenComplete((runtimeResult, failure) ->
+                finishRun(runtimeResult, failure, productStage));
+        return productStage.copy();
+    }
+
+    private void finishRun(
+            site.pplee.jcode.agentcore.LoopResult runtimeResult,
+            Throwable failure,
+            CompletableFuture<CodingAgentRunResult> productStage
+    ) {
+        CodingAgentRunResult productResult = null;
+        Throwable completionFailure = failure;
+        if (completionFailure == null) {
+            try {
+                productResult = SnapshotMapper.runResult(runtimeResult);
+            } catch (RuntimeException | Error mappingFailure) {
+                completionFailure = mappingFailure;
+            }
+        }
+
+        boolean closeManager;
+        synchronized (lifecycleLock) {
+            if (failure != null && !closed) {
                 try {
-                    productResult = SnapshotMapper.runResult(runtimeResult);
-                } catch (RuntimeException e) {
-                    completionFailure = e;
+                    agent.replaceMessages(
+                            SessionContextBuilder.build(sessionManager.snapshot()).messages());
+                } catch (RuntimeException | Error alignmentFailure) {
+                    failure.addSuppressed(alignmentFailure);
                 }
             }
-            synchronized (lifecycleLock) {
-                running = false;
-            }
-            if (completionFailure != null) {
-                productStage.completeExceptionally(completionFailure);
-            } else {
-                productStage.complete(productResult);
-            }
-        });
-        return productStage;
+            running = false;
+            closeManager = closed;
+        }
+        if (closeManager) {
+            completionFailure = closeManager(completionFailure);
+        }
+        if (completionFailure != null) {
+            productStage.completeExceptionally(completionFailure);
+        } else {
+            productStage.complete(productResult);
+        }
     }
 
     /** Queue a steering message while this session run is admitted. */
@@ -234,7 +314,7 @@ public final class CodingAgentSession implements AutoCloseable {
         long revision;
         synchronized (lifecycleLock) {
             ensureOpen();
-            if (running || reloading) {
+            if (running || reloading || historyOperation) {
                 throw new IllegalStateException("coding-agent session is busy");
             }
             if (!projectContextConfig.enabled()) {
@@ -332,12 +412,107 @@ public final class CodingAgentSession implements AutoCloseable {
         return workingDirectory;
     }
 
+    /** Return an immutable point-in-time view of the accepted product history. */
+    public SessionSnapshot history() {
+        return sessionManager.snapshot();
+    }
+
+    /**
+     * Select an existing history node and replace the idle runtime transcript
+     * with its root-to-node message path. Pending queues remain owned by this object.
+     */
+    public void branch(String entryId) {
+        Objects.requireNonNull(entryId, "entryId must not be null");
+        admitHistoryOperation();
+        Throwable failure = null;
+        try {
+            var messages = SessionContextBuilder.build(sessionManager.snapshot(), entryId).messages();
+            synchronized (lifecycleLock) {
+                ensureOpen();
+                agent.replaceMessages(messages);
+                sessionManager.branch(entryId);
+            }
+        } catch (RuntimeException | Error operationFailure) {
+            failure = operationFailure;
+        }
+        rethrowHistoryFailure(finishHistoryOperation(failure));
+    }
+
+    /**
+     * Select the position before every root and clear the idle runtime transcript.
+     * Existing entries and pending queues are retained.
+     */
+    public void resetLeaf() {
+        admitHistoryOperation();
+        Throwable failure = null;
+        try {
+            synchronized (lifecycleLock) {
+                ensureOpen();
+                agent.replaceMessages(List.of());
+                sessionManager.resetLeaf();
+            }
+        } catch (RuntimeException | Error operationFailure) {
+            failure = operationFailure;
+        }
+        rethrowHistoryFailure(finishHistoryOperation(failure));
+    }
+
+    /** Append a global display-name change while idle; null clears the name. */
+    public SessionInfoEntry setName(String name) throws IOException {
+        admitHistoryOperation();
+        SessionInfoEntry result = null;
+        Throwable failure = null;
+        try {
+            result = sessionManager.setName(name);
+        } catch (IOException | RuntimeException | Error operationFailure) {
+            failure = operationFailure;
+        }
+        failure = finishHistoryOperation(failure);
+        if (failure instanceof IOException ioFailure) {
+            throw ioFailure;
+        }
+        rethrowHistoryFailure(failure);
+        return result;
+    }
+
+    /** Append a display-label change for an existing entry; null clears the label. */
+    public LabelEntry setLabel(String entryId, String label) throws IOException {
+        Objects.requireNonNull(entryId, "entryId must not be null");
+        admitHistoryOperation();
+        LabelEntry result = null;
+        Throwable failure = null;
+        try {
+            result = sessionManager.setLabel(entryId, label);
+        } catch (IOException | RuntimeException | Error operationFailure) {
+            failure = operationFailure;
+        }
+        failure = finishHistoryOperation(failure);
+        if (failure instanceof IOException ioFailure) {
+            throw ioFailure;
+        }
+        rethrowHistoryFailure(failure);
+        return result;
+    }
+
+    /** Return the owned JSONL path, or empty for the default in-memory mode. */
+    public Optional<Path> sessionFile() {
+        return Optional.ofNullable(sessionManager.filePath());
+    }
+
+    /** Return immutable diagnostics produced while opening this session. */
+    public List<SessionDiagnostic> sessionDiagnostics() {
+        return sessionDiagnostics;
+    }
+
     /**
      * Close owned resources and request cancellation of any active reload.
      *
      * <p>Waiting for loader shutdown is bounded to two seconds and skipped on a
      * loader worker. Uninterruptible file I/O keeps its stage pending and its
      * reload admission occupied until actual loading and cleanup have finished.
+     * An active run retains its Session writer until core emits its terminal
+     * messages and the run completion callback settles. An accepted history
+     * append likewise retains the writer until its file and memory commit finishes.
      */
     @Override
     public void close() {
@@ -393,11 +568,144 @@ public final class CodingAgentSession implements AutoCloseable {
                 errorFailure = failure;
             }
         }
+        boolean closeManagerNow;
+        synchronized (lifecycleLock) {
+            closeManagerNow = !running && !historyOperation;
+        }
+        if (closeManagerNow) {
+            try {
+                sessionManager.close();
+            } catch (IOException failure) {
+                if (runtimeFailure != null) {
+                    runtimeFailure.addSuppressed(failure);
+                } else if (errorFailure != null) {
+                    errorFailure.addSuppressed(failure);
+                } else {
+                    runtimeFailure = new UncheckedIOException(failure);
+                }
+            }
+        }
         if (runtimeFailure != null) {
             throw runtimeFailure;
         }
         if (errorFailure != null) {
             throw errorFailure;
+        }
+    }
+
+    private CompletionStage<Void> emitProductEvent(
+            AgentEvent event,
+            CodingAgentEventSink eventSink
+    ) {
+        if (event instanceof AgentEvent.MessageCompleted completed) {
+            var message = SnapshotMapper.agentMessage(completed.message());
+            if (!(message instanceof StandardAgentMessage standard)) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException(
+                        "phase-four sessions only persist standard agent messages"));
+            }
+            try {
+                sessionManager.appendCompletedMessage(standard, model, thinkingLevel);
+            } catch (IOException | RuntimeException failure) {
+                return CompletableFuture.failedFuture(failure);
+            }
+        }
+
+        CodingAgentEvent productEvent = event instanceof AgentEvent.AgentCompleted completed
+                ? new CodingAgentEvent.RunCompleted(SnapshotMapper.runResult(completed.result()))
+                : new CodingAgentEvent.RuntimeEvent(event);
+        var stage = eventSink.emit(productEvent);
+        if (stage == null) {
+            throw new IllegalStateException("coding event sink returned null stage");
+        }
+        return stage;
+    }
+
+    private static List<SessionDiagnostic> buildSessionDiagnostics(
+            SessionManager manager,
+            Path workingDirectory
+    ) {
+        var diagnostics = new java.util.ArrayList<SessionDiagnostic>();
+        var headerCwd = manager.snapshot().header().cwd();
+        if (!headerCwd.equals(workingDirectory)) {
+            diagnostics.add(new SessionDiagnostic.WorkingDirectoryMismatch(
+                    headerCwd, workingDirectory));
+        }
+        var recovery = manager.recovery();
+        var sessionFile = manager.filePath();
+        if (recovery != null && sessionFile != null) {
+            diagnostics.add(new SessionDiagnostic.RecoveredTail(
+                    sessionFile,
+                    recovery.lineNumber(),
+                    recovery.byteOffset(),
+                    recovery.discardedBytes(),
+                    SessionDiagnostic.Reason.valueOf(recovery.reason().name())));
+        }
+        return List.copyOf(diagnostics);
+    }
+
+    private static SessionManager newInMemoryManager(CodingAgentConfig config) {
+        Objects.requireNonNull(config, "config must not be null");
+        return new SessionManager(new SessionHeader(
+                UUID.randomUUID(), config.clock().instant(), config.workingDirectory()), config.clock());
+    }
+
+    private static CodingAgentSession constructWithOwnedManager(
+            CodingAgentConfig config,
+            SessionManager manager
+    ) throws IOException {
+        try {
+            return new CodingAgentSession(config, ProjectContextLoader::load, manager);
+        } catch (RuntimeException | Error failure) {
+            try {
+                manager.close();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+    }
+
+    private void admitHistoryOperation() {
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            if (running || reloading || historyOperation) {
+                throw new IllegalStateException("coding-agent session is busy");
+            }
+            historyOperation = true;
+        }
+    }
+
+    private Throwable finishHistoryOperation(Throwable existingFailure) {
+        boolean closeManager;
+        synchronized (lifecycleLock) {
+            historyOperation = false;
+            closeManager = closed;
+        }
+        return closeManager ? closeManager(existingFailure) : existingFailure;
+    }
+
+    private static void rethrowHistoryFailure(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            throw runtimeFailure;
+        }
+        if (failure instanceof Error errorFailure) {
+            throw errorFailure;
+        }
+        if (failure != null) {
+            throw new IllegalStateException("unexpected checked history-operation failure", failure);
+        }
+    }
+
+    private Throwable closeManager(Throwable existingFailure) {
+        try {
+            sessionManager.close();
+            return existingFailure;
+        } catch (IOException closeFailure) {
+            if (existingFailure != null) {
+                existingFailure.addSuppressed(closeFailure);
+                return existingFailure;
+            }
+            return new UncheckedIOException(closeFailure);
         }
     }
 

@@ -115,6 +115,28 @@ public final class Agent implements AutoCloseable {
     }
 
     /**
+     * Replace the transcript while this agent is idle.
+     *
+     * <p>The system prompt, registered tool instances, pending steering and
+     * follow-up queues, and latest error are retained. The context and public
+     * state snapshots are updated within the same admission boundary, so a
+     * newly admitted run cannot observe a partial update. This method does not
+     * invoke model, tool, hook, transformer, projector, or event-sink code.
+     */
+    public void replaceMessages(List<AgentMessage> messages) {
+        var replacement = List.copyOf(
+                Objects.requireNonNull(messages, "messages must not be null"));
+        synchronized (admissionLock) {
+            requireIdle();
+            var current = context;
+            var updated = new AgentContext(current.systemPrompt(), replacement, current.tools());
+            context = updated;
+            state.updateAndGet(snapshot -> new AgentState(
+                    updated, false, null, Set.of(), snapshot.errorMessage()));
+        }
+    }
+
+    /**
      * Replace only the system prompt while this agent is idle.
      *
      * <p>The transcript and registered tool instances are retained. The
@@ -124,12 +146,7 @@ public final class Agent implements AutoCloseable {
     public void updateSystemPrompt(String systemPrompt) {
         Objects.requireNonNull(systemPrompt, "systemPrompt must not be null");
         synchronized (admissionLock) {
-            if (closed.get()) {
-                throw new IllegalStateException("Agent is closed");
-            }
-            if (activeRun.get() != null) {
-                throw new IllegalStateException("Agent is already running");
-            }
+            requireIdle();
             var current = context;
             var updated = new AgentContext(systemPrompt, current.messages(), current.tools());
             context = updated;
@@ -258,6 +275,15 @@ public final class Agent implements AutoCloseable {
             future.completeExceptionally(new IllegalStateException("Agent is closed", rej));
         }
         return future;
+    }
+
+    private void requireIdle() {
+        if (closed.get()) {
+            throw new IllegalStateException("Agent is closed");
+        }
+        if (activeRun.get() != null) {
+            throw new IllegalStateException("Agent is already running");
+        }
     }
 
     private AgentLoopConfig getLoopConfig() {

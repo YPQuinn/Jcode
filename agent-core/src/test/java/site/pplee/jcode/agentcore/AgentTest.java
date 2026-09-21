@@ -162,6 +162,82 @@ class AgentTest {
     }
 
     @Test
+    void replaceMessagesUpdatesContextAndStateWhilePreservingConfigurationAndError() throws Exception {
+        var terminalError = new Message.Assistant(
+                List.of(), StopReason.ERROR, "failed", Usage.zero(), T1);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(terminalError);
+        try (var agent = new Agent(configWith(client, AgentEventSink.noop()))) {
+            agent.prompt(user("old")).toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var tools = agent.context().tools();
+            var replacement = new java.util.ArrayList<site.pplee.jcode.agentcore.message.AgentMessage>();
+            replacement.add(StandardAgentMessage.of(user("replacement")));
+
+            agent.replaceMessages(replacement);
+            replacement.clear();
+
+            assertEquals("sys", agent.context().systemPrompt());
+            assertEquals(tools, agent.context().tools());
+            assertEquals(List.of(StandardAgentMessage.of(user("replacement"))), agent.context().messages());
+            assertEquals(agent.context(), agent.state().context());
+            assertFalse(agent.state().streaming());
+            assertEquals("failed", agent.state().errorMessage());
+        }
+    }
+
+    @Test
+    void replaceMessagesRejectsActiveAndClosedAgentWithoutChangingContext() throws Exception {
+        var started = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var blockingClient = new ModelClient() {
+            @Override
+            public AssistantMessageStream stream(ModelRequest request, CancellationSignal cancellation) {
+                started.countDown();
+                var stream = new AssistantMessageStream();
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        release.await(2, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    var message = assistantText("slow", StopReason.STOP);
+                    stream.push(new AssistantMessageEvent.Start(message));
+                    stream.push(new AssistantMessageEvent.Done(StopReason.STOP, message));
+                });
+                return stream;
+            }
+        };
+        var agent = new Agent(configWith(blockingClient, AgentEventSink.noop()));
+        var original = agent.context();
+        var run = agent.prompt(user("hello"));
+        assertTrue(started.await(2, TimeUnit.SECONDS));
+        assertThrows(IllegalStateException.class,
+                () -> agent.replaceMessages(List.of(StandardAgentMessage.of(user("replacement")))));
+        assertEquals(original, agent.context());
+        release.countDown();
+        run.toCompletableFuture().get(2, TimeUnit.SECONDS);
+        agent.close();
+        assertThrows(IllegalStateException.class, () -> agent.replaceMessages(List.of()));
+    }
+
+    @Test
+    void replaceMessagesPreservesPendingSteeringAndFollowUpQueues() throws Exception {
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                assistantText("first", StopReason.STOP),
+                assistantText("second", StopReason.STOP));
+        try (var agent = new Agent(configWith(client, AgentEventSink.noop()))) {
+            agent.steer(user("steering"));
+            agent.followUp(user("follow-up"));
+            agent.replaceMessages(List.of(StandardAgentMessage.of(user("replacement"))));
+
+            agent.continueRun().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+            assertEquals(2, client.receivedRequests().size());
+            assertEquals(user("steering"), client.receivedRequests().getFirst().messages().getLast());
+            assertEquals(user("follow-up"), client.receivedRequests().get(1).messages().getLast());
+        }
+    }
+
+    @Test
     void updateSystemPromptRejectsActiveRunWithoutChangingContext() throws Exception {
         var started = new CountDownLatch(1);
         var release = new CountDownLatch(1);

@@ -12,10 +12,29 @@
 ## Agent 生命周期与事件
 
 - 一个 `Agent` 同时最多接纳一个 active run；并发 `prompt()` 或 `continueRun()` 必须 fail fast。
+- `updateSystemPrompt()` 与 `replaceMessages()` 只允许在 idle 状态同步执行；busy/closed 时拒绝且不得部分修改 context。消息替换只更新 transcript 及公开状态快照，保留 system prompt、tools、steering/follow-up 队列与 error，不触发模型、工具、hook、投影或事件。
 - 归约 event sink 先更新 `AgentState`，再调用用户 sink，确保用户处理事件时看到已归约状态。
 - `AgentEventSink.emit()` 返回的 stage 具有 backpressure，必须等待；`RunEventEmitter` 是唯一等待点。
 - User 与 tool-result 消息发出 `MessageStarted → MessageCompleted`；assistant 消息发出 `MessageStarted → MessageUpdated… → MessageCompleted`。
 - 流式事件投递失败时，取消在途 provider、清理 run 状态，并让 run future 异常完成；不得将 sink failure 改写为模型失败。
+
+## Session 产品历史
+
+- `CodingAgentSession` 默认维护内存历史；文件模式必须通过显式 `create/open` 取得 writer 所有权。宿主只读取不可变快照，不能直接持有可变 Session manager。
+- 只有 core 的 `MessageCompleted` 可以接纳标准消息；`MessageStarted`、delta、`ToolCompleted` 和投影消息都不得伪造历史。文件模式按“写入文件 → 接纳内存树 → 通知宿主 sink”排序。
+- 宿主 sink 或 writer 导致 run 基础设施失败时，下一次产品操作前必须用已接纳分支重新对齐 Agent transcript。writer 失败不接纳该消息，并封锁同一 owner 的后续追加。
+- `continueRun()` 只允许当前分支非空且 leaf 是 user/tool-result 时调用，复用 core continuation，不伪造 user 消息。open 使用调用方当前模型、工具和配置；历史 model/thinking 仅描述历史，并在下一条完成消息前按需追加当前配置元信息。
+- `branch()`、`resetLeaf()`、`setName()` 与 `setLabel()` 是 idle-only 历史操作，与 run、reload 和 close 互斥。branch/reset 只移动当前 leaf 并替换 Agent transcript，不删除旧 Entry、不执行工具、不回滚工作区，且保留 steering/follow-up 队列。
+- 取消调用方拿到的观察 Future 不取消或释放已接纳运行。close 时若运行或历史追加仍在途，Session writer 及文件锁必须保留到对应完成回调结束。
+
+## Session 文件
+
+- Session JSONL 使用显式 version/type/role/content 分派，不使用 Java 默认多态反序列化。标准消息的多模态内容、工具参数、usage、metadata、source model 与 replay state 必须无损往返。
+- 一个 Session 文件在 writer 生命周期内持有独占文件锁；锁冲突立即失败，不进行多写者协调、等待或重试。
+- open 只读取和诊断，不修改文件。只有 EOF 截断 JSON 或不完整 UTF-8 后缀可恢复；首次后续追加先截断该尾片段。中部损坏、未知版本/类型、坏父链和完整但非法的末行必须失败且保持原文件不变。
+- 顺序追加必须处理短写。实际写入失败后磁盘尾部状态不确定，当前 writer 必须封锁后续追加；不得自动重试同一 Entry、退回内存模式或声称回滚成功。
+- 普通追加不逐条 `force()`，因此只承诺成功写完整本次字节，不承诺断电 durability。
+- `SessionFiles` 只扫描调用方显式目录的一层 `*.jsonl` 文件；可按规范化 cwd 精确过滤。合法会话按最新 user/assistant 活动时间倒序排序，无此类消息时使用 Header 时间；坏文件不得阻断其他结果，只返回不含消息内容的逐文件诊断。发现和 recoverable-tail 诊断不得修改文件。
 
 ## Context 投影与 Turn hook
 
