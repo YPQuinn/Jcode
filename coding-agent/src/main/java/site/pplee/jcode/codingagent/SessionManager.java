@@ -173,9 +173,34 @@ final class SessionManager implements AutoCloseable {
             Usage usage,
             SummaryDetails details
     ) throws IOException {
-        return append(id -> new CompactionEntry(
-                id, currentEntryId, clock.instant(), summary, firstKeptEntryId,
-                tokensBefore, estimateSource, summaryModel, usage, details));
+        return appendPreparedCompaction(prepareCompaction(
+                summary, firstKeptEntryId, tokensBefore, estimateSource,
+                summaryModel, usage, details));
+    }
+
+    synchronized CompactionEntry prepareCompaction(
+            String summary,
+            String firstKeptEntryId,
+            long tokensBefore,
+            TokenEstimateSource estimateSource,
+            ModelRef summaryModel,
+            Usage usage,
+            SummaryDetails details
+    ) throws IOException {
+        requireWritable();
+        var entry = new CompactionEntry(
+                nextId(), currentEntryId, clock.instant(), summary, firstKeptEntryId,
+                tokensBefore, estimateSource, summaryModel, usage, details);
+        SessionEntries.validateNext(entry, byId);
+        return entry;
+    }
+
+    synchronized CompactionEntry appendPreparedCompaction(CompactionEntry entry) throws IOException {
+        Objects.requireNonNull(entry, "entry must not be null");
+        if (!Objects.equals(entry.parentId(), currentEntryId)) {
+            throw new IllegalStateException("prepared compaction parent is no longer current");
+        }
+        return appendPrepared(entry);
     }
 
     synchronized BranchSummaryEntry appendBranchSummary(
@@ -189,8 +214,10 @@ final class SessionManager implements AutoCloseable {
         requireWritable();
         requireEntry(targetId);
         requireEntry(fromId);
-        return append(id -> new BranchSummaryEntry(
+        var entry = append(id -> new BranchSummaryEntry(
                 id, targetId, clock.instant(), fromId, summary, summaryModel, usage, details));
+        refreshCurrentConfiguration();
+        return entry;
     }
 
     synchronized void branch(String entryId) {
@@ -252,6 +279,11 @@ final class SessionManager implements AutoCloseable {
             throws IOException {
         requireWritable();
         var entry = factory.apply(nextId());
+        return appendPrepared(entry);
+    }
+
+    private <T extends SessionEntry> T appendPrepared(T entry) throws IOException {
+        requireWritable();
         SessionEntries.validateNext(entry, byId);
         if (sessionFile != null) {
             sessionFile.append(entry);

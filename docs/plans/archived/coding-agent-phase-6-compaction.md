@@ -764,12 +764,15 @@ git diff --check
 
 ## 21. 实施记录
 
-- 实施环境：基于 `c669e53f2e1efa6f57a698771613cbf634e6fde9` 工作树；Darwin arm64、Oracle JDK 21.0.10、Maven 3.9.14。本次未创建 Git 提交或推送远端。
+- 实施环境：基于 `c669e53f2e1efa6f57a698771613cbf634e6fde9` 工作树；Darwin arm64、Oracle JDK 21.0.10、Maven 3.9.14。主体实现提交为 `cce8a4abea62a31c35da5930b7c69342889f78c2`，其后完成本节记录的审查修复。
 - 6A～6E 均已完成：加入最小失败分类和失败后窄继续入口；实现用量估算、切点规划、专用摘要请求、手动/阈值压缩、连续检查点、单次 overflow 恢复和分支摘要；Session version 1 以显式新 Entry 类型扩展，原消息保持 append-only。
 - 实际差异：split turn 依计划使用一次摘要请求；分支摘要在输入超预算时按完整消息单元从旧到新裁掉较早材料并写入省略标记。自动压缩维持默认关闭，已存在检查点始终参与请求视图重建。
 - 定向 fixture：HTTP/SSE 仅对结构化 `context_length_exceeded` 分类，文本命中保持未分类；产品 fixture 覆盖手动、阈值、连续压缩、单次 overflow 恢复、分支近期预算、完成事件失败、取消与关闭；Unicode 工具结果按 code point 截断。
-- 全仓校验：`mvn clean verify` 通过；五个 reactor 模块 Enforcer 均通过。`ai` 71、`ai-providers` 269、`agent-core` 209、`coding-agent` 331，共 880 个测试，无 skip、失败或错误。
-- 严格 native smoke：使用 `/bin/bash`、Codex 随附的绝对 `rg` 路径和 `/opt/homebrew/bin/fd` 执行第 18.3 节命令，通过；严格 profile 的 331 个 `coding-agent` 测试无 skip。为满足该检查，本机通过 Homebrew 安装了 fd 10.5.0。
+- 全仓校验：`mvn clean verify` 通过；五个 reactor 模块 Enforcer 均通过。`ai` 71、`ai-providers` 269、`agent-core` 209、`coding-agent` 342，共 891 个测试，无 skip、失败或错误。
+- 严格 native smoke：使用 `/bin/bash`、Codex 随附的绝对 `rg` 路径和 `/opt/homebrew/bin/fd` 执行第 18.3 节命令，通过；严格 profile 的 342 个 `coding-agent` 测试无 skip。为满足该检查，本机通过 Homebrew 安装了 fd 10.5.0。
 - Session 兼容与生命周期：codec fixture 验证旧记录缺少 failureKind 时仍可读取、新摘要 Entry round-trip；请求视图 fixture 验证最新检查点和分支隔离；产品 fixture 验证 abort/close 取消在途摘要且提交前不追加记录，提交后事件失败保留 Entry 并释放接纳。
+- 审查修复：分支摘要提交后按目标父链刷新历史 model/thinking 派生状态；候选压缩复用真实请求投影并以同一全量估算器比较，旧检查点后没有新可见内容时直接跳过；一次产品操作的取消状态贯穿 overflow 摘要与第二次尝试。
+- 基础设施与关闭：摘要 writer 和宿主事件边界保留原失败，THRESHOLD/OVERFLOW 不再把提交前写入失败或提交后通知失败归一成模型错误；已知失效 writer 在摘要模型调用前拒绝。摘要追加在产品生命周期锁外执行，close 对尚未终结的非合作摘要流延后 core、writer 与 owned resource 释放。
+- 审查回归：覆盖混合 model/thinking 的分支摘要继续与重开、usage/估算口径、重复压缩、overflow 事件内取消、F1 并行工具反序完成后的阈值压缩、F2 工具只执行一次的 overflow 恢复、F3 旧保留消息进入下一次摘要材料，以及手动/THRESHOLD/OVERFLOW 的提交前后基础设施失败。
 - 静态检查：`git diff --check` 通过；未修改用户预先存在的 `.idea/encodings.xml` 与 `.idea/vcs.xml` 变更。
 - 未执行真实 Provider probe，避免消耗真实凭证和额度；错误分类证据来自本地 HTTP/SSE fixture，因此不对其他兼容 endpoint 的未识别错误码作保证。

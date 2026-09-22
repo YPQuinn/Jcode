@@ -10,6 +10,8 @@ import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.session.SessionSnapshot;
 import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
+import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
+import site.pplee.jcode.codingagent.session.SummaryDetails;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -17,6 +19,7 @@ import org.junit.jupiter.api.io.TempDir;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
@@ -116,6 +119,45 @@ class SessionManagerTest {
         assertEquals(8, snapshot.entries().size(),
                 "matching branch-local configuration must not append redundant change entries");
         assertInstanceOf(SessionMessageEntry.class, snapshot.entries().getLast());
+    }
+
+    @Test
+    void branchSummaryRefreshesParentConfigurationBeforeRecordingContinuedSelection() throws Exception {
+        var otherModel = new ModelRef("test", "responses", "model-2");
+        Path path;
+        var generated = ids(
+                "model-one", "thinking-low", "target", "model-two", "thinking-high", "source",
+                "branch-summary", "restored-model", "restored-thinking", "continuation");
+        try (var manager = SessionManager.createFileBacked(
+                header(), tempDir.resolve("branch-summary"), CLOCK, generated::remove)) {
+            manager.appendModelChange(MODEL);
+            manager.appendThinkingLevelChange(ThinkingLevel.LOW);
+            var target = manager.appendMessage(user("target"));
+            manager.appendModelChange(otherModel);
+            manager.appendThinkingLevelChange(ThinkingLevel.HIGH);
+            var source = manager.appendMessage(assistant("source"));
+
+            manager.appendBranchSummary(
+                    target.id(), source.id(), "departing branch", otherModel,
+                    Usage.zero(), SummaryDetails.empty());
+
+            assertEquals(MODEL, manager.currentModel());
+            assertEquals(ThinkingLevel.LOW, manager.currentThinkingLevel());
+            manager.appendCompletedMessage(assistant("continuation"), otherModel, ThinkingLevel.HIGH);
+            var branch = manager.snapshot().currentBranch();
+            assertInstanceOf(BranchSummaryEntry.class, branch.get(3));
+            assertInstanceOf(ModelChangeEntry.class, branch.get(4));
+            assertInstanceOf(ThinkingLevelChangeEntry.class, branch.get(5));
+            assertInstanceOf(SessionMessageEntry.class, branch.get(6));
+            path = manager.filePath();
+        }
+
+        try (var reopened = SessionManager.openFileBacked(path, CLOCK, ids("unused")::remove)) {
+            assertEquals(otherModel, reopened.currentModel());
+            assertEquals(ThinkingLevel.HIGH, reopened.currentThinkingLevel());
+            assertEquals(List.of("target", "continuation"),
+                    texts(SessionContextBuilder.build(reopened.snapshot())));
+        }
     }
 
     @Test

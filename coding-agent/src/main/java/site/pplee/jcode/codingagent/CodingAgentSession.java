@@ -49,6 +49,7 @@ import site.pplee.jcode.codingagent.session.SessionContextBuilder;
 import site.pplee.jcode.codingagent.session.SessionDiagnostic;
 import site.pplee.jcode.codingagent.session.SessionHeader;
 import site.pplee.jcode.codingagent.session.SessionInfoEntry;
+import site.pplee.jcode.codingagent.session.SessionEntry;
 import site.pplee.jcode.codingagent.session.SessionSnapshot;
 import site.pplee.jcode.codingagent.session.CompactionEntry;
 import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
@@ -68,6 +69,7 @@ import java.util.OptionalInt;
 import java.util.ArrayList;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -96,6 +98,7 @@ public final class CodingAgentSession implements AutoCloseable {
     private final CodingAgentEventSink productEventSink;
     private final AutoCloseable ownedResource;
     private final AtomicBoolean ownedResourceClosed = new AtomicBoolean();
+    private final AtomicBoolean runtimeResourcesClosed = new AtomicBoolean();
     private volatile ModelSelection currentSelection;
     private final ExecutorService reloadExecutor;
     private ExecutorService maintenanceExecutor;
@@ -110,6 +113,7 @@ public final class CodingAgentSession implements AutoCloseable {
     private volatile String currentSystemPrompt;
     private CancellationSource reloadSource;
     private CancellationSource summarySource;
+    private CancellationSource runSource;
     private UsageObservation usageObservation;
     private volatile Throwable pendingInfrastructureFailure;
     private boolean skipAutomaticCompactionOnce;
@@ -349,7 +353,7 @@ public final class CodingAgentSession implements AutoCloseable {
                 result.complete(completed);
             }
         } catch (Throwable failure) {
-            emitSummaryFailure(SummaryCause.MANUAL, failure, source);
+            failure = emitSummaryFailure(SummaryCause.MANUAL, failure, source.signal());
             result.completeExceptionally(finishSummaryOperation(
                     source, normalizeSummaryFailure(source, failure)));
         }
@@ -379,23 +383,31 @@ public final class CodingAgentSession implements AutoCloseable {
                 }
                 completed = new BranchSummaryResult(fromId, targetEntryId, targetEntryId, Optional.empty());
             } else {
+                requireSummaryWritable();
                 var budget = requireBudget(currentSelection.selected());
                 emitSummaryEvent(new CodingAgentEvent.SummaryStarted(
                         SummaryCause.BRANCH, currentSelection.selected()));
+                source.signal().throwIfCancelled();
                 String serialized = serializeRecentBranchMaterial(
                         material, additionalInstructions, budget);
                 var generated = new SummaryGenerator(modelClient).generate(
                         currentSelection.selected(), currentSelection.thinkingLevel(),
                         budget.summaryOutputTokens(), serialized, source.signal());
                 source.signal().throwIfCancelled();
-                BranchSummaryEntry entry;
                 synchronized (lifecycleLock) {
                     source.signal().throwIfCancelled();
                     ensureOpen();
+                }
+                BranchSummaryEntry entry;
+                try {
                     entry = sessionManager.appendBranchSummary(
                             targetEntryId, fromId, generated.text(), currentSelection.selected(),
                             generated.usage(), SummaryDetailsExtractor.extract(
                                     material, departingSummaryDetails(snapshot, fromId, targetEntryId)));
+                } catch (IOException failure) {
+                    throw new SummaryInfrastructureFailure(failure);
+                }
+                synchronized (lifecycleLock) {
                     agent.replaceMessages(SessionContextBuilder.build(sessionManager.snapshot()).messages());
                     usageObservation = null;
                 }
@@ -410,7 +422,7 @@ public final class CodingAgentSession implements AutoCloseable {
                 result.complete(completed);
             }
         } catch (Throwable failure) {
-            emitSummaryFailure(SummaryCause.BRANCH, failure, source);
+            failure = emitSummaryFailure(SummaryCause.BRANCH, failure, source.signal());
             result.completeExceptionally(finishSummaryOperation(
                     source, normalizeSummaryFailure(source, failure)));
         }
@@ -421,7 +433,7 @@ public final class CodingAgentSession implements AutoCloseable {
             String additionalInstructions,
             CancellationSignal cancellation,
             boolean requireThreshold
-    ) throws IOException {
+    ) {
         var model = currentSelection.selected();
         var budget = requireBudget(model);
         var snapshot = sessionManager.snapshot();
@@ -435,8 +447,10 @@ public final class CodingAgentSession implements AutoCloseable {
                     CompactionStatus.SKIPPED, Optional.empty(), Optional.empty(),
                     before, before, Usage.zero(), "NOTHING_TO_COMPACT");
         }
+        requireSummaryWritable();
         cancellation.throwIfCancelled();
         emitSummaryEvent(new CodingAgentEvent.SummaryStarted(cause, model));
+        cancellation.throwIfCancelled();
         String material = new SummaryMaterialSerializer().serialize(
                 plan.orElseThrow().material(), additionalInstructions);
         if (plan.orElseThrow().splitTurn()) {
@@ -450,27 +464,40 @@ public final class CodingAgentSession implements AutoCloseable {
                 material, cancellation);
         cancellation.throwIfCancelled();
 
-        var candidateMessages = new ArrayList<site.pplee.jcode.agentcore.message.AgentMessage>();
-        candidateMessages.add(StandardAgentMessage.of(new Message.User(
-                List.of(new Content.Text("[compaction]\n" + generated.text())), clock.instant())));
-        candidateMessages.addAll(plan.orElseThrow().retainedMessages());
+        long previousEstimatedTokens = ContextUsageEstimator.estimate(
+                currentSystemPrompt, toolSpecs,
+                SessionContextBuilder.buildRequestView(snapshot).messages());
+        CompactionEntry prepared;
+        try {
+            prepared = sessionManager.prepareCompaction(
+                    generated.text(), plan.orElseThrow().firstKeptEntryId(), before.tokens(),
+                    before.source(), model, generated.usage(), SummaryDetailsExtractor.extract(
+                            plan.orElseThrow().material(), inheritedSummaryDetails(snapshot)));
+        } catch (IOException failure) {
+            throw new SummaryInfrastructureFailure(failure);
+        }
+        var candidateSnapshot = withPreparedCompaction(snapshot, prepared);
         long candidateTokens = ContextUsageEstimator.estimate(
-                currentSystemPrompt, toolSpecs, candidateMessages);
-        if (candidateTokens >= before.tokens()) {
+                currentSystemPrompt, toolSpecs,
+                SessionContextBuilder.buildRequestView(candidateSnapshot).messages());
+        if (candidateTokens >= previousEstimatedTokens) {
             throw new IllegalStateException("generated summary did not reduce the effective context");
         }
         if (requireThreshold && candidateTokens > budget.threshold()) {
             throw new IllegalStateException("generated summary is still above the model threshold");
         }
 
-        CompactionEntry entry;
         synchronized (lifecycleLock) {
             cancellation.throwIfCancelled();
             ensureOpen();
-            entry = sessionManager.appendCompaction(
-                    generated.text(), plan.orElseThrow().firstKeptEntryId(), before.tokens(),
-                    before.source(), model, generated.usage(), SummaryDetailsExtractor.extract(
-                            plan.orElseThrow().material(), inheritedSummaryDetails(snapshot)));
+        }
+        CompactionEntry entry;
+        try {
+            entry = sessionManager.appendPreparedCompaction(prepared);
+        } catch (IOException failure) {
+            throw new SummaryInfrastructureFailure(failure);
+        }
+        synchronized (lifecycleLock) {
             usageObservation = null;
         }
         var after = contextUsage(sessionManager.snapshot(), model);
@@ -507,21 +534,28 @@ public final class CodingAgentSession implements AutoCloseable {
             return CompletableFuture.completedFuture(
                     SessionContextBuilder.buildRequestView(snapshot).messages());
         } catch (Throwable failure) {
+            var infrastructure = infrastructureFailure(failure);
             if (compactionSettings.enabled()) {
-                try {
-                    emitSummaryEvent(cancellation.isCancelled()
-                            ? new CodingAgentEvent.SummaryCancelled(SummaryCause.THRESHOLD)
-                            : new CodingAgentEvent.SummaryFailed(
-                                    SummaryCause.THRESHOLD, failure.getClass().getSimpleName()));
-                } catch (Throwable eventFailure) {
-                    failure.addSuppressed(eventFailure);
-                }
+                failure = emitSummaryFailure(SummaryCause.THRESHOLD, failure, cancellation);
             }
-            if (failure instanceof IOException) {
-                pendingInfrastructureFailure = failure;
+            if (infrastructure == null) {
+                infrastructure = infrastructureFailure(failure);
+            }
+            if (infrastructure != null) {
+                pendingInfrastructureFailure = infrastructure;
             }
             return CompletableFuture.failedFuture(failure);
         }
+    }
+
+    private static SessionSnapshot withPreparedCompaction(
+            SessionSnapshot snapshot,
+            CompactionEntry compaction
+    ) {
+        var entries = new ArrayList<SessionEntry>(snapshot.entries());
+        entries.add(compaction);
+        return new SessionSnapshot(
+                snapshot.header(), entries, compaction.id(), snapshot.name().orElse(null), Map.of());
     }
 
     private ContextUsageEstimate contextUsage(SessionSnapshot snapshot, ModelRef model) {
@@ -732,7 +766,11 @@ public final class CodingAgentSession implements AutoCloseable {
                 historyOperation = false;
             }
         }
-        return closed ? closeManager(failure) : failure;
+        if (!closed) {
+            return failure;
+        }
+        failure = closeRuntimeResources(failure, false);
+        return closeManager(failure);
     }
 
     private static Throwable normalizeSummaryFailure(CancellationSource source, Throwable failure) {
@@ -744,29 +782,94 @@ public final class CodingAgentSession implements AutoCloseable {
         return cancelled;
     }
 
-    private void emitSummaryFailure(
+    private Throwable emitSummaryFailure(
             SummaryCause cause,
             Throwable failure,
-            CancellationSource source
+            CancellationSignal cancellation
     ) {
         try {
-            if (source.signal().isCancelled() || failure instanceof CancellationException) {
+            if (cancellation.isCancelled() || failure instanceof CancellationException) {
                 emitSummaryEvent(new CodingAgentEvent.SummaryCancelled(cause));
             } else {
+                var reported = infrastructureFailure(failure);
                 emitSummaryEvent(new CodingAgentEvent.SummaryFailed(
-                        cause, failure.getClass().getSimpleName()));
+                        cause, (reported == null ? failure : reported).getClass().getSimpleName()));
             }
         } catch (Throwable eventFailure) {
-            failure.addSuppressed(eventFailure);
+            var originalInfrastructure = infrastructureFailure(failure);
+            if (originalInfrastructure != null) {
+                if (originalInfrastructure != eventFailure) {
+                    originalInfrastructure.addSuppressed(eventFailure);
+                }
+                return originalInfrastructure;
+            }
+            var eventInfrastructure = Objects.requireNonNull(
+                    infrastructureFailure(eventFailure),
+                    "summary event failure must be classified as infrastructure");
+            if (eventInfrastructure != failure) {
+                eventInfrastructure.addSuppressed(failure);
+            }
+            return eventInfrastructure;
         }
+        var infrastructure = infrastructureFailure(failure);
+        return infrastructure == null ? failure : infrastructure;
     }
 
     private void emitSummaryEvent(CodingAgentEvent event) {
+        try {
+            emitEvent(event);
+        } catch (Throwable failure) {
+            throw new SummaryInfrastructureFailure(unwrapCompletionFailure(failure));
+        }
+    }
+
+    private void requireSummaryWritable() {
+        try {
+            sessionManager.requireWritable();
+        } catch (IOException failure) {
+            throw new SummaryInfrastructureFailure(failure);
+        }
+    }
+
+    private void emitEvent(CodingAgentEvent event) {
         var stage = productEventSink.emit(event);
         if (stage == null) {
             throw new IllegalStateException("coding event sink returned null stage");
         }
         stage.toCompletableFuture().join();
+    }
+
+    private static Throwable infrastructureFailure(Throwable failure) {
+        if (failure instanceof SummaryInfrastructureFailure infrastructure) {
+            return infrastructure.getCause();
+        }
+        if (failure.getCause() != null && failure.getCause() != failure) {
+            var cause = infrastructureFailure(failure.getCause());
+            if (cause != null) {
+                return cause;
+            }
+        }
+        for (var suppressed : failure.getSuppressed()) {
+            var cause = infrastructureFailure(suppressed);
+            if (cause != null) {
+                return cause;
+            }
+        }
+        return null;
+    }
+
+    private static Throwable unwrapCompletionFailure(Throwable failure) {
+        if ((failure instanceof CompletionException || failure instanceof java.util.concurrent.ExecutionException)
+                && failure.getCause() != null) {
+            return failure.getCause();
+        }
+        return failure;
+    }
+
+    private static final class SummaryInfrastructureFailure extends RuntimeException {
+        private SummaryInfrastructureFailure(Throwable cause) {
+            super("summary infrastructure operation failed", cause);
+        }
     }
 
     private record Budget(int window, int threshold, int summaryOutputTokens) {
@@ -795,12 +898,14 @@ public final class CodingAgentSession implements AutoCloseable {
                 return CompletableFuture.failedFuture(failure);
             }
             running = true;
+            runSource = new CancellationSource();
             attemptResults.clear();
             pendingInfrastructureFailure = null;
             try {
                 runtimeStage = starter.get();
             } catch (RuntimeException | Error failure) {
                 running = false;
+                runSource = null;
                 throw failure;
             }
         }
@@ -833,18 +938,33 @@ public final class CodingAgentSession implements AutoCloseable {
             return;
         }
 
-        var source = new CancellationSource();
+        CancellationSource operationSource;
+        boolean cancelled;
         synchronized (lifecycleLock) {
-            summarySource = source;
+            operationSource = runSource;
+            cancelled = operationSource == null
+                    || operationSource.signal().isCancelled() || closed;
+            if (!cancelled) {
+                summarySource = operationSource;
+            }
+        }
+        if (cancelled) {
+            finishRunFinal(null, new CancellationException("coding-agent operation cancelled"), productStage);
+            return;
         }
         try {
-            compactNow(SummaryCause.OVERFLOW, null, source.signal(), true);
-            source.signal().throwIfCancelled();
+            compactNow(SummaryCause.OVERFLOW, null, operationSource.signal(), true);
+            CompletionStage<site.pplee.jcode.agentcore.LoopResult> secondStage;
             synchronized (lifecycleLock) {
-                summarySource = null;
+                operationSource.signal().throwIfCancelled();
+                ensureOpen();
+                if (runSource != operationSource) {
+                    throw new CancellationException("coding-agent operation cancelled");
+                }
                 skipAutomaticCompactionOnce = true;
+                secondStage = agent.continueAfterFailure();
             }
-            agent.continueAfterFailure().whenComplete((second, secondFailure) -> {
+            secondStage.whenComplete((second, secondFailure) -> {
                 if (secondFailure != null) {
                     finishRunFinal(null, secondFailure, productStage);
                     return;
@@ -858,14 +978,19 @@ public final class CodingAgentSession implements AutoCloseable {
                 }
             });
         } catch (Throwable recoveryFailure) {
-            emitSummaryFailure(SummaryCause.OVERFLOW, recoveryFailure, source);
+            var infrastructure = infrastructureFailure(recoveryFailure);
+            Throwable reportedFailure = emitSummaryFailure(
+                    SummaryCause.OVERFLOW, recoveryFailure, operationSource.signal());
             synchronized (lifecycleLock) {
                 summarySource = null;
             }
-            if (source.signal().isCancelled()) {
+            if (infrastructure == null) {
+                infrastructure = infrastructureFailure(reportedFailure);
+            }
+            if (operationSource.signal().isCancelled()) {
                 finishRunFinal(null, new CancellationException("overflow recovery cancelled"), productStage);
-            } else if (pendingInfrastructureFailure != null) {
-                finishRunFinal(null, pendingInfrastructureFailure, productStage);
+            } else if (infrastructure != null) {
+                finishRunFinal(null, infrastructure, productStage);
             } else {
                 finishRunFinal(first, null, productStage);
             }
@@ -881,7 +1006,7 @@ public final class CodingAgentSession implements AutoCloseable {
                 ? pendingInfrastructureFailure : failure;
         if (completionFailure == null) {
             try {
-                emitSummaryEvent(new CodingAgentEvent.RunCompleted(productResult));
+                emitEvent(new CodingAgentEvent.RunCompleted(productResult));
             } catch (Throwable eventFailure) {
                 completionFailure = eventFailure;
             }
@@ -898,6 +1023,7 @@ public final class CodingAgentSession implements AutoCloseable {
             }
             running = false;
             summarySource = null;
+            runSource = null;
             closeManager = closed;
         }
         if (closeManager) {
@@ -948,6 +1074,9 @@ public final class CodingAgentSession implements AutoCloseable {
     public void abort() {
         synchronized (lifecycleLock) {
             if (running) {
+                if (runSource != null) {
+                    runSource.cancel();
+                }
                 agent.abort();
                 if (summarySource != null) {
                     summarySource.cancel();
@@ -1293,6 +1422,7 @@ public final class CodingAgentSession implements AutoCloseable {
      */
     @Override
     public void close() {
+        boolean deferRuntimeClose;
         synchronized (lifecycleLock) {
             if (closed) {
                 return;
@@ -1304,76 +1434,85 @@ public final class CodingAgentSession implements AutoCloseable {
             if (summarySource != null) {
                 summarySource.cancel();
             }
+            if (runSource != null) {
+                runSource.cancel();
+            }
+            deferRuntimeClose = historyOperation;
         }
-        RuntimeException runtimeFailure = null;
-        Error errorFailure = null;
+        if (deferRuntimeClose) {
+            if (reloadExecutor != null) {
+                reloadExecutor.shutdown();
+            }
+            if (maintenanceExecutor != null) {
+                maintenanceExecutor.shutdown();
+            }
+            return;
+        }
+        Throwable failure = closeRuntimeResources(null, true);
+        boolean closeManagerNow;
+        synchronized (lifecycleLock) {
+            closeManagerNow = !running && !historyOperation;
+        }
+        if (closeManagerNow) {
+            failure = closeManager(failure);
+        }
+        rethrowCloseFailure(failure);
+    }
+
+    private Throwable closeRuntimeResources(Throwable existingFailure, boolean interruptMaintenance) {
+        if (!runtimeResourcesClosed.compareAndSet(false, true)) {
+            return existingFailure;
+        }
+        Throwable failure = existingFailure;
         try {
             agent.close();
-        } catch (RuntimeException failure) {
-            runtimeFailure = failure;
-        } catch (Error failure) {
-            errorFailure = failure;
+        } catch (RuntimeException | Error closeFailure) {
+            failure = combineFailures(failure, closeFailure);
         }
         if (reloadExecutor != null) {
             reloadExecutor.shutdownNow();
             if (!Boolean.TRUE.equals(reloadWorker.get())) {
                 try {
                     reloadExecutor.awaitTermination(2, TimeUnit.SECONDS);
-                } catch (InterruptedException failure) {
+                } catch (InterruptedException closeFailure) {
                     Thread.currentThread().interrupt();
-                    if (runtimeFailure == null && errorFailure == null) {
-                        runtimeFailure = new IllegalStateException(
-                                "interrupted while closing project context loader", failure);
-                    }
+                    failure = combineFailures(failure, new IllegalStateException(
+                            "interrupted while closing project context loader", closeFailure));
                 }
             }
         }
         if (maintenanceExecutor != null) {
-            maintenanceExecutor.shutdownNow();
+            if (interruptMaintenance) {
+                maintenanceExecutor.shutdownNow();
+            } else {
+                maintenanceExecutor.shutdown();
+            }
         }
-        // An uninterruptible load retains admission and settles only when its worker actually cleans up.
         try {
             toolSet.close();
-        } catch (RuntimeException failure) {
-            if (runtimeFailure != null) {
-                runtimeFailure.addSuppressed(failure);
-            } else if (errorFailure != null) {
-                errorFailure.addSuppressed(failure);
-            } else {
-                runtimeFailure = failure;
-            }
-        } catch (Error failure) {
-            if (runtimeFailure != null) {
-                runtimeFailure.addSuppressed(failure);
-            } else if (errorFailure != null) {
-                errorFailure.addSuppressed(failure);
-            } else {
-                errorFailure = failure;
-            }
+        } catch (RuntimeException | Error closeFailure) {
+            failure = combineFailures(failure, closeFailure);
         }
-        boolean closeManagerNow;
-        synchronized (lifecycleLock) {
-            closeManagerNow = !running && !historyOperation;
+        return failure;
+    }
+
+    private static Throwable combineFailures(Throwable failure, Throwable added) {
+        if (failure == null) {
+            return added;
         }
-        if (closeManagerNow) {
-            Throwable existingFailure = runtimeFailure != null ? runtimeFailure : errorFailure;
-            Throwable closeFailure = closeManager(existingFailure);
-            if (existingFailure == null && closeFailure != null) {
-                if (closeFailure instanceof Error error) {
-                    errorFailure = error;
-                } else if (closeFailure instanceof RuntimeException runtime) {
-                    runtimeFailure = runtime;
-                } else {
-                    runtimeFailure = new IllegalStateException(
-                            "unexpected checked session close failure", closeFailure);
-                }
-            }
+        failure.addSuppressed(added);
+        return failure;
+    }
+
+    private static void rethrowCloseFailure(Throwable failure) {
+        if (failure instanceof Error error) {
+            throw error;
         }
-        if (runtimeFailure != null) {
-            throw runtimeFailure;
+        if (failure instanceof RuntimeException runtime) {
+            throw runtime;
         }
-        if (errorFailure != null) {
-            throw errorFailure;
+        if (failure != null) {
+            throw new IllegalStateException("unexpected checked session close failure", failure);
         }
     }
 
@@ -1382,6 +1521,10 @@ public final class CodingAgentSession implements AutoCloseable {
             CodingAgentEventSink eventSink
     ) {
         if (event instanceof AgentEvent.MessageCompleted completed) {
+            var infrastructureFailure = pendingInfrastructureFailure;
+            if (infrastructureFailure != null) {
+                return CompletableFuture.failedFuture(infrastructureFailure);
+            }
             var message = SnapshotMapper.agentMessage(completed.message());
             if (!(message instanceof StandardAgentMessage standard)) {
                 return CompletableFuture.failedFuture(new IllegalArgumentException(
@@ -1483,7 +1626,11 @@ public final class CodingAgentSession implements AutoCloseable {
             historyOperation = false;
             closeManager = closed;
         }
-        return closeManager ? closeManager(existingFailure) : existingFailure;
+        if (!closeManager) {
+            return existingFailure;
+        }
+        var failure = closeRuntimeResources(existingFailure, false);
+        return closeManager(failure);
     }
 
     private static void rethrowHistoryFailure(Throwable failure) {

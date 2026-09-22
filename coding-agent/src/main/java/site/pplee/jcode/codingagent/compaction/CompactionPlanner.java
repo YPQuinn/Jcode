@@ -65,6 +65,9 @@ public final class CompactionPlanner {
                 checkpointIndex = index;
             }
         }
+        if (checkpointIndex >= 0 && !hasVisibleContentAfter(branch, checkpointIndex)) {
+            return List.of();
+        }
         var units = new ArrayList<Unit>();
         int start = 0;
         if (checkpointIndex >= 0) {
@@ -77,6 +80,16 @@ public final class CompactionPlanner {
             append(branch, 0, branch.size(), units);
         }
         return List.copyOf(units);
+    }
+
+    private static boolean hasVisibleContentAfter(List<SessionEntry> branch, int checkpointIndex) {
+        for (int index = checkpointIndex + 1; index < branch.size(); index++) {
+            if (branch.get(index) instanceof SessionMessageEntry
+                    || branch.get(index) instanceof BranchSummaryEntry) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void append(List<SessionEntry> branch, int from, int to, List<Unit> units) {
