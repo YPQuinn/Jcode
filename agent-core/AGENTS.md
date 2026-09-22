@@ -10,7 +10,7 @@
 | 理解流式消费 | `AgentLoop.java` → `consumeStream()`（Start → deltas → Done/Error，emit MessageStarted/MessageUpdated） |
 | 理解工具三阶段管道 | `ToolCallExecutor.java` → `prepareCall()`/`executeAndFinalize()`（prepare → execute → finalize；并行批次双排序） |
 | 工具执行编排 | `ToolCallExecutor.java`（pkg-private，三阶段管道 + 顺序/并行分发 + `ExecutorCompletionService` 完成序投递 + `LoopToolUpdateSink` close-and-drain + `ToolOutcome`） |
-| 公开 API | `Agent.java`：`prompt()`/`continueRun()`/`updateSystemPrompt()`/`replaceMessages()`/`steer()`/`followUp()`/`abort()`/`context()`/`state()`/`close()` |
+| 公开 API | `Agent.java`：`prompt()`/`continueRun()`/`updateSystemPrompt()`/`replaceMessages()`/`updateModel()`/`steer()`/`followUp()`/`abort()`/`context()`/`state()`/`close()` |
 | 实时状态快照 | `AgentState.java`（public record：streaming/streamingMessage/pendingToolCalls/errorMessage） |
 | 事件归约器 | `Agent.java` → `reduceState()`（`AtomicReference<AgentState>` + CAS；先归约 AgentState，再委托用户 sink） |
 | 构造 Agent | `AgentConfig.java`（record，含 beforeToolCall/afterToolCall 默认 noop，以及固定 `ModelRequestOptions`） |
@@ -41,7 +41,7 @@
 - `pom.xml` 声明本模块自己的 `enforce-module-boundaries` execution：仅允许依赖 `ai`，禁止 `ai-providers`、`coding-agent` 及更高产品模块；根 POM 只管理插件版本。
 - `AgentContext` 不可变；可变状态只在 `LoopState`（核心层唯一例外）。`AgentState` 是公开不可变快照，由 `Agent` 的归约器在每次事件时原子替换。
 - `Agent` 持有 `Executors.newVirtualThreadPerTaskExecutor()`，实现 `AutoCloseable`；公开 API 返回 `CompletionStage`，内部 loop 在虚拟线程上顺序控制流。
-- 每个 `Agent` 同时最多一个 active run；run 接纳、`updateSystemPrompt()` 和 close 通过 admission lock 线性化，`close()` 协作式 abort + drain executor。
+- 每个 `Agent` 同时最多一个 active run；run 接纳、`updateSystemPrompt()`、`updateModel()` 和 close 通过 admission lock 线性化，`close()` 协作式 abort + drain executor。`updateModel(model, thinking)` 仅在 idle 原子替换该对参数；run 接纳时在同一锁内捕获一次，worker 不再读取可变当前选择。
 - `updateSystemPrompt()` 与 `replaceMessages()` 仅在 idle 接纳，busy/closed 同步拒绝，并同步更新 `AgentContext` 与公开 `AgentState.context`。前者只替换 system prompt；后者防御性复制并原子替换完整消息列表。两者均保留 tools、pending queues 和错误快照，不调用模型、工具、hook、投影或事件 sink。
 - 阶段三 idle prompt 更新接入验收：本模块 204 个测试、全仓 762 个测试通过；`AgentTest` 与产品 reload/加载边界回归连续三轮通过。产品加载/取消/close 的资源生命周期仍由 `coding-agent` 持有，不扩展到 core。
 - 事件归约：`Agent` 内部包装用户 `AgentEventSink` 为归约 sink。归约器先 `reduceState(event)` 以 `AtomicReference<AgentState>` CAS 更新 `AgentState`，再委托用户 sink。用户 sink 看到事件时状态已完成归约。`AgentCompleted` 事件的 sink 完成前 loop 不返回（`emit().join()` 保证）。归约原子化不锁用户 sink；并行工具下 `ToolUpdate` 与生命周期事件可并发归约。

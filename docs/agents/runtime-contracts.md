@@ -25,7 +25,17 @@
 - 宿主 sink 或 writer 导致 run 基础设施失败时，下一次产品操作前必须用已接纳分支重新对齐 Agent transcript。writer 失败不接纳该消息，并封锁同一 owner 的后续追加；后续 `prompt()`、`continueRun()` 和元信息修改必须在调用 provider 或生成新 Entry id 前拒绝。
 - `continueRun()` 只允许当前分支非空且 leaf 是 user/tool-result 时调用，复用 core continuation，不伪造 user 消息。open 使用调用方当前模型、工具和配置；历史 model/thinking 仅描述历史，并在下一条完成消息前按需追加当前配置元信息。
 - `branch()`、`resetLeaf()`、`setName()` 与 `setLabel()` 是 idle-only 历史操作，与 run、reload 和 close 互斥。branch/reset 只移动当前 leaf 并替换 Agent transcript，不删除旧 Entry、不执行工具、不回滚工作区，且保留 steering/follow-up 队列。
-- 取消调用方拿到的观察 Future 不取消或释放已接纳运行。close 时若运行或历史追加仍在途，Session writer 及文件锁必须保留到对应完成回调结束。
+- 取消调用方拿到的观察 Future 不取消或释放已接纳运行。close 时若运行或历史追加仍在途，Session writer、文件锁及 Session 自建 Provider 必须保留到对应完成回调结束。
+- model/thinking 切换是 idle-only 产品操作，与 run、reload、历史操作和 close 互斥；core 在接纳 run 时原子捕获该对参数。切换本身不写历史或默认设置，下一条真实完成消息前按实际 run 参数追加必要差异。
+
+## Settings、凭证与模型装配
+
+- 新工厂只读取宿主显式提供的用户配置目录和工作目录；不推导 HOME，不扫描祖先 settings。项目设置必须先由 SDK 决定或独立 trust store 的精确规范路径决定授权；未授权时不得打开项目 settings。
+- sparse settings 按“内建 < 全局 < 已授权项目 < SDK”合并，缺失与空工具列表不同；ModelRef 和工具列表整体覆盖，request 仅按已知叶字段合并。非法已知字段使整层不应用，未知字段只诊断、不进入运行时。
+- 凭证优先级固定为 SDK、显式启用的单变量环境查询、只读 `auth.json`。高层非法值不得降级到低层；密钥只进入现有秘密持有类型，不进入设置结果、诊断、事件或 Session。
+- 新 Session 必须有显式/默认模型，不从目录挑第一个。恢复时优先历史模型，历史不可用才尝试不同的配置默认；SDK 明确模型不可用时直接失败。该选择只检查本地 provider/supports/auth 配置，不表示远端认证成功，也不触发网络。
+- borrowed `Models` 由宿主关闭；工厂自建 Provider 随 Session 关闭且只关闭一次。构造或恢复失败必须释放已取得的 Session writer 和自建资源。
+- settings/trust 保存是同步显式操作：稳定旁路锁文件、同 JVM 短时 reservation、跨进程 `tryLock()`、锁内重读、同目录临时文件和原子替换。锁冲突立即失败；不删除锁文件、不后台重试、不用 SessionFileAccess，也不把保存与当前 Session 切换包装成事务。
 
 ## Session 文件
 

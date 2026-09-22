@@ -1,13 +1,16 @@
 # coding-agent 模块知识库
 
-Headless 编码产品内核。组合 `ai` 与 `agent-core`，提供 `CodingAgentSession`、coding prompt、项目指令发现、具体编码工具以及产品级 state/result/event。第四阶段已交付内存/文件共用的 append-only Session 树、固定 JSONL codec、单写者与尾部恢复、create/open/continue/branch、名称标签和显式目录会话发现；仍不包含通用设置发现、Compaction、Extension 或 UI。
+Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition root 所需的 `ai-providers`，提供 `CodingAgentSession`、显式设置/模型装配、Session 持久化、项目指令、编码工具以及产品级 state/result/event。第五阶段已交付 sparse settings、精确项目授信、凭证优先级、Provider/Models 装配、创建/恢复选择、idle 模型切换和短时原子保存；仍不包含 Compaction、Extension 或 UI。
 
 ## WHERE TO LOOK
 
 | 任务 | 位置 |
 |------|------|
 | 产品调用入口 | `CodingAgentSession.java` |
-| 显式运行配置 | `CodingAgentConfig.java` |
+| 旧显式运行配置 | `CodingAgentConfig.java` |
+| 设置驱动装配入口 | `CodingAgentSessionFactory.java` / `CodingAgentSessionOptions.java` / `SessionCreationResult.java` |
+| 分层设置、授信与原子保存 | `settings/` |
+| Provider 定义、凭证、目录、profile 与选择 | `model/` |
 | 产品快照 | `CodingAgentState.java` / `CodingAgentRunResult.java` / `event/` |
 | Session 产品接入、可变树与文件实现 | `CodingAgentSession.java` / 包根目录下 package-private `SessionManager`、`SessionFile`、`SessionFileAccess`、codec |
 | Session 不可变模型、诊断、树查询与分支 context | `session/`（对外使用只读 `SessionSnapshot` / `SessionInfo`） |
@@ -29,9 +32,11 @@ Headless 编码产品内核。组合 `ai` 与 `agent-core`，提供 `CodingAgent
 | 第二阶段工具计划（已归档） | `../docs/plans/archived/coding-agent-phase-2-local-tools.md` |
 | 第三阶段上下文计划（已归档） | `../docs/plans/archived/coding-agent-phase-3-project-context.md` |
 | 第四阶段 Session 计划（已归档） | `../docs/plans/archived/coding-agent-phase-4-session-persistence.md` |
+| 第五阶段 Settings/Models/Credentials 计划（已归档） | `../docs/plans/archived/coding-agent-phase-5-settings-models-credentials.md` |
 
 ## PLANNING STATUS
 
+- 第五阶段 5A～5D 已完成：用户配置目录始终显式；普通设置按内建/全局/授权项目/SDK 合并，项目授权精确绑定 real path；Provider 定义仅来自用户级文件或 SDK，凭证按 SDK/env/只读文件解析。新工厂区分 borrowed/owned Models，创建不猜目录首项，恢复仅在历史模型不可用时回退到不同的配置默认。model/thinking 切换复用 core idle admission，只有下一条真实完成消息才记录差异。Settings/trust 保存使用稳定旁路锁、短时 reservation、锁内重读与原子替换，不复用 Session 长期 writer。
 - 第四阶段 4A～4D 已完成：内存 Header/五种 Entry、append-only 父链树、固定 JSONL codec、独占 writer 锁和 EOF 尾片段恢复已接入 `CodingAgentSession`。产品提供默认内存模式、显式文件 create/open、只读历史与诊断、`continueRun()`、idle-only branch/reset/name/label；`SessionFiles` 只扫描显式目录的直接 `*.jsonl` 子文件，支持 cwd 过滤和 latest，并将坏文件隔离为不含历史内容的诊断。仅持久化真实 `MessageCompleted`，sink/writer 失败会按已接纳历史对齐 Agent transcript，close 保留在途 writer 直到运行或历史追加结算。
 - 第三阶段已完成显式项目指令发现、不可变来源/诊断快照、纯 Prompt 装配和 idle 原子 reload；实施计划及后续语义纠偏记录归档于 `docs/plans/archived/coding-agent-phase-3-project-context.md`。候选仅 `AGENTS.override.md` → `AGENTS.md` → `AGENTS.MD`，不读取 CLAUDE 文件；每个候选只有成功读取后才停止，缺失、非普通文件、不可读或非法 UTF-8 均继续尝试较低优先级候选。
 - 项目来源按配置 working directory 的词法祖先链从父到子发现；real path 只用于来源身份、去重和 linked-worktree 关系判断。显式全局目录缺失表示无全局来源，配置成现存非目录或悬空链接仍是配置错误。普通文件筛选、严格 UTF-8/BOM、symlink/hardlink 去重与 1 MiB 聚合实际读取上限保留；不再维护单文件、保留总量、来源数、祖先数、路径、诊断、渲染或 deadline 等重叠预算。
@@ -56,13 +61,15 @@ Headless 编码产品内核。组合 `ai` 与 `agent-core`，提供 `CodingAgent
 ## CONVENTIONS
 
 - `CodingAgentSession` 是唯一产品运行入口；不得公开内部 `Agent`。
-- Provider、model client、工作目录、`ObjectMapper` 和 hook 均显式注入；本模块不自动发现 API Key 或产品配置。子进程环境按 `BashConfig` / `SearchConfig` 继承或显式替换。
-- `pom.xml` 的 module-local Enforcer 仅允许 Jcode 内部依赖 `ai` 与 `agent-core`，并显式禁止 `ai-providers`、`server` 和 `tui`。
+- 旧 API 的 Provider/model client、工作目录、`ObjectMapper` 和 hook 均显式注入且不读设置。新工厂只读宿主显式目录；只有宿主显式启用的窄环境查询可解析已命名凭证变量。子进程环境仍按 `BashConfig` / `SearchConfig` 继承或显式替换。
+- `pom.xml` 的 module-local Enforcer 允许 Jcode 内部依赖 `ai`、`agent-core` 与 `ai-providers`，并禁止 `server` 和 `tui`；具体 wire 逻辑不得移入本模块。
 - Public config 不持有可变 collection/tree；state/result/event/Session snapshot 对可变 `JsonNode` 在构造与访问时都做递归快照。
 - Session Entry 保持单一 append-only 序列；`branch()`/`resetLeaf()` 只移动当前 leaf，后续追加形成新分支且不得删除旧分支。分支 context 只沿 parent 链投影标准消息和分支内最新 model/thinking，名称与标签按全序列最新记录解析。
 - Session JSON 只用显式 `type` / `role` / `content.type` 分派，不启用任意多态类型。已知记录的额外字段可忽略；未知版本、未知类型、必要字段错误、坏父链或中部损坏必须失败。
 - 一个 Session 文件只允许一个持锁 writer；open 不修改文件。`SessionFileAccess` 必须协调同 JVM 的 writer reservation 和无 owner 时的同文件临时读取生命周期；活动 owner 的发现结果来自 `SessionManager` 已接纳历史，禁止在查询线程读取 writer 通道。全局 registry lock 只保护登记与状态切换，不覆盖摘要计算、文件 I/O 或资源关闭。仅 EOF 的截断 JSON 或不完整 UTF-8 后缀可诊断恢复，并在下一次追加前截断；完整末行无 LF 通过补分隔符继续追加。实际写入失败或底层通道/锁失效后当前 owner 必须拒绝继续写，`prompt`/`continue`/元信息须在 provider 或新 Entry id 前失败，关闭重开后再按相同读取规则判断。
 - `SessionManager` 是产品内部可变历史入口，也是 Entry 与索引的唯一长期内存所有者；`SessionFileReader` 只临时解析，`SessionFile` 只管理 Header、通道、锁、追加位置、尾部和失败状态。宿主不得绕过 `CodingAgentSession` 直接修改 Manager。标准消息只能由 `MessageCompleted` 接纳，文件模式必须先成功写文件、再更新内存树、最后通知宿主 sink。Session codec 的 JSON 浮点数必须按 `BigDecimal` 读取，不能先经二进制浮点损失工具参数精度。
+- Settings 的缺失不等于已填默认；空工具列表、OFF 和 PROVIDER_DEFAULT 都是显式值。未授权项目 settings 不得打开；普通 settings 不得定义 endpoint、凭证或 trust。API Key 不进入 Settings、Session、事件或诊断。
+- 配置保存只修改显式目标层和字段，保留未知字段；同 JVM reservation 和 `.lock` 原生锁只覆盖单次读—改—原子替换，不覆盖不同目标 I/O，不删除锁文件，也不复用 `SessionFileAccess`。
 - `AgentCompleted` 必须投影为产品 `RunCompleted`，不能通过 public event 暴露 `LoopResult` 中的工具实例。
 - 内置工具使用强类型参数和 JSON Schema；运行时边界不能只依赖 core 的最小 schema validator。
 - 文件路径以 Session working directory 解析，但 working directory 不是 sandbox。工具路径参数不得在交给文件系统前通过 lexical normalize 折叠 `..`；必须保留符号链接及中间路径不存在/非目录时的平台解析语义。
@@ -73,7 +80,7 @@ Headless 编码产品内核。组合 `ai` 与 `agent-core`，提供 `CodingAgent
 
 ## ANTI-PATTERNS
 
-- 不依赖 `ai-providers`（首阶段）、`server` 或 `tui`。
+- 不依赖 `server` 或 `tui`；不把 `ai-providers` 的 wire/adapter 实现复制到产品层。
 - 不复制模型流协议、Agent Loop、工具三阶段管道或 provider registry。
 - 不使用 `ServiceLoader`、classpath 扫描、静态可变 registry 或 DI 容器。
 - 不用 `Map<String,Object>` 表示配置、工具参数或结果。

@@ -15,7 +15,7 @@
 Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它将模型协议、Provider 适配、通用 Agent Loop 与编码产品能力拆分为边界清晰的库模块，使应用可以显式选择模型、工具、权限策略、上下文与生命周期行为，而不依赖全局注册表或自动扫描。
 
 > [!IMPORTANT]
-> Jcode 当前处于开发阶段，版本为 `1.0-SNAPSHOT`，需要从源码构建。仓库只提供可嵌入的库模块，不包含 CLI、TUI、HTTP Server 或 Spring Boot 启动入口；Compaction、产品级配置/凭证解析和 Extension 系统也尚未实现。
+> Jcode 当前处于开发阶段，版本为 `1.0-SNAPSHOT`，需要从源码构建。仓库只提供可嵌入的库模块，不包含 CLI、TUI、HTTP Server 或 Spring Boot 启动入口；Compaction 和 Extension 系统尚未实现。
 
 ## 核心特性
 
@@ -26,6 +26,7 @@ Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它�
 - **OpenAI Responses 适配**：基于 JDK `HttpClient` 与 Jackson 实现 HTTP/SSE，不依赖 Provider SDK；支持显式凭证、自定义 endpoint、兼容性、定价和有界重试配置。
 - **Headless 编码能力**：通过 `CodingAgentSession` 提供 prompt、continue、steer、follow-up、abort、状态与产品事件接口。
 - **Session 树与持久化**：支持默认内存历史、显式 JSONL create/open、append-only 分支、名称/标签、恢复诊断，以及显式目录的 list/latest/cwd 过滤。
+- **设置与模型装配**：支持显式全局/项目设置、精确项目授信、SDK/env/只读文件凭证优先级、Models 目录、创建/恢复选择、idle 模型切换及原子默认值保存。
 - **本地编码工具**：内置 `read`、`write`、`edit`、`bash`、`grep`、`find`、`ls`，工具集与授权策略均由调用方显式配置。
 - **项目指令发现**：沿配置工作目录的词法祖先链依次尝试 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，生成不可变上下文快照并组装 system prompt。
 
@@ -42,19 +43,20 @@ flowchart TD
     App --> Coding
     App --> Providers
     Coding --> Core
+    Coding --> Providers
     Coding --> AI
     Core --> AI
     Providers --> AI
 ```
 
-宿主应用负责创建 Provider runtime，并将其作为 `ModelClient` 注入 `coding-agent`。`coding-agent` 不直接依赖具体 Provider，因此产品层可以替换模型实现而无需改变 Agent Loop。
+旧显式 API 仍允许宿主创建任意 `ModelClient`。新增的设置驱动工厂可以借用调用方 `Models`，也可以从显式 Provider 定义和凭证创建 Session 专用的 OpenAI Responses runtime；两种装配方式不自动混合。
 
 | 模块 | 职责 | 内部依赖 |
 | --- | --- | --- |
 | [`ai`](ai/) | 模型、消息、流、工具、取消及 Provider runtime 抽象 | 无 |
 | [`ai-providers`](ai-providers/) | 具体 Provider adapter；当前提供 OpenAI Responses API | `ai` |
 | [`agent-core`](agent-core/) | Agent Loop、状态、事件、队列、hook 与工具执行管道 | `ai` |
-| [`coding-agent`](coding-agent/) | 编码产品门面、项目上下文、system prompt 与本地工具 | `ai`、`agent-core` |
+| [`coding-agent`](coding-agent/) | 编码产品门面、设置/模型装配、Session、项目上下文、system prompt 与本地工具 | `ai`、`agent-core`、`ai-providers` |
 
 Maven Enforcer 会在构建阶段检查这些依赖边界。
 
@@ -154,6 +156,8 @@ try (var provider = new OpenAiProvider(providerConfig)) {
 - `setName()`、`setLabel()`：追加名称或节点标签元数据。
 
 默认构造只使用内存历史。文件模式必须由宿主显式调用 `CodingAgentSession.create(config, sessionDirectory)` 或 `open(config, sessionFile)`；可通过 `SessionFiles.list/latest` 扫描显式目录并按可选 cwd 过滤。`branch()` / `resetLeaf()` 不回滚工作区文件，`open()` 以调用方当前模型、工具和配置为准。普通 JSONL append 不逐条 `force()`，因此不承诺断电 durability。
+
+设置驱动装配使用 `CodingAgentSessionFactory.inMemory/create/open` 与 `CodingAgentSessionOptions`。用户配置目录始终由宿主显式传入；项目 `.jcode/settings.json` 只有在 SDK 或独立 `trust.json` 明确允许时才读取。`SettingsFiles` 和 `ProjectTrustStore` 提供同步显式保存，`session.setModel(...)` 只改变当前会话，不自动修改默认设置。
 
 同目录中高优先级项目指令候选缺失、不是普通文件、不可读或不是合法 UTF-8 时，会继续尝试下一候选。System prompt 保留来源路径标记，但项目指令正文逐字拼接，不进行 XML 转义；总加载保留 1 MiB 聚合实际读取上限。Git worktree 识别失败不会阻止普通项目指令加载。
 

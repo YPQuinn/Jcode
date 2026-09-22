@@ -28,6 +28,10 @@
             <artifactId>agent-core</artifactId>
         </dependency>
         <dependency>
+            <groupId>site.pplee</groupId>
+            <artifactId>ai-providers</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
@@ -55,11 +59,10 @@
                             <rules>
                                 <bannedDependencies>
                                     <excludes>
-                                        <exclude>site.pplee:ai-providers</exclude>
                                         <exclude>site.pplee:server</exclude>
                                         <exclude>site.pplee:tui</exclude>
                                     </excludes>
-                                    <message>coding-agent must depend only on ai and agent-core among Jcode modules.</message>
+                                    <message>coding-agent may depend only on ai, agent-core, and ai-providers among Jcode modules.</message>
                                 </bannedDependencies>
                             </rules>
                         </configuration>

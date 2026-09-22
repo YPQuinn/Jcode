@@ -10,6 +10,8 @@ import site.pplee.jcode.agentcore.queue.QueueMode;
 
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.model.ModelRef;
+import site.pplee.jcode.ai.model.ThinkingLevel;
 
 import java.util.HashSet;
 import java.util.List;
@@ -54,6 +56,8 @@ public final class Agent implements AutoCloseable {
     private final AtomicReference<ActiveRun> activeRun = new AtomicReference<>(null);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private volatile AgentContext context;
+    private ModelRef model;
+    private ThinkingLevel thinkingLevel;
     private final AtomicReference<AgentState> state;
 
     public Agent(AgentConfig config) {
@@ -63,6 +67,8 @@ public final class Agent implements AutoCloseable {
         this.steeringQueue = new PendingMessageQueue(this.config.steeringMode());
         this.followUpQueue = new PendingMessageQueue(this.config.followUpMode());
         this.context = this.config.initialContext();
+        this.model = this.config.model();
+        this.thinkingLevel = this.config.thinkingLevel();
         this.state = new AtomicReference<>(AgentState.initial(this.context));
     }
 
@@ -154,6 +160,34 @@ public final class Agent implements AutoCloseable {
         }
     }
 
+    /**
+     * Atomically replace the model and thinking level while this agent is idle.
+     * A newly admitted run snapshots the pair together and keeps it for that run.
+     */
+    public void updateModel(ModelRef model, ThinkingLevel thinkingLevel) {
+        Objects.requireNonNull(model, "model must not be null");
+        Objects.requireNonNull(thinkingLevel, "thinkingLevel must not be null");
+        synchronized (admissionLock) {
+            requireIdle();
+            this.model = model;
+            this.thinkingLevel = thinkingLevel;
+        }
+    }
+
+    /** Current model used for the next admitted run. */
+    public ModelRef model() {
+        synchronized (admissionLock) {
+            return model;
+        }
+    }
+
+    /** Current thinking level used for the next admitted run. */
+    public ThinkingLevel thinkingLevel() {
+        synchronized (admissionLock) {
+            return thinkingLevel;
+        }
+    }
+
     public QueueMode steeringMode() {
         return steeringQueue.mode();
     }
@@ -198,6 +232,7 @@ public final class Agent implements AutoCloseable {
         var future = new CompletableFuture<LoopResult>();
         var run = new ActiveRun(source, future);
         AgentContext snapshot;
+        AgentLoopConfig loopConfig;
         synchronized (admissionLock) {
             if (closed.get()) {
                 return CompletableFuture.failedFuture(new IllegalStateException("Agent is closed"));
@@ -207,6 +242,7 @@ public final class Agent implements AutoCloseable {
                 return future;
             }
             snapshot = context;
+            loopConfig = getLoopConfig();
         }
         if (isContinue) {
             if (snapshot.messages().isEmpty()) {
@@ -225,7 +261,6 @@ public final class Agent implements AutoCloseable {
                 return future;
             }
         }
-        var loopConfig = getLoopConfig();
         try {
             executor.execute(() -> {
                 LoopResult result = null;
@@ -295,7 +330,7 @@ public final class Agent implements AutoCloseable {
             }
         };
         return new AgentLoopConfig(
-                config.model(),
+                model,
                 config.modelClient(),
                 config.objectMapper(),
                 config.contextTransformer(),
@@ -306,7 +341,7 @@ public final class Agent implements AutoCloseable {
                 steeringQueue,
                 followUpQueue,
                 new RunEventEmitter(reducerSink),
-                config.thinkingLevel(),
+                thinkingLevel,
                 config.prepareNextTurn(),
                 config.shouldStopAfterTurn(),
                 config.modelRequestOptions()

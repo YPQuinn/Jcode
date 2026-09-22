@@ -22,6 +22,7 @@ import site.pplee.jcode.ai.message.ResponseMetadata;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
+import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 import site.pplee.jcode.ai.stream.AssistantMessageStream;
 
@@ -267,6 +268,52 @@ class AgentTest {
             release.countDown();
             run.toCompletableFuture().get(2, TimeUnit.SECONDS);
         }
+    }
+
+    @Test
+    void modelUpdateIsIdleOnlyAndTheNextRunSnapshotsThePair() throws Exception {
+        var nextModel = new ModelRef("other", "other-api", "other-model");
+        var started = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var requests = new java.util.concurrent.CopyOnWriteArrayList<ModelRequest>();
+        ModelClient client = (request, cancellation) -> {
+            requests.add(request);
+            started.countDown();
+            var stream = new AssistantMessageStream();
+            CompletableFuture.runAsync(() -> {
+                try {
+                    release.await(2, TimeUnit.SECONDS);
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                }
+                var message = assistantText("done", StopReason.STOP);
+                stream.push(new AssistantMessageEvent.Start(message));
+                stream.push(new AssistantMessageEvent.Done(StopReason.STOP, message));
+            });
+            return stream;
+        };
+
+        var agent = new Agent(configWith(client, AgentEventSink.noop()));
+        try {
+            agent.updateModel(nextModel, ThinkingLevel.HIGH);
+            assertEquals(nextModel, agent.model());
+            assertEquals(ThinkingLevel.HIGH, agent.thinkingLevel());
+
+            var run = agent.prompt(user("hello"));
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            assertThrows(IllegalStateException.class,
+                    () -> agent.updateModel(MODEL, ThinkingLevel.LOW));
+            release.countDown();
+            run.toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+            assertEquals(nextModel, requests.getFirst().model());
+            assertEquals(ThinkingLevel.HIGH, requests.getFirst().thinkingLevel());
+        } finally {
+            release.countDown();
+            agent.close();
+        }
+        assertThrows(IllegalStateException.class,
+                () -> agent.updateModel(MODEL, ThinkingLevel.PROVIDER_DEFAULT));
     }
 
     // --- active-run protection ---

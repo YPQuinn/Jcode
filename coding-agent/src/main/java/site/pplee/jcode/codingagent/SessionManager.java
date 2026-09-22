@@ -184,6 +184,14 @@ final class SessionManager implements AutoCloseable {
         return sessionFile == null ? null : sessionFile.recovery();
     }
 
+    synchronized ModelRef currentModel() {
+        return currentModel;
+    }
+
+    synchronized ThinkingLevel currentThinkingLevel() {
+        return currentThinkingLevel;
+    }
+
     synchronized SessionFileAccess.DiscoveryResult discoveryResult() {
         return new SessionFileAccess.DiscoveryResult(header, entries, recovery());
     }

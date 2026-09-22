@@ -522,6 +522,11 @@ class CodingAgentSessionPersistenceTest {
             assertEquals(1, generatedIds.get(),
                     "a poisoned writer must reject metadata before generating another entry id");
 
+            var modelFailure = assertThrows(IOException.class,
+                    () -> session.setModel(OTHER_MODEL, ThinkingLevel.HIGH));
+            assertTrue(modelFailure.getMessage().contains("uncertain"));
+            assertEquals(MODEL, session.modelSelection().selected());
+
             var continueFailure = assertThrows(CompletionException.class,
                     () -> session.continueRun().toCompletableFuture().join());
             assertTrue(rootMessage(continueFailure).contains("uncertain"));

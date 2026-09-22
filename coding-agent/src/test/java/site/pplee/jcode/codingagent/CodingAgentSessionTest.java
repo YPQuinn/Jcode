@@ -16,6 +16,7 @@ import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
+import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.agentcore.AgentContext;
@@ -53,6 +54,32 @@ class CodingAgentSessionTest {
 
     @TempDir
     Path directory;
+
+    @Test
+    void sessionOwnedResourceIsClosedExactlyOnce() {
+        var client = new ScriptedModelClient(request -> assistant("ok"));
+        var config = new CodingAgentConfig(directory, MODEL, client,
+                new ObjectMapper(), null, null, null, null,
+                null, null, null, null);
+        var closes = new AtomicInteger();
+        var manager = new SessionManager(new site.pplee.jcode.codingagent.session.SessionHeader(
+                java.util.UUID.randomUUID(), Instant.now(), directory), java.time.Clock.systemUTC());
+        var session = new CodingAgentSession(
+                config,
+                (workingDirectory, options, revision, cancellation) ->
+                        site.pplee.jcode.codingagent.context.ProjectContextSnapshot.disabled(
+                                workingDirectory),
+                manager,
+                null,
+                closes::incrementAndGet);
+
+        session.close();
+        session.close();
+
+        assertEquals(1, closes.get());
+        assertThrows(IllegalStateException.class,
+                () -> session.setModel(MODEL, ThinkingLevel.HIGH));
+    }
 
     @Test
     void configNormalizesPathAndAppliesDefaultsWithoutReadingEnvironment() {
@@ -203,6 +230,10 @@ class CodingAgentSessionTest {
             assertThrows(IllegalStateException.class, () -> session.branch("missing"));
             assertThrows(IllegalStateException.class, session::resetLeaf);
             assertThrows(IllegalStateException.class, () -> session.setName("busy"));
+            assertThrows(IllegalStateException.class,
+                    () -> session.setModel(MODEL, ThinkingLevel.HIGH));
+            assertThrows(IllegalStateException.class,
+                    () -> session.setThinkingLevel(ThinkingLevel.LOW));
             assertThrows(IllegalStateException.class, () -> session.setLabel("missing", "busy"));
 
             gate.close();
@@ -262,6 +293,10 @@ class CodingAgentSessionTest {
             var run = session.prompt("first");
             assertTrue(client.started.await(5, TimeUnit.SECONDS));
             assertThrows(IllegalStateException.class, session::reloadProjectContext);
+            assertThrows(IllegalStateException.class,
+                    () -> session.setModel(MODEL, ThinkingLevel.HIGH));
+            assertThrows(IllegalStateException.class,
+                    () -> session.setThinkingLevel(ThinkingLevel.LOW));
             client.complete();
             run.toCompletableFuture().join();
         }

@@ -5,6 +5,7 @@ import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
+import site.pplee.jcode.ai.provider.Models;
 import site.pplee.jcode.ai.tool.ToolSpec;
 import site.pplee.jcode.agentcore.Agent;
 import site.pplee.jcode.agentcore.AgentConfig;
@@ -25,6 +26,7 @@ import site.pplee.jcode.codingagent.context.ProjectContextSnapshot;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
 import site.pplee.jcode.codingagent.event.CodingAgentEventSink;
 import site.pplee.jcode.codingagent.internal.SnapshotMapper;
+import site.pplee.jcode.codingagent.model.ModelSelection;
 import site.pplee.jcode.codingagent.prompt.SystemPromptBuilder;
 import site.pplee.jcode.codingagent.session.LabelEntry;
 import site.pplee.jcode.codingagent.session.SessionContextBuilder;
@@ -47,6 +49,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Headless product facade for one coding-agent conversation.
@@ -62,8 +65,10 @@ public final class CodingAgentSession implements AutoCloseable {
     private final Clock clock;
     private final SessionManager sessionManager;
     private final List<SessionDiagnostic> sessionDiagnostics;
-    private final ModelRef model;
-    private final ThinkingLevel thinkingLevel;
+    private final Models modelDirectory;
+    private final AutoCloseable ownedResource;
+    private final AtomicBoolean ownedResourceClosed = new AtomicBoolean();
+    private volatile ModelSelection currentSelection;
     private final ExecutorService reloadExecutor;
     // Remains set through callbacks, including callbacks that admit another reload.
     private final ThreadLocal<Boolean> reloadWorker = new ThreadLocal<>();
@@ -111,7 +116,7 @@ public final class CodingAgentSession implements AutoCloseable {
             ContextLoader contextLoader,
             SessionManager sessionManager
     ) {
-        this(config, contextLoader, sessionManager, null);
+        this(config, contextLoader, sessionManager, null, null);
     }
 
     CodingAgentSession(
@@ -120,14 +125,38 @@ public final class CodingAgentSession implements AutoCloseable {
             SessionManager sessionManager,
             BuiltInTools.ToolSet suppliedToolSet
     ) {
+        this(config, contextLoader, sessionManager, suppliedToolSet, null);
+    }
+
+    CodingAgentSession(
+            CodingAgentConfig config,
+            ContextLoader contextLoader,
+            SessionManager sessionManager,
+            BuiltInTools.ToolSet suppliedToolSet,
+            AutoCloseable ownedResource
+    ) {
+        this(config, contextLoader, sessionManager, suppliedToolSet, ownedResource, null);
+    }
+
+    CodingAgentSession(
+            CodingAgentConfig config,
+            ContextLoader contextLoader,
+            SessionManager sessionManager,
+            BuiltInTools.ToolSet suppliedToolSet,
+            AutoCloseable ownedResource,
+            ModelSelection initialSelection
+    ) {
         Objects.requireNonNull(config, "config must not be null");
         this.contextLoader = Objects.requireNonNull(contextLoader, "contextLoader must not be null");
         this.sessionManager = Objects.requireNonNull(sessionManager, "sessionManager must not be null");
         this.workingDirectory = config.workingDirectory();
         this.sessionDiagnostics = buildSessionDiagnostics(sessionManager, workingDirectory);
         this.clock = config.clock();
-        this.model = config.model();
-        this.thinkingLevel = config.thinkingLevel();
+        this.modelDirectory = config.modelClient() instanceof Models models ? models : null;
+        this.ownedResource = ownedResource;
+        this.currentSelection = initialSelection == null
+                ? runtimeSelection(config.model(), config.thinkingLevel())
+                : requireMatchingSelection(initialSelection, config);
         this.projectContextConfig = config.projectContext();
         this.customSystemPrompt = config.customSystemPrompt();
         this.appendSystemPrompt = config.appendSystemPrompt();
@@ -174,6 +203,13 @@ public final class CodingAgentSession implements AutoCloseable {
                 createdToolSet.close();
             } catch (RuntimeException | Error closeFailure) {
                 failure.addSuppressed(closeFailure);
+            }
+            if (ownedResource != null && ownedResourceClosed.compareAndSet(false, true)) {
+                try {
+                    ownedResource.close();
+                } catch (Exception closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
             }
             throw failure;
         }
@@ -428,6 +464,97 @@ public final class CodingAgentSession implements AutoCloseable {
         return workingDirectory;
     }
 
+    /** Current model and thinking pair used by the next admitted run. */
+    public ModelSelection modelSelection() {
+        return currentSelection;
+    }
+
+    /** Atomically update the model and thinking level while the session is idle. */
+    public ModelSelection setModel(ModelRef model, ThinkingLevel thinkingLevel) throws IOException {
+        Objects.requireNonNull(model, "model must not be null");
+        Objects.requireNonNull(thinkingLevel, "thinkingLevel must not be null");
+        return updateModelSelection(model, thinkingLevel);
+    }
+
+    /** Update only the thinking level while retaining the current model. */
+    public ModelSelection setThinkingLevel(ThinkingLevel thinkingLevel) throws IOException {
+        Objects.requireNonNull(thinkingLevel, "thinkingLevel must not be null");
+        return updateModelSelection(null, thinkingLevel);
+    }
+
+    private ModelSelection updateModelSelection(
+            ModelRef requestedModel,
+            ThinkingLevel thinkingLevel
+    ) throws IOException {
+        admitHistoryOperation();
+        Throwable failure = null;
+        ModelSelection result = null;
+        try {
+            sessionManager.requireWritable();
+            var previous = currentSelection;
+            var targetModel = requestedModel == null ? previous.selected() : requestedModel;
+            validateModel(targetModel);
+            synchronized (lifecycleLock) {
+                ensureOpen();
+                agent.updateModel(targetModel, thinkingLevel);
+                var updated = runtimeSelection(targetModel, thinkingLevel);
+                currentSelection = updated;
+                result = updated;
+            }
+        } catch (IOException | RuntimeException | Error operationFailure) {
+            failure = operationFailure;
+        }
+        failure = finishHistoryOperation(failure);
+        if (failure instanceof IOException ioFailure) {
+            throw ioFailure;
+        }
+        rethrowHistoryFailure(failure);
+        return result;
+    }
+
+    private void validateModel(ModelRef target) {
+        if (modelDirectory == null) {
+            return;
+        }
+        var provider = modelDirectory.provider(target.provider()).orElseThrow(() ->
+                new IllegalArgumentException("model provider is not assembled: " + target.provider()));
+        if (!provider.supports(target)) {
+            throw new IllegalArgumentException(
+                    "model is not supported: " + target.provider() + "/" + target.api()
+                            + "/" + target.modelId());
+        }
+        if (!provider.auth().isConfigured()) {
+            throw new IllegalArgumentException(
+                    "model provider authentication is not configured: " + target.provider());
+        }
+    }
+
+    private static ModelSelection runtimeSelection(
+            ModelRef model,
+            ThinkingLevel thinkingLevel
+    ) {
+        return new ModelSelection(
+                Optional.of(model),
+                Optional.empty(),
+                model,
+                thinkingLevel,
+                ModelSelection.Source.RUNTIME,
+                List.of());
+    }
+
+    private static ModelSelection requireMatchingSelection(
+            ModelSelection selection,
+            CodingAgentConfig config
+    ) {
+        Objects.requireNonNull(selection, "initialSelection must not be null");
+        if (!selection.selected().equals(config.model())
+                || selection.thinkingLevel() != config.thinkingLevel()) {
+            throw new IllegalArgumentException(
+                    "initial selection must match the session model and thinking level");
+        }
+        return selection;
+    }
+
     /** Return an immutable point-in-time view of the accepted product history. */
     public SessionSnapshot history() {
         return sessionManager.snapshot();
@@ -589,15 +716,16 @@ public final class CodingAgentSession implements AutoCloseable {
             closeManagerNow = !running && !historyOperation;
         }
         if (closeManagerNow) {
-            try {
-                sessionManager.close();
-            } catch (IOException failure) {
-                if (runtimeFailure != null) {
-                    runtimeFailure.addSuppressed(failure);
-                } else if (errorFailure != null) {
-                    errorFailure.addSuppressed(failure);
+            Throwable existingFailure = runtimeFailure != null ? runtimeFailure : errorFailure;
+            Throwable closeFailure = closeManager(existingFailure);
+            if (existingFailure == null && closeFailure != null) {
+                if (closeFailure instanceof Error error) {
+                    errorFailure = error;
+                } else if (closeFailure instanceof RuntimeException runtime) {
+                    runtimeFailure = runtime;
                 } else {
-                    runtimeFailure = new UncheckedIOException(failure);
+                    runtimeFailure = new IllegalStateException(
+                            "unexpected checked session close failure", closeFailure);
                 }
             }
         }
@@ -620,7 +748,9 @@ public final class CodingAgentSession implements AutoCloseable {
                         "phase-four sessions only persist standard agent messages"));
             }
             try {
-                sessionManager.appendCompletedMessage(standard, model, thinkingLevel);
+                var selection = currentSelection;
+                sessionManager.appendCompletedMessage(
+                        standard, selection.selected(), selection.thinkingLevel());
             } catch (IOException | RuntimeException failure) {
                 return CompletableFuture.failedFuture(failure);
             }
@@ -713,16 +843,29 @@ public final class CodingAgentSession implements AutoCloseable {
     }
 
     private Throwable closeManager(Throwable existingFailure) {
+        Throwable failure = existingFailure;
         try {
             sessionManager.close();
-            return existingFailure;
         } catch (IOException closeFailure) {
-            if (existingFailure != null) {
-                existingFailure.addSuppressed(closeFailure);
-                return existingFailure;
+            if (failure == null) {
+                failure = new UncheckedIOException(closeFailure);
+            } else {
+                failure.addSuppressed(closeFailure);
             }
-            return new UncheckedIOException(closeFailure);
         }
+        if (ownedResource != null && ownedResourceClosed.compareAndSet(false, true)) {
+            try {
+                ownedResource.close();
+            } catch (Exception closeFailure) {
+                if (failure == null) {
+                    failure = new IllegalStateException(
+                            "could not close session-owned model resources", closeFailure);
+                } else {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+        }
+        return failure;
     }
 
     @FunctionalInterface

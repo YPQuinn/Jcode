@@ -1,6 +1,6 @@
 # Coding Agent 总开发计划
 
-> 状态：进行中（阶段一、阶段二、阶段三、阶段四已完成）
+> 状态：进行中（阶段一至阶段五已完成）
 >
 > Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
 >
@@ -17,6 +17,8 @@
 > 第三阶段实施计划（已完成）：[`archived/coding-agent-phase-3-project-context.md`](archived/coding-agent-phase-3-project-context.md)
 >
 > 第四阶段实施计划（已完成）：[`archived/coding-agent-phase-4-session-persistence.md`](archived/coding-agent-phase-4-session-persistence.md)
+>
+> 第五阶段实施计划（已完成）：[`archived/coding-agent-phase-5-settings-models-credentials.md`](archived/coding-agent-phase-5-settings-models-credentials.md)
 >
 > 实施范围：阶段一至阶段七；不包含 TUI、Server 或其他产品入口
 
@@ -106,14 +108,13 @@ Jcode 已通过第一阶段创建 `coding-agent`，把现有 provider-neutral �
 
 ### 2.2 产品层缺口
 
-第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果；第二阶段已补齐显式授权的本地编码工具闭环；第三阶段已完成项目上下文发现；第四阶段已完成 append-only Session 树、固定 JSONL 持久化、显式 create/open、继续与分支、名称标签、坏文件隔离和 list/latest/cwd 过滤。当前仍需补齐：
+第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果；第二阶段已补齐显式授权的本地编码工具闭环；第三阶段已完成项目上下文发现；第四阶段已完成 append-only Session 树与 JSONL 持久化；第五阶段已完成显式设置、项目授信、默认模型、凭证、Provider 装配、恢复选择、idle 切换和原子保存。当前仍需补齐：
 
-- 产品设置、默认模型与凭证装配；
 - context window 策略和 compaction；
 - Skill、Prompt Template、Resource Loader、Extension；
 - 随后续能力扩展的产品事件，而不是重新定义已交付的基础事件协议。
 
-这些能力都依赖产品语义，不应进入 `ai` 或 `agent-core`。
+这些能力都依赖产品语义，不应进入 `ai` 或 `agent-core`。其中产品设置、默认模型、凭证装配和 idle 切换已在第五阶段完成；当前后续缺口从 Compaction 开始。
 
 ## 3. 对标原则与有意差异
 
@@ -528,6 +529,8 @@ Compaction/branch summary 由阶段六增加；typed custom/custom message 由�
 - 不通过 URL 或 model id 猜测 endpoint profile 或能力。
 
 ### 10.5 阶段门槛
+
+第五阶段已按归档详细计划完成；现行行为见 `coding-agent/AGENTS.md` 与 `docs/agents/runtime-contracts.md`。
 
 - 显式 key、环境 source 和受保护文件 source 的优先级可测试；
 - 无 decision、显式拒绝、显式允许和已保存 decision 均有测试；未授权项目设置不能改变 provider/endpoint、模型或启用工具，项目文件不能自授信；

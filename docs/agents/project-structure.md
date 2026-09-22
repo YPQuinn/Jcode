@@ -7,7 +7,7 @@
 | `ai` | Provider-neutral 模型协议、消息、流、取消、工具声明与 provider runtime 抽象 | 无 |
 | `ai-providers` | 具体 provider adapter；当前包含 OpenAI Responses adapter | `ai` |
 | `agent-core` | 通用 Agent Runtime、事件循环、队列、hook、取消所有权与工具执行 | `ai` |
-| `coding-agent` | Headless 编码产品内核、项目上下文、coding prompt 与本地编码工具 | `ai`、`agent-core` |
+| `coding-agent` | Headless 编码产品内核、设置/模型装配、Session、项目上下文、coding prompt 与本地编码工具 | `ai`、`agent-core`、`ai-providers` |
 
 依赖方向是产品层 → runtime/protocol 层。所有模块都是库，没有应用启动入口。
 
