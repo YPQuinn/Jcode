@@ -54,6 +54,7 @@ public final class ProviderDefinitions {
         try (var input = Files.newInputStream(normalized)) {
             JsonNode root = mapper.reader()
                     .with(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                     .readTree(input);
             if (root == null || !root.isObject() || root.size() != 1
                     || !root.has("providers") || !root.get("providers").isObject()) {

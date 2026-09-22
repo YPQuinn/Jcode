@@ -91,6 +91,43 @@ class SettingsLoaderTest {
     }
 
     @Test
+    void trailingJsonRejectsTheEntireSettingsLayer() throws Exception {
+        var project = Files.createDirectory(tempDirectory.resolve("trailing-project"));
+        var user = Files.createDirectory(tempDirectory.resolve("trailing-user"));
+        Files.writeString(user.resolve("settings.json"), """
+                {"defaultTools":["write"]}
+                {"defaultTools":["edit"]}
+                """);
+
+        var result = SettingsLoader.load(SettingsLoadRequest.explicit(
+                project, user, ProjectTrustDecision.DENY,
+                SettingsOverrides.none(), MAPPER));
+
+        assertEquals(List.of(CodingTool.READ), List.copyOf(result.settings().defaultTools()));
+        assertTrue(result.diagnostics().stream().anyMatch(diagnostic ->
+                diagnostic.code() == SettingsDiagnostic.Code.SETTINGS_INVALID));
+    }
+
+    @Test
+    void outOfScopeFieldRejectsTheLayerWithoutEchoingItsValue() throws Exception {
+        var project = Files.createDirectory(tempDirectory.resolve("scope-project"));
+        var user = Files.createDirectory(tempDirectory.resolve("scope-user"));
+        String secret = "scope-secret-sentinel";
+        Files.writeString(user.resolve("settings.json"), """
+                {"defaultTools":["write"],"apiKey":"%s"}
+                """.formatted(secret));
+
+        var result = SettingsLoader.load(SettingsLoadRequest.explicit(
+                project, user, ProjectTrustDecision.DENY,
+                SettingsOverrides.none(), MAPPER));
+
+        assertEquals(List.of(CodingTool.READ), List.copyOf(result.settings().defaultTools()));
+        assertTrue(result.diagnostics().stream().anyMatch(diagnostic ->
+                diagnostic.code() == SettingsDiagnostic.Code.SETTINGS_FIELD_OUT_OF_SCOPE));
+        assertFalse(result.diagnostics().toString().contains(secret));
+    }
+
+    @Test
     void unauthorizedProjectSettingsAreNeverParsed() throws Exception {
         var project = Files.createDirectory(tempDirectory.resolve("project"));
         var user = Files.createDirectory(tempDirectory.resolve("user"));
@@ -192,6 +229,28 @@ class SettingsLoaderTest {
 
         assertEquals(ProjectTrustDecision.UNSPECIFIED, result.projectTrust());
         assertEquals(ProjectTrustSource.NONE, result.projectTrustSource());
+        assertTrue(result.diagnostics().stream().anyMatch(diagnostic ->
+                diagnostic.code() == SettingsDiagnostic.Code.TRUST_STORE_INVALID));
+    }
+
+    @Test
+    void trailingJsonRejectsTheEntireTrustStore() throws Exception {
+        var project = Files.createDirectory(tempDirectory.resolve("trust-trailing-project"));
+        var user = Files.createDirectory(tempDirectory.resolve("trust-trailing-user"));
+        Files.createDirectories(project.resolve(".jcode"));
+        Files.writeString(project.resolve(".jcode/settings.json"),
+                "{\"defaultTools\":[\"write\"]}");
+        Files.writeString(user.resolve("trust.json"), """
+                {"projects":{"%s":true}}
+                {"projects":{}}
+                """.formatted(project.toRealPath()));
+
+        var result = SettingsLoader.load(SettingsLoadRequest.explicit(
+                project, user, ProjectTrustDecision.UNSPECIFIED,
+                SettingsOverrides.none(), MAPPER));
+
+        assertEquals(ProjectTrustDecision.UNSPECIFIED, result.projectTrust());
+        assertFalse(result.projectSettingsApplied());
         assertTrue(result.diagnostics().stream().anyMatch(diagnostic ->
                 diagnostic.code() == SettingsDiagnostic.Code.TRUST_STORE_INVALID));
     }

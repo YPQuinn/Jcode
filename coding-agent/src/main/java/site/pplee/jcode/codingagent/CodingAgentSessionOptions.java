@@ -40,6 +40,7 @@ public final class CodingAgentSessionOptions {
     private final String customSystemPrompt;
     private final String appendSystemPrompt;
     private final CodingToolConfig tools;
+    private final boolean toolsExplicitlyConfigured;
     private final ProjectContextConfig projectContext;
 
     private CodingAgentSessionOptions(Builder builder) {
@@ -63,6 +64,7 @@ public final class CodingAgentSessionOptions {
         customSystemPrompt = builder.customSystemPrompt;
         appendSystemPrompt = builder.appendSystemPrompt;
         tools = builder.tools;
+        toolsExplicitlyConfigured = builder.toolsExplicitlyConfigured;
         projectContext = builder.projectContext;
         if (borrowedModels != null
                 && (!providerDefinitions.isEmpty() || !credentials.isEmpty())) {
@@ -139,6 +141,10 @@ public final class CodingAgentSessionOptions {
         return tools;
     }
 
+    boolean toolsExplicitlyConfigured() {
+        return toolsExplicitlyConfigured;
+    }
+
     public ProjectContextConfig projectContext() {
         return projectContext;
     }
@@ -161,6 +167,7 @@ public final class CodingAgentSessionOptions {
         private String customSystemPrompt;
         private String appendSystemPrompt;
         private CodingToolConfig tools = CodingToolConfig.readOnly();
+        private boolean toolsExplicitlyConfigured;
         private ProjectContextConfig projectContext = ProjectContextConfig.disabled();
 
         private Builder(Path workingDirectory) {
@@ -235,8 +242,13 @@ public final class CodingAgentSessionOptions {
             return this;
         }
 
+        /**
+         * Supplies the complete SDK tool configuration. Its enabled-tool set
+         * takes precedence over settings defaults, including when it is empty.
+         */
         public Builder tools(CodingToolConfig value) {
             tools = Objects.requireNonNull(value, "tools must not be null");
+            toolsExplicitlyConfigured = true;
             return this;
         }
 

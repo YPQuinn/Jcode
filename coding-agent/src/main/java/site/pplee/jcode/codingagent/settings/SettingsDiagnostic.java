@@ -37,6 +37,7 @@ public record SettingsDiagnostic(
     public enum Code {
         SETTINGS_READ_FAILED,
         SETTINGS_INVALID,
+        SETTINGS_FIELD_OUT_OF_SCOPE,
         UNSUPPORTED_FIELD,
         PROJECT_SETTINGS_NOT_APPLIED,
         TRUST_STORE_READ_FAILED,

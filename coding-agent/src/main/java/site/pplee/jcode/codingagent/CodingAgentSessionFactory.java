@@ -10,9 +10,11 @@ import site.pplee.jcode.codingagent.model.ModelSelectionException;
 import site.pplee.jcode.codingagent.model.ModelSelector;
 import site.pplee.jcode.codingagent.model.ProviderDefinitions;
 import site.pplee.jcode.codingagent.session.SessionHeader;
+import site.pplee.jcode.codingagent.settings.CodingAgentSettings;
 import site.pplee.jcode.codingagent.settings.SettingsLoadRequest;
 import site.pplee.jcode.codingagent.settings.SettingsLoadResult;
 import site.pplee.jcode.codingagent.settings.SettingsLoader;
+import site.pplee.jcode.codingagent.settings.SettingsOverrides;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 
 import java.io.IOException;
@@ -64,7 +66,7 @@ public final class CodingAgentSessionFactory {
                 options.workingDirectory(),
                 options.userConfigDirectory(),
                 options.projectTrust(),
-                options.settingsOverrides(),
+                effectiveOverrides(options),
                 options.objectMapper()));
         ModelRuntime runtime = buildRuntime(options, settings);
         SessionManager manager = null;
@@ -162,6 +164,24 @@ public final class CodingAgentSessionFactory {
         combined.addAll(runtime.diagnostics());
         return new ModelRuntime(
                 runtime.models(), runtime.profiles(), combined, runtime.ownedResources());
+    }
+
+    private static SettingsOverrides effectiveOverrides(CodingAgentSessionOptions options) {
+        var overrides = options.settingsOverrides();
+        if (!options.toolsExplicitlyConfigured()) {
+            return overrides;
+        }
+        var settings = overrides.settings();
+        var enabledTools = options.tools().enabledTools().stream().sorted().toList();
+        var withExplicitTools = new CodingAgentSettings(
+                settings.defaultModel(),
+                settings.defaultThinkingLevel(),
+                Optional.of(enabledTools),
+                settings.steeringMode(),
+                settings.followUpMode(),
+                settings.maxOutputTokens(),
+                settings.temperature());
+        return new SettingsOverrides(withExplicitTools, overrides.requestOptions());
     }
 
     private static CodingAgentConfig createConfig(

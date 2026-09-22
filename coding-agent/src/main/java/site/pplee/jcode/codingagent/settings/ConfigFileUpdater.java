@@ -91,6 +91,7 @@ final class ConfigFileUpdater {
         try (var input = Files.newInputStream(target)) {
             var root = mapper.reader()
                     .with(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                     .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
                     .readTree(input);
             if (!(root instanceof ObjectNode object)) {

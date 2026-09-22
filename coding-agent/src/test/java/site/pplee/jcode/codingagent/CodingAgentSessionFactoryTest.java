@@ -24,6 +24,7 @@ import site.pplee.jcode.codingagent.model.ModelSelection;
 import site.pplee.jcode.codingagent.model.ProviderDefinition;
 import site.pplee.jcode.codingagent.settings.CodingAgentSettings;
 import site.pplee.jcode.codingagent.settings.SettingsOverrides;
+import site.pplee.jcode.codingagent.tool.CodingToolConfig;
 import site.pplee.jcode.aiproviders.openai.OpenAiCredentials;
 import site.pplee.jcode.aiproviders.openai.OpenAiModelCapabilities;
 import site.pplee.jcode.aiproviders.openai.OpenAiResponsesCompatibility;
@@ -40,6 +41,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -136,6 +138,49 @@ class CodingAgentSessionFactoryTest {
             assertEquals(ThinkingLevel.HIGH, provider.requests().getFirst().thinkingLevel());
         }
         assertFalse(provider.closed, "borrowed provider ownership stays with the caller");
+    }
+
+    @Test
+    void explicitToolConfigOverridesFileToolDefaultsInActualRequest() throws Exception {
+        var userConfig = Files.createDirectory(directory.resolve("user-tools"));
+        Files.writeString(userConfig.resolve("settings.json"), """
+                {"defaultTools":["write"]}
+                """);
+        var provider = new RecordingProvider(List.of(FIRST));
+        var options = CodingAgentSessionOptions.builder(directory)
+                .userConfigDirectory(userConfig)
+                .borrowedModels(new DefaultModels(List.of(provider)), Map.of())
+                .settingsOverrides(explicit(FIRST, ThinkingLevel.PROVIDER_DEFAULT))
+                .tools(CodingToolConfig.readOnly())
+                .clock(CLOCK)
+                .build();
+
+        var created = CodingAgentSessionFactory.inMemory(options);
+        try (var session = created.session()) {
+            session.prompt("inspect tools").toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+
+        assertEquals(
+                List.of("read"),
+                provider.requests().getFirst().tools().stream().map(tool -> tool.name()).toList());
+    }
+
+    @Test
+    void explicitEmptyToolConfigDisablesTheBuiltInDefaultInActualRequest() throws Exception {
+        var provider = new RecordingProvider(List.of(FIRST));
+        var options = CodingAgentSessionOptions.builder(directory)
+                .borrowedModels(new DefaultModels(List.of(provider)), Map.of())
+                .settingsOverrides(explicit(FIRST, ThinkingLevel.PROVIDER_DEFAULT))
+                .tools(new CodingToolConfig(Set.of(), null, null, null))
+                .clock(CLOCK)
+                .build();
+
+        var created = CodingAgentSessionFactory.inMemory(options);
+        try (var session = created.session()) {
+            session.prompt("no tools").toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+
+        assertTrue(provider.requests().getFirst().tools().isEmpty());
     }
 
     @Test

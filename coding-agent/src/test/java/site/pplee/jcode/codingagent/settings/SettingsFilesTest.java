@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.codingagent.tool.CodingTool;
 
+import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -100,10 +101,32 @@ class SettingsFilesTest {
         var target = user.resolve("settings.json");
         Files.writeString(target, "broken");
         byte[] before = Files.readAllBytes(target);
-        assertThrows(Exception.class, () -> files.updateGlobal(SettingsUpdate.builder()
+        assertThrows(IOException.class, () -> files.updateGlobal(SettingsUpdate.builder()
                 .setDefaultTools(List.of(CodingTool.READ))
                 .build()));
         assertArrayEquals(before, Files.readAllBytes(target));
+    }
+
+    @Test
+    void trailingJsonAndOutOfScopeFieldsAreNotOverwritten() throws Exception {
+        var project = Files.createDirectory(directory.resolve("strict-project"));
+        var user = Files.createDirectory(directory.resolve("strict-user"));
+        var target = user.resolve("settings.json");
+        var files = new SettingsFiles(project, user, MAPPER);
+
+        Files.writeString(target, "{\"defaultTools\":[\"read\"]}\ntrailing-garbage");
+        byte[] trailingBytes = Files.readAllBytes(target);
+        assertThrows(IOException.class, () -> files.updateGlobal(SettingsUpdate.builder()
+                .setTemperature(0.2d)
+                .build()));
+        assertArrayEquals(trailingBytes, Files.readAllBytes(target));
+
+        Files.writeString(target, "{\"apiKey\":\"must-not-be-saved\"}");
+        byte[] outOfScopeBytes = Files.readAllBytes(target);
+        assertThrows(IOException.class, () -> files.updateGlobal(SettingsUpdate.builder()
+                .setTemperature(0.3d)
+                .build()));
+        assertArrayEquals(outOfScopeBytes, Files.readAllBytes(target));
     }
 
     @Test
@@ -203,6 +226,26 @@ class SettingsFilesTest {
         } catch (UnsupportedOperationException ignored) {
             // Permission evidence is platform-specific.
         }
+    }
+
+    @Test
+    void trustStoreSymlinkIntoProjectIsRejectedForLookupAndWrites() throws Exception {
+        var project = Files.createDirectory(directory.resolve("linked-project"));
+        var user = Files.createDirectory(directory.resolve("linked-user"));
+        var target = project.resolve("trust-target.json");
+        Files.writeString(target, "{\"projects\":{}}\n");
+        byte[] before = Files.readAllBytes(target);
+        Files.createSymbolicLink(user.resolve("trust.json"), target);
+        var store = new ProjectTrustStore(user, MAPPER);
+
+        var lookup = store.lookup(project);
+        assertEquals(ProjectTrustDecision.UNSPECIFIED, lookup.decision());
+        assertTrue(lookup.diagnostics().stream().anyMatch(diagnostic ->
+                diagnostic.code() == SettingsDiagnostic.Code.TRUST_STORE_INSIDE_PROJECT));
+        assertThrows(java.io.IOException.class,
+                () -> store.remember(project, ProjectTrustDecision.ALLOW));
+        assertThrows(java.io.IOException.class, () -> store.remove(project));
+        assertArrayEquals(before, Files.readAllBytes(target));
     }
 
     private static boolean externalProcessCanAcquire(Path path) throws Exception {

@@ -27,6 +27,9 @@ public final class SettingsLoader {
             "steeringMode", "followUpMode", "request");
     private static final Set<String> REQUEST_FIELDS = Set.of(
             "maxOutputTokens", "temperature");
+    private static final Set<String> OUT_OF_SCOPE_FIELDS = Set.of(
+            "apiKey", "headers", "baseUrl", "credentialSource",
+            "trust", "trustDecision", "projectTrust", "projectTrustDecision");
 
     private SettingsLoader() {
     }
@@ -90,11 +93,11 @@ public final class SettingsLoader {
         try (var input = Files.newInputStream(path)) {
             JsonNode root = mapper.reader()
                     .with(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                     .readTree(input);
             if (root == null || !root.isObject()) {
                 throw new IllegalArgumentException("settings root must be an object");
             }
-            reportUnknownFields(root, ROOT_FIELDS, path, diagnostics, "settings");
             var settings = parseSettings(root, path, diagnostics);
             return new LayerResult(settings, true, diagnostics);
         } catch (JsonProcessingException | IllegalArgumentException failure) {
@@ -117,9 +120,16 @@ public final class SettingsLoader {
             Path path,
             List<SettingsDiagnostic> diagnostics
     ) {
+        if (root == null || !root.isObject()) {
+            throw new IllegalArgumentException("settings root must be an object");
+        }
+        reportUnknownFields(root, ROOT_FIELDS, path, diagnostics, "settings");
         var builder = CodingAgentSettings.builder();
         if (root.has("defaultModel")) {
             var model = requireObject(root.get("defaultModel"), "defaultModel");
+            reportUnknownFields(
+                    model, Set.of("provider", "api", "modelId"),
+                    path, diagnostics, "defaultModel");
             requireExactFields(model, Set.of("provider", "api", "modelId"), "defaultModel");
             builder.defaultModel(new ModelRef(
                     requireText(model, "provider"),
@@ -189,15 +199,29 @@ public final class SettingsLoader {
             List<SettingsDiagnostic> diagnostics,
             String prefix
     ) {
+        boolean outOfScope = false;
         Iterator<String> names = object.fieldNames();
         while (names.hasNext()) {
             String name = names.next();
-            if (!known.contains(name)) {
+            if (known.contains(name)) {
+                continue;
+            }
+            if (OUT_OF_SCOPE_FIELDS.contains(name)) {
+                outOfScope = true;
+                diagnostics.add(SettingsDiagnostic.of(
+                        SettingsDiagnostic.Code.SETTINGS_FIELD_OUT_OF_SCOPE,
+                        "settings field is not allowed in this file: " + prefix + "." + name,
+                        path));
+            } else {
                 diagnostics.add(SettingsDiagnostic.of(
                         SettingsDiagnostic.Code.UNSUPPORTED_FIELD,
                         "unsupported settings field was not applied: " + prefix + "." + name,
                         path));
             }
+        }
+        if (outOfScope) {
+            throw new IllegalArgumentException(
+                    "settings contain fields that are not allowed in this file");
         }
     }
 

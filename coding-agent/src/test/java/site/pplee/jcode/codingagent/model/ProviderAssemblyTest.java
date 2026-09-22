@@ -8,14 +8,17 @@ import site.pplee.jcode.aiproviders.openai.OpenAiModelCapabilities;
 import site.pplee.jcode.aiproviders.openai.OpenAiResponsesCompatibility;
 
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,6 +74,22 @@ class ProviderAssemblyTest {
                 merged.getFirst().models().stream().map(ProviderDefinition.DefinedModel::id).toList());
         assertThrows(IllegalArgumentException.class,
                 () -> ProviderDefinitions.merge(List.of(), List.of(replacement, replacement)));
+    }
+
+    @Test
+    void providerDefinitionsRejectTrailingJson() throws Exception {
+        var path = directory.resolve("trailing-models.json");
+        Files.writeString(path, """
+                {"providers":{}}
+                {"providers":{}}
+                """);
+
+        var loaded = ProviderDefinitions.load(path, MAPPER);
+
+        assertFalse(loaded.valid());
+        assertTrue(loaded.definitions().isEmpty());
+        assertTrue(loaded.diagnostics().stream().anyMatch(diagnostic ->
+                diagnostic.code() == ModelAssemblyDiagnostic.Code.MODELS_INVALID));
     }
 
     @Test
@@ -166,6 +185,71 @@ class ProviderAssemblyTest {
         assertTrue(resolution.diagnostics().stream().anyMatch(diagnostic ->
                 diagnostic.code() == ModelAssemblyDiagnostic.Code.CREDENTIAL_INVALID));
         assertFalse(resolution.toString().contains(secret));
+    }
+
+    @Test
+    void credentialFileRejectsTrailingJsonWithoutReportingSecrets() throws Exception {
+        var auth = directory.resolve("trailing-auth.json");
+        String secret = "trailing-credential-secret";
+        Files.writeString(auth, """
+                {"providers":{"local":{"type":"api_key","key":"%s"}}}
+                trailing-garbage
+                """.formatted(secret));
+        makePrivate(auth);
+
+        var resolution = CredentialResolver.resolve(
+                List.of(definition("local", "one")),
+                CredentialResolver.Options.filesOnly(auth, MAPPER));
+
+        assertFalse(resolution.credentials().containsKey("local"));
+        assertTrue(resolution.diagnostics().stream().anyMatch(diagnostic ->
+                diagnostic.code() == ModelAssemblyDiagnostic.Code.CREDENTIAL_INVALID));
+        assertFalse(resolution.toString().contains(secret));
+    }
+
+    @Test
+    void ownedRuntimeClosesItsConcreteHttpClient() throws Exception {
+        var definition = definition("local", "one");
+        var credentials = CredentialResolver.resolve(
+                List.of(definition),
+                new CredentialResolver.Options(
+                        Map.of("local", OpenAiCredentials.apiKey("sdk-secret")),
+                        false, ignored -> null, Optional.empty(), MAPPER));
+        var captured = new AtomicReference<HttpClient>();
+        var runtime = ModelRuntimeAssembler.owned(
+                List.of(definition), credentials, () -> {
+                    var client = HttpClient.newHttpClient();
+                    captured.set(client);
+                    return client;
+                });
+        var client = captured.get();
+        assertFalse(client.isTerminated());
+
+        runtime.ownedResources().orElseThrow().close();
+        runtime.ownedResources().orElseThrow().close();
+
+        assertTrue(client.isTerminated());
+    }
+
+    @Test
+    void assemblyFailureClosesEveryConcreteHttpClientItCreated() throws Exception {
+        var definition = definition("duplicate", "one");
+        var credentials = CredentialResolver.resolve(
+                List.of(definition),
+                new CredentialResolver.Options(
+                        Map.of("duplicate", OpenAiCredentials.apiKey("sdk-secret")),
+                        false, ignored -> null, Optional.empty(), MAPPER));
+        var clients = new ArrayList<HttpClient>();
+
+        assertThrows(IllegalArgumentException.class, () -> ModelRuntimeAssembler.owned(
+                List.of(definition, definition), credentials, () -> {
+                    var client = HttpClient.newHttpClient();
+                    clients.add(client);
+                    return client;
+                }));
+
+        assertEquals(2, clients.size());
+        assertTrue(clients.stream().allMatch(HttpClient::isTerminated));
     }
 
     @Test

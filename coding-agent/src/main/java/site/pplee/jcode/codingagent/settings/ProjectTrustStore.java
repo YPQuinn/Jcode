@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -39,7 +40,7 @@ public final class ProjectTrustStore {
             return new LookupResult(ProjectTrustDecision.UNSPECIFIED, diagnostics);
         }
         try {
-            Path physicalFile = file.toRealPath();
+            Path physicalFile = physicalStoreLocation();
             if (physicalFile.startsWith(project)) {
                 diagnostics.add(SettingsDiagnostic.of(
                         SettingsDiagnostic.Code.TRUST_STORE_INSIDE_PROJECT,
@@ -58,6 +59,7 @@ public final class ProjectTrustStore {
             try (var input = Files.newInputStream(physicalFile)) {
                 root = objectMapper.reader()
                         .with(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+                        .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                         .readTree(input);
             }
             if (root == null || !root.isObject() || root.size() != 1
@@ -144,11 +146,31 @@ public final class ProjectTrustStore {
     }
 
     private void requireOutsideProject(Path project) throws IOException {
-        Path location = Files.exists(file.getParent())
-                ? file.getParent().toRealPath() : file.getParent().toAbsolutePath().normalize();
-        if (location.startsWith(project)) {
+        if (physicalStoreLocation().startsWith(project)) {
             throw new IOException("trust store must be outside the project directory");
         }
+    }
+
+    private Path physicalStoreLocation() throws IOException {
+        if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+            return file.toRealPath();
+        }
+
+        Path parent = file.getParent();
+        var missingSegments = new ArrayDeque<Path>();
+        while (parent != null && !Files.exists(parent, LinkOption.NOFOLLOW_LINKS)) {
+            missingSegments.addFirst(parent.getFileName());
+            parent = parent.getParent();
+        }
+        if (parent == null) {
+            return file.toAbsolutePath().normalize();
+        }
+
+        Path physicalParent = parent.toRealPath();
+        for (var segment : missingSegments) {
+            physicalParent = physicalParent.resolve(segment);
+        }
+        return physicalParent.resolve(file.getFileName()).normalize();
     }
 
     private void requireSafeExistingStore() throws IOException {
