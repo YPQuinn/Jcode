@@ -45,7 +45,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>{@link #close()} cooperatively aborts an active run and drains the
  * executor. If a provider ignores the {@link CancellationSignal} and blocks
  * uninterruptibly, close() may wait up to roughly seven seconds before forcing
- * shutdown.
+ * shutdown. A synchronous completion callback may close the agent from its run
+ * worker; that path starts executor shutdown without waiting for itself.
  */
 public final class Agent implements AutoCloseable {
     private final AgentConfig config;
@@ -56,6 +57,8 @@ public final class Agent implements AutoCloseable {
     private final Object admissionLock = new Object();
     private final AtomicReference<ActiveRun> activeRun = new AtomicReference<>(null);
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    // Completion callbacks run inline before the per-task virtual thread returns.
+    private final ThreadLocal<Boolean> executorWorker = new ThreadLocal<>();
     private volatile AgentContext context;
     private ModelRef model;
     private ThinkingLevel thinkingLevel;
@@ -227,6 +230,9 @@ public final class Agent implements AutoCloseable {
             run.source().cancel();
         }
         executor.shutdown();
+        if (Boolean.TRUE.equals(executorWorker.get())) {
+            return;
+        }
         try {
             if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
                 executor.shutdownNow();
@@ -282,6 +288,7 @@ public final class Agent implements AutoCloseable {
         }
         try {
             executor.execute(() -> {
+                executorWorker.set(true);
                 LoopResult result = null;
                 Throwable failure = null;
                 try {
@@ -318,6 +325,7 @@ public final class Agent implements AutoCloseable {
                 } else {
                     future.complete(result);
                 }
+                executorWorker.remove();
             });
         } catch (RejectedExecutionException rej) {
             // close() shut down the executor between CAS and execute; the task never

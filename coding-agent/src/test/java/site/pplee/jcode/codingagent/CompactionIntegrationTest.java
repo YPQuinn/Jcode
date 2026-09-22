@@ -770,6 +770,74 @@ class CompactionIntegrationTest {
     }
 
     @Test
+    void thresholdFailedCallbackFailureRemainsInfrastructureFailure() {
+        var client = new ScriptedModelClient(
+                request -> assistant("first answer"),
+                request -> assistantWithContent(List.of(), StopReason.ERROR),
+                request -> {
+                    throw new AssertionError("normal request must not follow failed summary callback");
+                });
+        var config = new CodingAgentConfig(
+                directory, MODEL, client, new ObjectMapper(), null, null, null, null,
+                null, null, event -> event instanceof CodingAgentEvent.SummaryFailed failed
+                        && failed.cause() == SummaryCause.THRESHOLD
+                        ? CompletableFuture.failedStage(
+                                new IllegalStateException("threshold failed sink failed"))
+                        : CompletableFuture.completedStage(null),
+                null, CodingToolConfig.readOnly(), ProjectContextConfig.disabled(),
+                new CompactionSettings(true, 1_000, 200),
+                Map.of(MODEL, new ModelProfile(OptionalInt.of(4_000), OptionalInt.of(2_000))));
+
+        try (var session = new CodingAgentSession(config)) {
+            session.prompt("a".repeat(6_000)).toCompletableFuture().join();
+
+            var failure = assertThrows(CompletionException.class,
+                    () -> session.prompt("b".repeat(6_000)).toCompletableFuture().join());
+
+            assertEquals("threshold failed sink failed", failure.getCause().getMessage());
+            assertEquals(2, client.requests().size());
+            assertEquals(0, session.history().entries().stream()
+                    .filter(CompactionEntry.class::isInstance).count());
+        }
+    }
+
+    @Test
+    void overflowFailedCallbackFailureRemainsInfrastructureFailure() {
+        var overflow = new Message.Assistant(
+                List.of(), StopReason.ERROR, "context exceeded", Usage.zero(), Instant.EPOCH,
+                MODEL, ResponseMetadata.of(null, null, null, ModelFailureKind.CONTEXT_OVERFLOW));
+        var client = new ScriptedModelClient(
+                request -> assistant("initial answer"),
+                request -> overflow,
+                request -> assistantWithContent(List.of(), StopReason.ERROR),
+                request -> {
+                    throw new AssertionError("retry must not follow failed summary callback");
+                });
+        var config = new CodingAgentConfig(
+                directory, MODEL, client, new ObjectMapper(), null, null, null, null,
+                null, null, event -> event instanceof CodingAgentEvent.SummaryFailed failed
+                        && failed.cause() == SummaryCause.OVERFLOW
+                        ? CompletableFuture.failedStage(
+                                new IllegalStateException("overflow failed sink failed"))
+                        : CompletableFuture.completedStage(null),
+                null, CodingToolConfig.readOnly(), ProjectContextConfig.disabled(),
+                new CompactionSettings(true, 1_000, 10),
+                Map.of(MODEL, new ModelProfile(OptionalInt.of(10_000), OptionalInt.of(2_000))));
+
+        try (var session = new CodingAgentSession(config)) {
+            session.prompt("establish context ".repeat(80)).toCompletableFuture().join();
+
+            var failure = assertThrows(CompletionException.class,
+                    () -> session.prompt("overflow now").toCompletableFuture().join());
+
+            assertEquals("overflow failed sink failed", failure.getCause().getMessage());
+            assertEquals(3, client.requests().size());
+            assertEquals(0, session.history().entries().stream()
+                    .filter(CompactionEntry.class::isInstance).count());
+        }
+    }
+
+    @Test
     void overflowCompactionWriteFailureIsExposedAndPoisonsWriterBeforeNextModelCall() throws Exception {
         var overflow = new Message.Assistant(
                 List.of(), StopReason.ERROR, "context exceeded", Usage.zero(), Instant.EPOCH,
@@ -913,7 +981,8 @@ class CompactionIntegrationTest {
 
     @Test
     void closeWaitsForNonCooperativeSummaryTerminalBeforeReleasingOwnedResource() throws Exception {
-        var client = new NonCooperativeSummaryClient();
+        var client = new NonCooperativeSummaryClient(
+                assistant("answer 1"), assistant("answer 2"));
         var ownedClosed = new AtomicBoolean();
         var config = new CodingAgentConfig(
                 directory, MODEL, client, new ObjectMapper(), null, null, null, null,
@@ -952,6 +1021,94 @@ class CompactionIntegrationTest {
         }
     }
 
+    @Test
+    void closeWaitsForThresholdSummaryTerminalBeforeReleasingOwnedResource() throws Exception {
+        var client = new NonCooperativeSummaryClient(assistant("first answer"));
+        var ownedClosed = new AtomicBoolean();
+        var config = new CodingAgentConfig(
+                directory, MODEL, client, new ObjectMapper(), null, null, null, null,
+                null, null, null, null, CodingToolConfig.readOnly(),
+                ProjectContextConfig.disabled(), new CompactionSettings(true, 1_000, 200),
+                Map.of(MODEL, new ModelProfile(OptionalInt.of(4_000), OptionalInt.of(2_000))));
+        var manager = new SessionManager(
+                new SessionHeader(UUID.randomUUID(), config.clock().instant(), directory),
+                config.clock());
+        var session = new CodingAgentSession(
+                config,
+                (workingDirectory, ignored, revision, cancellation) ->
+                        site.pplee.jcode.codingagent.context.ProjectContextSnapshot.disabled(
+                                workingDirectory),
+                manager,
+                null,
+                () -> ownedClosed.set(true));
+        try {
+            session.prompt("a".repeat(6_000)).toCompletableFuture().join();
+            var operation = session.prompt("b".repeat(6_000)).toCompletableFuture();
+            assertTrue(client.summaryStarted.await(5, TimeUnit.SECONDS));
+
+            session.close();
+
+            assertFalse(operation.isDone());
+            assertFalse(ownedClosed.get());
+            client.completeSummary();
+            awaitOperationSettlement(operation);
+            assertTrue(ownedClosed.get());
+        } finally {
+            client.completeSummary();
+            session.close();
+        }
+    }
+
+    @Test
+    void closeWaitsForOverflowSummaryTerminalBeforeReleasingOwnedResource() throws Exception {
+        var overflow = new Message.Assistant(
+                List.of(), StopReason.ERROR, "context exceeded", Usage.zero(), Instant.EPOCH,
+                MODEL, ResponseMetadata.of(null, null, null, ModelFailureKind.CONTEXT_OVERFLOW));
+        var client = new NonCooperativeSummaryClient(assistant("initial answer"), overflow);
+        var ownedClosed = new AtomicBoolean();
+        var config = new CodingAgentConfig(
+                directory, MODEL, client, new ObjectMapper(), null, null, null, null,
+                null, null, null, null, CodingToolConfig.readOnly(),
+                ProjectContextConfig.disabled(), new CompactionSettings(true, 1_000, 10),
+                Map.of(MODEL, new ModelProfile(OptionalInt.of(10_000), OptionalInt.of(2_000))));
+        var manager = new SessionManager(
+                new SessionHeader(UUID.randomUUID(), config.clock().instant(), directory),
+                config.clock());
+        var session = new CodingAgentSession(
+                config,
+                (workingDirectory, ignored, revision, cancellation) ->
+                        site.pplee.jcode.codingagent.context.ProjectContextSnapshot.disabled(
+                                workingDirectory),
+                manager,
+                null,
+                () -> ownedClosed.set(true));
+        try {
+            session.prompt("establish context ".repeat(80)).toCompletableFuture().join();
+            var operation = session.prompt("overflow now").toCompletableFuture();
+            assertTrue(client.summaryStarted.await(5, TimeUnit.SECONDS));
+
+            session.close();
+
+            assertFalse(operation.isDone());
+            assertFalse(ownedClosed.get());
+            client.completeSummary();
+            awaitOperationSettlement(operation);
+            assertTrue(ownedClosed.get());
+        } finally {
+            client.completeSummary();
+            session.close();
+        }
+    }
+
+    private static void awaitOperationSettlement(CompletableFuture<?> operation) throws Exception {
+        try {
+            operation.get(5, TimeUnit.SECONDS);
+        } catch (ExecutionException | CancellationException expected) {
+            // Closing may surface either the core cancellation or the product-operation cancellation.
+        }
+        assertTrue(operation.isDone());
+    }
+
     private static Throwable rootCause(Throwable failure) {
         var current = failure;
         while (current.getCause() != null) {
@@ -972,7 +1129,11 @@ class CompactionIntegrationTest {
     private static AssistantMessageStream completedStream(Message.Assistant message) {
         var stream = new AssistantMessageStream();
         stream.push(new AssistantMessageEvent.Start(message));
-        stream.push(new AssistantMessageEvent.Done(message.stopReason(), message));
+        if (message.stopReason().isTerminalFailure()) {
+            stream.push(new AssistantMessageEvent.Error(message.stopReason(), message));
+        } else {
+            stream.push(new AssistantMessageEvent.Done(message.stopReason(), message));
+        }
         return stream;
     }
 
@@ -1005,12 +1166,21 @@ class CompactionIntegrationTest {
         private final CountDownLatch summaryStarted = new CountDownLatch(1);
         private final AtomicInteger calls = new AtomicInteger();
         private final AssistantMessageStream summaryStream = new AssistantMessageStream();
+        private final List<Message.Assistant> responsesBeforeSummary;
+        private final AtomicBoolean summaryCompleted = new AtomicBoolean();
+
+        private NonCooperativeSummaryClient(Message.Assistant... responsesBeforeSummary) {
+            this.responsesBeforeSummary = List.of(responsesBeforeSummary);
+        }
 
         @Override
         public AssistantMessageStream stream(ModelRequest request, CancellationSignal cancellation) {
             int call = calls.incrementAndGet();
-            if (call <= 2) {
-                return completedStream(assistant("answer " + call));
+            if (call <= responsesBeforeSummary.size()) {
+                return completedStream(responsesBeforeSummary.get(call - 1));
+            }
+            if (call > responsesBeforeSummary.size() + 1) {
+                throw new AssertionError("model request must not follow the blocked summary");
             }
             summaryStream.push(new AssistantMessageEvent.Start(assistant("")));
             summaryStarted.countDown();
@@ -1018,8 +1188,10 @@ class CompactionIntegrationTest {
         }
 
         void completeSummary() {
-            var summary = assistant("eventual summary");
-            summaryStream.push(new AssistantMessageEvent.Done(summary.stopReason(), summary));
+            if (summaryCompleted.compareAndSet(false, true)) {
+                var summary = assistant("eventual summary");
+                summaryStream.push(new AssistantMessageEvent.Done(summary.stopReason(), summary));
+            }
         }
     }
 }

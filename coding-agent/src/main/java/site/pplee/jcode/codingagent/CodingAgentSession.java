@@ -121,6 +121,7 @@ public final class CodingAgentSession implements AutoCloseable {
     private boolean running;
     private boolean reloading;
     private boolean historyOperation;
+    private boolean summaryInProgress;
     private boolean closed;
 
     public CodingAgentSession(CodingAgentConfig config) {
@@ -447,67 +448,89 @@ public final class CodingAgentSession implements AutoCloseable {
                     CompactionStatus.SKIPPED, Optional.empty(), Optional.empty(),
                     before, before, Usage.zero(), "NOTHING_TO_COMPACT");
         }
-        requireSummaryWritable();
-        cancellation.throwIfCancelled();
-        emitSummaryEvent(new CodingAgentEvent.SummaryStarted(cause, model));
-        cancellation.throwIfCancelled();
-        String material = new SummaryMaterialSerializer().serialize(
-                plan.orElseThrow().material(), additionalInstructions);
-        if (plan.orElseThrow().splitTurn()) {
-            material = "[SPLIT TURN]\nThe retained suffix continues the same user task. "
-                    + "Preserve the original request and the work needed to connect to that suffix.\n\n"
-                    + material;
-        }
-        ensureSummaryInputFits(material, budget);
-        var generated = new SummaryGenerator(modelClient).generate(
-                model, currentSelection.thinkingLevel(), budget.summaryOutputTokens(),
-                material, cancellation);
-        cancellation.throwIfCancelled();
-
-        long previousEstimatedTokens = ContextUsageEstimator.estimate(
-                currentSystemPrompt, toolSpecs,
-                SessionContextBuilder.buildRequestView(snapshot).messages());
-        CompactionEntry prepared;
+        beginSummaryPhase(cancellation);
         try {
-            prepared = sessionManager.prepareCompaction(
-                    generated.text(), plan.orElseThrow().firstKeptEntryId(), before.tokens(),
-                    before.source(), model, generated.usage(), SummaryDetailsExtractor.extract(
-                            plan.orElseThrow().material(), inheritedSummaryDetails(snapshot)));
-        } catch (IOException failure) {
-            throw new SummaryInfrastructureFailure(failure);
-        }
-        var candidateSnapshot = withPreparedCompaction(snapshot, prepared);
-        long candidateTokens = ContextUsageEstimator.estimate(
-                currentSystemPrompt, toolSpecs,
-                SessionContextBuilder.buildRequestView(candidateSnapshot).messages());
-        if (candidateTokens >= previousEstimatedTokens) {
-            throw new IllegalStateException("generated summary did not reduce the effective context");
-        }
-        if (requireThreshold && candidateTokens > budget.threshold()) {
-            throw new IllegalStateException("generated summary is still above the model threshold");
-        }
+            requireSummaryWritable();
+            cancellation.throwIfCancelled();
+            emitSummaryEvent(new CodingAgentEvent.SummaryStarted(cause, model));
+            cancellation.throwIfCancelled();
+            String material = new SummaryMaterialSerializer().serialize(
+                    plan.orElseThrow().material(), additionalInstructions);
+            if (plan.orElseThrow().splitTurn()) {
+                material = "[SPLIT TURN]\nThe retained suffix continues the same user task. "
+                        + "Preserve the original request and the work needed to connect to that suffix.\n\n"
+                        + material;
+            }
+            ensureSummaryInputFits(material, budget);
+            var generated = new SummaryGenerator(modelClient).generate(
+                    model, currentSelection.thinkingLevel(), budget.summaryOutputTokens(),
+                    material, cancellation);
+            cancellation.throwIfCancelled();
 
+            long previousEstimatedTokens = ContextUsageEstimator.estimate(
+                    currentSystemPrompt, toolSpecs,
+                    SessionContextBuilder.buildRequestView(snapshot).messages());
+            CompactionEntry prepared;
+            try {
+                prepared = sessionManager.prepareCompaction(
+                        generated.text(), plan.orElseThrow().firstKeptEntryId(), before.tokens(),
+                        before.source(), model, generated.usage(), SummaryDetailsExtractor.extract(
+                                plan.orElseThrow().material(), inheritedSummaryDetails(snapshot)));
+            } catch (IOException failure) {
+                throw new SummaryInfrastructureFailure(failure);
+            }
+            var candidateSnapshot = withPreparedCompaction(snapshot, prepared);
+            long candidateTokens = ContextUsageEstimator.estimate(
+                    currentSystemPrompt, toolSpecs,
+                    SessionContextBuilder.buildRequestView(candidateSnapshot).messages());
+            if (candidateTokens >= previousEstimatedTokens) {
+                throw new IllegalStateException("generated summary did not reduce the effective context");
+            }
+            if (requireThreshold && candidateTokens > budget.threshold()) {
+                throw new IllegalStateException("generated summary is still above the model threshold");
+            }
+
+            synchronized (lifecycleLock) {
+                cancellation.throwIfCancelled();
+                ensureOpen();
+            }
+            CompactionEntry entry;
+            try {
+                entry = sessionManager.appendPreparedCompaction(prepared);
+            } catch (IOException failure) {
+                throw new SummaryInfrastructureFailure(failure);
+            }
+            synchronized (lifecycleLock) {
+                usageObservation = null;
+            }
+            var after = contextUsage(sessionManager.snapshot(), model);
+            emitSummaryEvent(new CodingAgentEvent.SummaryCompleted(
+                    cause, entry.id(), model, generated.usage()));
+            return new CompactionResult(
+                    CompactionStatus.COMPACTED, Optional.of(entry.id()),
+                    Optional.of(entry.firstKeptEntryId()), before, after,
+                    generated.usage(), after.tokens() > budget.threshold()
+                    ? "COMPACTED_ABOVE_THRESHOLD" : null);
+        } finally {
+            endSummaryPhase();
+        }
+    }
+
+    private void beginSummaryPhase(CancellationSignal cancellation) {
         synchronized (lifecycleLock) {
             cancellation.throwIfCancelled();
             ensureOpen();
+            if (summaryInProgress) {
+                throw new IllegalStateException("a summary is already in progress");
+            }
+            summaryInProgress = true;
         }
-        CompactionEntry entry;
-        try {
-            entry = sessionManager.appendPreparedCompaction(prepared);
-        } catch (IOException failure) {
-            throw new SummaryInfrastructureFailure(failure);
-        }
+    }
+
+    private void endSummaryPhase() {
         synchronized (lifecycleLock) {
-            usageObservation = null;
+            summaryInProgress = false;
         }
-        var after = contextUsage(sessionManager.snapshot(), model);
-        emitSummaryEvent(new CodingAgentEvent.SummaryCompleted(
-                cause, entry.id(), model, generated.usage()));
-        return new CompactionResult(
-                CompactionStatus.COMPACTED, Optional.of(entry.id()),
-                Optional.of(entry.firstKeptEntryId()), before, after,
-                generated.usage(), after.tokens() > budget.threshold()
-                ? "COMPACTED_ABOVE_THRESHOLD" : null);
     }
 
     private CompletionStage<List<site.pplee.jcode.agentcore.message.AgentMessage>> transformContext(
@@ -774,6 +797,10 @@ public final class CodingAgentSession implements AutoCloseable {
     }
 
     private static Throwable normalizeSummaryFailure(CancellationSource source, Throwable failure) {
+        var infrastructure = infrastructureFailure(failure);
+        if (infrastructure != null) {
+            return infrastructure;
+        }
         if (!source.signal().isCancelled() || failure instanceof CancellationException) {
             return failure;
         }
@@ -796,23 +823,20 @@ public final class CodingAgentSession implements AutoCloseable {
                         cause, (reported == null ? failure : reported).getClass().getSimpleName()));
             }
         } catch (Throwable eventFailure) {
-            var originalInfrastructure = infrastructureFailure(failure);
-            if (originalInfrastructure != null) {
-                if (originalInfrastructure != eventFailure) {
-                    originalInfrastructure.addSuppressed(eventFailure);
+            if (failure instanceof SummaryInfrastructureFailure originalInfrastructure) {
+                var eventInfrastructure = requireInfrastructureMarker(eventFailure);
+                if (originalInfrastructure.getCause() != eventInfrastructure.getCause()) {
+                    originalInfrastructure.getCause().addSuppressed(eventInfrastructure.getCause());
                 }
                 return originalInfrastructure;
             }
-            var eventInfrastructure = Objects.requireNonNull(
-                    infrastructureFailure(eventFailure),
-                    "summary event failure must be classified as infrastructure");
-            if (eventInfrastructure != failure) {
-                eventInfrastructure.addSuppressed(failure);
+            var eventInfrastructure = requireInfrastructureMarker(eventFailure);
+            if (eventInfrastructure.getCause() != failure) {
+                eventInfrastructure.getCause().addSuppressed(failure);
             }
             return eventInfrastructure;
         }
-        var infrastructure = infrastructureFailure(failure);
-        return infrastructure == null ? failure : infrastructure;
+        return failure;
     }
 
     private void emitSummaryEvent(CodingAgentEvent event) {
@@ -843,19 +867,14 @@ public final class CodingAgentSession implements AutoCloseable {
         if (failure instanceof SummaryInfrastructureFailure infrastructure) {
             return infrastructure.getCause();
         }
-        if (failure.getCause() != null && failure.getCause() != failure) {
-            var cause = infrastructureFailure(failure.getCause());
-            if (cause != null) {
-                return cause;
-            }
-        }
-        for (var suppressed : failure.getSuppressed()) {
-            var cause = infrastructureFailure(suppressed);
-            if (cause != null) {
-                return cause;
-            }
-        }
         return null;
+    }
+
+    private static SummaryInfrastructureFailure requireInfrastructureMarker(Throwable failure) {
+        if (failure instanceof SummaryInfrastructureFailure infrastructure) {
+            return infrastructure;
+        }
+        throw new IllegalStateException("summary event failure must be classified as infrastructure", failure);
     }
 
     private static Throwable unwrapCompletionFailure(Throwable failure) {
@@ -1002,8 +1021,10 @@ public final class CodingAgentSession implements AutoCloseable {
             Throwable failure,
             CompletableFuture<CodingAgentRunResult> productStage
     ) {
+        var directInfrastructureFailure = failure == null ? null : infrastructureFailure(failure);
         Throwable completionFailure = pendingInfrastructureFailure != null
-                ? pendingInfrastructureFailure : failure;
+                ? pendingInfrastructureFailure
+                : directInfrastructureFailure != null ? directInfrastructureFailure : failure;
         if (completionFailure == null) {
             try {
                 emitEvent(new CodingAgentEvent.RunCompleted(productResult));
@@ -1027,6 +1048,7 @@ public final class CodingAgentSession implements AutoCloseable {
             closeManager = closed;
         }
         if (closeManager) {
+            completionFailure = closeRuntimeResources(completionFailure, false);
             completionFailure = closeManager(completionFailure);
         }
         if (completionFailure != null) {
@@ -1437,7 +1459,10 @@ public final class CodingAgentSession implements AutoCloseable {
             if (runSource != null) {
                 runSource.cancel();
             }
-            deferRuntimeClose = historyOperation;
+            if (running) {
+                agent.abort();
+            }
+            deferRuntimeClose = historyOperation || summaryInProgress;
         }
         if (deferRuntimeClose) {
             if (reloadExecutor != null) {
