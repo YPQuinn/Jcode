@@ -34,6 +34,7 @@ import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
 import site.pplee.jcode.codingagent.support.ScriptedModelClient;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -529,6 +530,43 @@ class CodingAgentSessionPersistenceTest {
     }
 
     @Test
+    void closedWriterChannelRejectsContinueBeforeCallingModel() throws Exception {
+        Path path;
+        var header = new SessionHeader(
+                UUID.fromString("00000000-0000-0000-0000-000000000097"), NOW, directory);
+        try (var manager = SessionManager.createFileBacked(
+                header, directory.resolve("sessions"), CLOCK, () -> "user")) {
+            manager.appendMessage(StandardAgentMessage.of(new Message.User(
+                    List.of(new Content.Text("continue me")), NOW)));
+            path = manager.filePath();
+        }
+
+        var writerChannel = new AtomicReference<FileChannel>();
+        var manager = SessionManager.openFileBacked(
+                path,
+                CLOCK,
+                () -> "unused",
+                channel -> {
+                    writerChannel.set(channel);
+                    return channel::write;
+                });
+        var client = new ScriptedModelClient(request -> assistant("must-not-run"));
+        try (var session = new CodingAgentSession(
+                config(directory, client, null),
+                (workingDirectory, ignored, revision, cancellation) ->
+                        ProjectContextSnapshot.disabled(workingDirectory),
+                manager)) {
+            writerChannel.get().close();
+
+            var failure = assertThrows(CompletionException.class,
+                    () -> session.continueRun().toCompletableFuture().join());
+
+            assertTrue(rootMessage(failure).contains("no longer usable"));
+            assertTrue(client.requests().isEmpty());
+        }
+    }
+
+    @Test
     void cancellingTheObservationFutureDoesNotCancelOrReleaseTheAcceptedRun() throws Exception {
         var callCount = new AtomicInteger();
         var started = new CountDownLatch(1);
@@ -663,12 +701,10 @@ class CodingAgentSessionPersistenceTest {
 
         releaseWrite.countDown();
         appendResult.join();
-        try (var reopened = SessionFile.open(path)) {
-            var loaded = SessionFileAccess.read(path);
-            assertEquals("accepted", new SessionManager(
-                    loaded.header(), loaded.entries(), CLOCK, () -> "unused")
-                    .snapshot().name().orElseThrow());
-        }
+        var loaded = SessionFileAccess.read(path);
+        assertEquals("accepted", new SessionManager(
+                loaded.header(), loaded.entries(), CLOCK, () -> "unused")
+                .snapshot().name().orElseThrow());
     }
 
     @Test

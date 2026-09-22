@@ -89,7 +89,7 @@ final class SessionManager implements AutoCloseable {
             Clock clock,
             Supplier<String> idGenerator
     ) throws IOException {
-        var file = SessionFile.create(directory, header);
+        var file = SessionFile.createManaged(directory, header);
         return ownedFileManager(file, header, List.of(), clock, idGenerator);
     }
 
@@ -102,7 +102,7 @@ final class SessionManager implements AutoCloseable {
             Clock clock,
             Supplier<String> idGenerator
     ) throws IOException {
-        var opened = SessionFile.openLoaded(path);
+        var opened = SessionFile.openLoadedManaged(path);
         return ownedFileManager(
                 opened.file(), opened.loaded().header(), opened.loaded().entries(), clock, idGenerator);
     }
@@ -113,7 +113,7 @@ final class SessionManager implements AutoCloseable {
             Supplier<String> idGenerator,
             SessionFile.SessionByteWriterFactory writerFactory
     ) throws IOException {
-        var opened = SessionFile.openLoaded(path, writerFactory);
+        var opened = SessionFile.openLoadedManaged(path, writerFactory);
         return ownedFileManager(
                 opened.file(), opened.loaded().header(), opened.loaded().entries(), clock, idGenerator);
     }
@@ -182,6 +182,10 @@ final class SessionManager implements AutoCloseable {
 
     SessionFileReader.TailRecovery recovery() {
         return sessionFile == null ? null : sessionFile.recovery();
+    }
+
+    synchronized SessionFileAccess.DiscoveryResult discoveryResult() {
+        return new SessionFileAccess.DiscoveryResult(header, entries, recovery());
     }
 
     synchronized void requireWritable() throws IOException {
@@ -280,7 +284,9 @@ final class SessionManager implements AutoCloseable {
             Supplier<String> idGenerator
     ) throws IOException {
         try {
-            return new SessionManager(header, entries, clock, idGenerator, file);
+            var manager = new SessionManager(header, entries, clock, idGenerator, file);
+            file.attachDiscoverySource(manager::discoveryResult);
+            return manager;
         } catch (RuntimeException | Error failure) {
             try {
                 file.close();

@@ -113,7 +113,7 @@ Session 文件可能包含用户主动提供的敏感内容。禁止把宿主配
 | `SessionCodec` | 本阶段类型与 JSON 之间的显式转换；消息子 codec 按文件可读性拆分 |
 | `SessionFileReader` | 一次性读取、格式校验与尾部诊断；解析结果交给 Manager 后不保留历史副本 |
 | `SessionFile` | 一个已打开 writer 的通道、Header、尾部位置、追加失败状态、锁与关闭，不长期复制 Entry/索引 |
-| `SessionFileAccess` | 窄的进程内 writer reservation 与同文件通道生命周期协调；活动 owner 的发现读取复用 owner 通道 |
+| `SessionFileAccess` | 窄的进程内 writer reservation 与同文件临时读取生命周期协调；活动 owner 从 Manager 历史生成发现视图，不读取 writer 通道 |
 | `SessionContextBuilder` | 指定节点的标准消息与历史模型/thinking 元信息投影 |
 | `SessionSnapshot` / `SessionInfo` | 对外只读结果，不包含 Agent、工具实例、writer 或可执行回调 |
 | `SessionFiles` | 显式目录内的只读列表、最近项与 cwd 过滤 |
@@ -220,7 +220,7 @@ Jcode 还没有已发布历史格式，本阶段没有真实 migration。交付�
 
 文件句柄生命周期内持有独占 `tryLock()`；锁冲突或同 JVM 重叠锁应明确失败，不等待、不重试、不自动抢占。取得锁后读取当前文件，避免先读旧视图再取得所有权。
 
-Java 原生文件锁与通道关闭按进程相关联：同 JVM 若为列表读取或重复 open 另开并关闭同文件通道，可能使原 owner 的锁失效。因此所有产品内同文件通道经过窄的 `SessionFileAccess` 协调：writer 在开通道前 reservation，活动 owner 的发现读取复用其通道，无 owner 的临时读取在完整通道生命周期内阻止 writer 开通道。该机制只保护本进程通道生命周期，跨进程排他仍由原生锁证明。
+Java 原生文件锁与通道关闭按进程相关联：同 JVM 若为列表读取或重复 open 另开并关闭同文件通道，可能使原 owner 的锁失效；查询线程中断也可能关闭它正在读取的 `FileChannel`。因此所有产品内同文件通道经过窄的 `SessionFileAccess` 协调：writer 在开通道前 reservation，活动 owner 的发现查询从 Manager 已接纳历史生成内存视图，不在查询线程触碰 writer 通道；无 owner 的临时读取用同文件 reader slot 阻止 writer 开通道。registry 全局锁只保护登记、查找和状态切换，身份解析、摘要计算、文件 I/O、等待 source 与资源关闭均在锁外。该机制只保护本进程通道生命周期，跨进程排他仍由原生锁证明。
 
 Manager 的线程内操作仍受产品接纳规则控制，不能用操作系统文件锁代替 Java 线程同步。文件锁只协调遵守相同约定的写者，不阻止外部编辑器或不遵守锁的程序修改文件，也不声称是安全隔离。[K1]
 
@@ -438,13 +438,13 @@ SessionInfo 包含 path、id、创建 cwd、name、created、modified 和 messag
 | 顺序接入 | 两个工具反向完成仍按MessageCompleted的源顺序落盘；每条消息只保存一次；steer/follow-up只在实际消费后入历史 |
 | 半成品 | 大量delta不入Session；终结ERROR/ABORTED正确保存；工具进度不伪装成ToolResult |
 | 文件边界 | 真实临时文件顺序追加、短写、完整末行无LF、截断JSON/UTF8尾片段、首次恢复后追加不粘行；中部/结构损坏不改文件 |
-| 单写者 | 同一文件第二写者被拒绝；列表读取和重复 open 失败后由独立 JVM 证明 owner 锁仍有效；关闭后可重开；锁不可用错误明确；锁与Java接纳职责分开 |
-| 故障一致性 | user已入历史后模型流sink失败；tool结果已入历史后宿主失败；下次请求含已接纳前缀且不重复；写入不确定后 `prompt`/`continue`/元信息在 provider 或新 Entry id 前拒绝 |
+| 单写者 | 同一文件第二写者被拒绝；正常及预中断列表查询、重复 open 失败后由独立 JVM 证明 owner 锁仍有效；活动列表仍可追加；关闭后可重开；锁与Java接纳职责分开 |
+| 故障一致性 | user已入历史后模型流sink失败；tool结果已入历史后宿主失败；下次请求含已接纳前缀且不重复；写入不确定或底层 channel/lock 失效后 `prompt`/`continue`/元信息在 provider 或新 Entry id 前拒绝 |
 | 生命周期 | run/reload/branch/metadata互斥；取消观察Future不取消真实操作；close不提前释放在途writer；失败完成回调可以在允许状态下重入 |
 | 恢复与配置 | 相同输入恢复前后标准请求历史等价；当前显式cwd/model差异可诊断；旧replay保留、adapter选择规则不变 |
 | 工具中断 | 恢复到存在未完成tool call的历史不调用工具；现有planner只在请求视图提供占位，不修改JSONL |
 | 分支与队列 | branch不重建工具/Agent，保留当前对象pending队列；新open对象无旧队列；用户节点continue与父节点替换输入分别验证 |
-| 列表 | 缺失目录、坏单文件、多个cwd、稳定最近排序、messageCount口径、查询无副作用 |
+| 列表 | 缺失目录、坏单文件、多个cwd、稳定最近排序、messageCount口径、活动 owner 使用 Manager 内存视图；阻塞一个会话的摘要读取不阻塞另一会话创建/关闭 |
 | 前三阶段回归 | 项目指令原样拼接、候选回退、idle reload、原生工具、背压、模块边界均不退化 |
 
 并发测试使用已经存在的 gate/latch/future和明确完成条件，不使用 sleep 或自旋碰运气。错误注入使用小型包内替身，不公开额外 production 配置。
@@ -508,12 +508,13 @@ git diff --check
 ## 16. 实施与验证记录
 
 - 实施日期：2026-09-20；环境：macOS 27.0 arm64、Java 21.0.10、Maven 3.9.14。
-- `mvn -pl coding-agent -am test`：通过，共 548 个测试，0 failures/errors，10 个本地工具环境相关 skip。
-- `mvn clean verify`：通过，共 815 个测试，0 failures/errors，10 个本地工具环境相关 skip。
-- 严格 native smoke 使用 `/bin/bash`、`/opt/homebrew/bin/rg`、`/Users/quinncypp/.pi/agent/bin/fd` 运行 `mvn -pl coding-agent -am verify -Plocal-tools-smoke ...`：通过，共 548 个测试，0 failures/errors/skips。
+- `mvn -pl coding-agent -am test`：通过，共 552 个测试，0 failures/errors，10 个本地工具环境相关 skip。
+- `mvn clean verify`：通过，共 819 个测试，0 failures/errors，10 个本地工具环境相关 skip。
+- 严格 native smoke 使用 `/bin/bash`、`/opt/homebrew/bin/rg`、`/Users/quinncypp/.pi/agent/bin/fd` 运行 `mvn -pl coding-agent -am verify -Plocal-tools-smoke ...`：通过，共 552 个测试，0 failures/errors/skips。
 - `git diff --check`：通过。
 - 实现包含 4A～4D 的模型、文件、产品接入、并发生命周期、分支/元数据与发现测试；未引入跨文件 fork、cursor sidecar、provider 热切换、Compaction、Extension 或 UI。
 - 提交后审查加固了同 JVM 通道生命周期（并用独立 JVM 验证原生锁）、writer 失效前置拒绝、工具参数 `BigDecimal` 精度、Manager 唯一历史所有权，以及并行工具逆序完成的确定性 gate/latch 回归；没有扩展为通用锁或存储框架。
+- 后续复审将活动 owner 的列表查询改为 Manager 内存视图，消除了查询中断关闭 writer 通道的路径；底层 channel/lock 失效纳入前置拒绝，并把 registry 全局锁收缩到登记和状态切换，同文件临时 reader slot 继续保护原生锁生命周期。
 
 ## 17. 参考依据与查阅位置
 

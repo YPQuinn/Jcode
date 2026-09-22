@@ -61,7 +61,7 @@ Headless 编码产品内核。组合 `ai` 与 `agent-core`，提供 `CodingAgent
 - Public config 不持有可变 collection/tree；state/result/event/Session snapshot 对可变 `JsonNode` 在构造与访问时都做递归快照。
 - Session Entry 保持单一 append-only 序列；`branch()`/`resetLeaf()` 只移动当前 leaf，后续追加形成新分支且不得删除旧分支。分支 context 只沿 parent 链投影标准消息和分支内最新 model/thinking，名称与标签按全序列最新记录解析。
 - Session JSON 只用显式 `type` / `role` / `content.type` 分派，不启用任意多态类型。已知记录的额外字段可忽略；未知版本、未知类型、必要字段错误、坏父链或中部损坏必须失败。
-- 一个 Session 文件只允许一个持锁 writer；open 不修改文件。`SessionFileAccess` 必须协调同 JVM 的 writer reservation、活动 owner 发现读取和临时通道完整生命周期，避免关闭第二通道释放 owner 的原生锁。仅 EOF 的截断 JSON 或不完整 UTF-8 后缀可诊断恢复，并在下一次追加前截断；完整末行无 LF 通过补分隔符继续追加。实际写入失败后当前 owner 必须拒绝继续写，`prompt`/`continue`/元信息须在 provider 或新 Entry id 前失败，关闭重开后再按相同读取规则判断。
+- 一个 Session 文件只允许一个持锁 writer；open 不修改文件。`SessionFileAccess` 必须协调同 JVM 的 writer reservation 和无 owner 时的同文件临时读取生命周期；活动 owner 的发现结果来自 `SessionManager` 已接纳历史，禁止在查询线程读取 writer 通道。全局 registry lock 只保护登记与状态切换，不覆盖摘要计算、文件 I/O 或资源关闭。仅 EOF 的截断 JSON 或不完整 UTF-8 后缀可诊断恢复，并在下一次追加前截断；完整末行无 LF 通过补分隔符继续追加。实际写入失败或底层通道/锁失效后当前 owner 必须拒绝继续写，`prompt`/`continue`/元信息须在 provider 或新 Entry id 前失败，关闭重开后再按相同读取规则判断。
 - `SessionManager` 是产品内部可变历史入口，也是 Entry 与索引的唯一长期内存所有者；`SessionFileReader` 只临时解析，`SessionFile` 只管理 Header、通道、锁、追加位置、尾部和失败状态。宿主不得绕过 `CodingAgentSession` 直接修改 Manager。标准消息只能由 `MessageCompleted` 接纳，文件模式必须先成功写文件、再更新内存树、最后通知宿主 sink。Session codec 的 JSON 浮点数必须按 `BigDecimal` 读取，不能先经二进制浮点损失工具参数精度。
 - `AgentCompleted` 必须投影为产品 `RunCompleted`，不能通过 public event 暴露 `LoopResult` 中的工具实例。
 - 内置工具使用强类型参数和 JSON Schema；运行时边界不能只依赖 core 的最小 schema validator。

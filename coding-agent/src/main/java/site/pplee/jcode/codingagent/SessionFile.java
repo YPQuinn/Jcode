@@ -61,12 +61,24 @@ final class SessionFile implements AutoCloseable {
     }
 
     static SessionFile create(Path directory, SessionHeader header) throws IOException {
+        return create(directory, header, false);
+    }
+
+    static SessionFile createManaged(Path directory, SessionHeader header) throws IOException {
+        return create(directory, header, true);
+    }
+
+    private static SessionFile create(
+            Path directory,
+            SessionHeader header,
+            boolean expectsDiscoverySource
+    ) throws IOException {
         Objects.requireNonNull(directory, "directory must not be null");
         Objects.requireNonNull(header, "header must not be null");
         var normalizedDirectory = directory.toAbsolutePath().normalize();
         Files.createDirectories(normalizedDirectory);
         var path = normalizedDirectory.resolve(fileName(header));
-        var registration = SessionFileAccess.reserveWriter(path);
+        var registration = SessionFileAccess.reserveWriter(path, expectsDiscoverySource);
         var codec = new SessionCodec();
         FileChannel channel = null;
         FileLock lock = null;
@@ -101,23 +113,37 @@ final class SessionFile implements AutoCloseable {
     }
 
     static SessionFile open(Path path) throws IOException {
-        return openLoaded(path, channel -> channel::write).file();
+        return openLoaded(path, channel -> channel::write, false).file();
     }
 
     static SessionFile open(Path path, SessionByteWriterFactory writerFactory) throws IOException {
-        return openLoaded(path, writerFactory).file();
+        return openLoaded(path, writerFactory, false).file();
     }
 
     static Opened openLoaded(Path path) throws IOException {
-        return openLoaded(path, channel -> channel::write);
+        return openLoaded(path, channel -> channel::write, false);
     }
 
-    static Opened openLoaded(Path path, SessionByteWriterFactory writerFactory)
-            throws IOException {
+    static Opened openLoadedManaged(Path path) throws IOException {
+        return openLoaded(path, channel -> channel::write, true);
+    }
+
+    static Opened openLoadedManaged(
+            Path path,
+            SessionByteWriterFactory writerFactory
+    ) throws IOException {
+        return openLoaded(path, writerFactory, true);
+    }
+
+    private static Opened openLoaded(
+            Path path,
+            SessionByteWriterFactory writerFactory,
+            boolean expectsDiscoverySource
+    ) throws IOException {
         Objects.requireNonNull(path, "path must not be null");
         Objects.requireNonNull(writerFactory, "writerFactory must not be null");
         var normalized = path.toAbsolutePath().normalize();
-        var registration = SessionFileAccess.reserveWriter(normalized);
+        var registration = SessionFileAccess.reserveWriter(normalized, expectsDiscoverySource);
         var codec = new SessionCodec();
         FileChannel channel = null;
         FileLock lock = null;
@@ -182,6 +208,14 @@ final class SessionFile implements AutoCloseable {
             throw new IOException(
                     "session file append state is uncertain after a prior write failure: " + path);
         }
+        if (!channel.isOpen() || !lock.isValid()) {
+            writeFailed = true;
+            throw new IOException("session file writer is no longer usable: " + path);
+        }
+    }
+
+    void attachDiscoverySource(SessionFileAccess.DiscoverySource discoverySource) {
+        SessionFileAccess.attachDiscoverySource(registration, discoverySource);
     }
 
     @Override
@@ -193,19 +227,6 @@ final class SessionFile implements AutoCloseable {
             closing = true;
         }
         SessionFileAccess.close(registration);
-    }
-
-    synchronized SessionFileReader.ReadResult readForDiscovery() throws IOException {
-        if (closed) {
-            throw new IOException("session file is closed: " + path);
-        }
-        try {
-            return new SessionFileReader(path, new SessionCodec()).read(channel);
-        } finally {
-            if (channel.isOpen()) {
-                channel.position(appendOffset);
-            }
-        }
     }
 
     synchronized void closeOwnedResources() throws IOException {

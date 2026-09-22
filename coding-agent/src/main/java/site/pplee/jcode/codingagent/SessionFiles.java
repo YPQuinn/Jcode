@@ -121,7 +121,7 @@ public final class SessionFiles {
         }
     }
 
-    private static SessionInfo summarize(Path path, SessionFileReader.ReadResult loaded) {
+    private static SessionInfo summarize(Path path, SessionFileAccess.DiscoveryResult loaded) {
         String name = null;
         long messageCount = 0;
         Instant latestActivity = null;

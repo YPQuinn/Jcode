@@ -31,9 +31,9 @@
 
 - Session JSONL 使用显式 version/type/role/content 分派，不使用 Java 默认多态反序列化。标准消息的多模态内容、工具参数、usage、metadata、source model 与 replay state 必须无损往返；JSON 浮点数按 `BigDecimal` 读取，不能先经过二进制浮点而损失工具参数精度。
 - `SessionManager` 是 Entry 序列及索引的唯一长期内存所有者；reader 只做一次临时解析与校验，`SessionFile` 只持有 Header、通道、锁、追加位置、尾部恢复和失败状态。
-- 一个 Session 文件在 writer 生命周期内持有独占文件锁；锁冲突立即失败，不进行多写者协调、等待或重试。同一 JVM 必须在打开任何同文件临时通道前协调活动 owner，发现读取复用 owner 通道，避免关闭另一个通道时释放进程已有的原生文件锁。
+- 一个 Session 文件在 writer 生命周期内持有独占文件锁；锁冲突立即失败，不进行多写者协调、等待或重试。同一 JVM 必须协调 writer reservation 与同文件临时读取生命周期。活动 owner 的发现查询从 `SessionManager` 已接纳历史计算，不能在查询线程读取 writer 通道；无 owner 的临时读取仅阻塞同文件 writer，registry 全局锁不得覆盖摘要计算、文件 I/O 或资源关闭。
 - open 只读取和诊断，不修改文件。只有 EOF 截断 JSON 或不完整 UTF-8 后缀可恢复；首次后续追加先截断该尾片段。中部损坏、未知版本/类型、坏父链和完整但非法的末行必须失败且保持原文件不变。
-- 顺序追加必须处理短写。实际写入失败后磁盘尾部状态不确定，当前 writer 必须封锁后续追加；不得自动重试同一 Entry、退回内存模式或声称回滚成功。
+- 顺序追加必须处理短写。实际写入失败后磁盘尾部状态不确定，当前 writer 必须封锁后续追加；底层 channel 已关闭或原生锁已失效时也必须在 provider 调用或 Entry id 生成前拒绝新操作。不得自动重试同一 Entry、退回内存模式或声称回滚成功。
 - 普通追加不逐条 `force()`，因此只承诺成功写完整本次字节，不承诺断电 durability。
 - `SessionFiles` 只扫描调用方显式目录的一层 `*.jsonl` 文件；可按规范化 cwd 精确过滤。合法会话按最新 user/assistant 活动时间倒序排序，无此类消息时使用 Header 时间；坏文件不得阻断其他结果，只返回不含消息内容的逐文件诊断。发现和 recoverable-tail 诊断不得修改文件。
 

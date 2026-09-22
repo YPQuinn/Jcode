@@ -19,10 +19,16 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,17 +49,15 @@ class SessionFileTest {
     void createAppendCloseAndOpenPreserveJsonlOrder() throws Exception {
         var header = header();
         Path path;
-        byte[] headerOnly;
+        var headerOnly = concatLines(new SessionCodec().encodeHeader(header));
         try (var file = SessionFile.create(tempDir.resolve("sessions"), header)) {
             path = file.path();
             assertEquals(header, file.header());
             assertTrue(Files.isRegularFile(path));
-            headerOnly = Files.readAllBytes(path);
-
             file.append(message("one", null, "第一行\n第二行"));
             file.append(message("two", "one", "second"));
-            assertEquals(List.of("one", "two"), entryIds(path));
         }
+        assertEquals(List.of("one", "two"), entryIds(path));
 
         var complete = Files.readAllBytes(path);
         assertArrayEquals(headerOnly, java.util.Arrays.copyOf(complete, headerOnly.length));
@@ -62,9 +66,9 @@ class SessionFileTest {
 
         try (var reopened = SessionFile.open(path)) {
             assertEquals(header, reopened.header());
-            assertEquals(List.of("one", "two"), entryIds(path));
             assertNull(reopened.recovery());
         }
+        assertEquals(List.of("one", "two"), entryIds(path));
     }
 
     @Test
@@ -97,21 +101,19 @@ class SessionFileTest {
         Files.writeString(path, "{\"type\":\"message\"", StandardCharsets.UTF_8,
                 StandardOpenOption.APPEND);
         var beforeOpen = Files.readAllBytes(path);
+        assertEquals(List.of("one"), entryIds(path));
 
         try (var reopened = SessionFile.open(path)) {
             var recovery = reopened.recovery();
             assertNotNull(recovery);
             assertEquals(SessionFileReader.TailReason.TRUNCATED_JSON, recovery.reason());
-            assertArrayEquals(beforeOpen, Files.readAllBytes(path), "open must not repair the file");
-            assertEquals(List.of("one"), entryIds(path));
+            assertEquals(beforeOpen.length, Files.size(path), "open must not repair the file");
 
             reopened.append(message("two", "one", "two"));
             assertNull(reopened.recovery());
         }
 
-        try (var verified = SessionFile.open(path)) {
-            assertEquals(List.of("one", "two"), entryIds(path));
-        }
+        assertEquals(List.of("one", "two"), entryIds(path));
         assertFalse(Files.readString(path).contains("{\"type\":\"message\"{\"type\""));
     }
 
@@ -233,14 +235,15 @@ class SessionFileTest {
     @Test
     void readsAndRejectedDuplicateOpenDoNotReleaseOwnerLockInAnotherJvm() throws Exception {
         Path path;
-        var owner = SessionFile.create(tempDir, header());
-        path = owner.path();
+        var owner = SessionManager.createFileBacked(
+                header(), tempDir, Clock.fixed(T1, ZoneOffset.UTC), () -> "unused");
+        path = owner.filePath();
         try {
             assertFalse(externalProcessCanAcquire(path));
 
             assertEquals(1, SessionFiles.list(tempDir).sessions().size());
             assertFalse(externalProcessCanAcquire(path),
-                    "a discovery read must reuse the active owner's channel");
+                    "a discovery read must not disturb the active owner's channel");
 
             assertThrows(SessionFileLockException.class, () -> SessionFile.open(path));
             assertFalse(externalProcessCanAcquire(path),
@@ -256,6 +259,117 @@ class SessionFileTest {
     }
 
     @Test
+    void hardLinkAliasCannotBypassActiveWriterRegistration() throws Exception {
+        Path path;
+        var alias = tempDir.resolve("alias.jsonl");
+        try (var owner = SessionFile.create(tempDir, header())) {
+            path = owner.path();
+            Files.createLink(alias, path);
+
+            assertThrows(SessionFileLockException.class, () -> SessionFile.open(alias));
+            assertFalse(externalProcessCanAcquire(path),
+                    "rejecting a hard-link alias must not release the owner lock");
+            owner.append(message("one", null, "one"));
+        }
+
+        assertTrue(externalProcessCanAcquire(path));
+        assertEquals(List.of("one"), entryIds(alias));
+    }
+
+    @Test
+    void interruptedDiscoveryUsesManagerHistoryWithoutClosingWriterChannel() throws Exception {
+        var generatedIds = new AtomicInteger();
+        var manager = SessionManager.createFileBacked(
+                header(),
+                tempDir,
+                Clock.fixed(T1, ZoneOffset.UTC),
+                () -> "entry-" + generatedIds.incrementAndGet());
+        var path = manager.filePath();
+        try {
+            manager.appendMessage(StandardAgentMessage.of(new Message.User(
+                    List.of(new Content.Text("first")), T1)));
+            assertFalse(externalProcessCanAcquire(path));
+
+            var listed = new CompletableFuture<SessionListResult>();
+            var interruptedAfterList = new AtomicBoolean();
+            Thread.startVirtualThread(() -> {
+                Thread.currentThread().interrupt();
+                try {
+                    var result = SessionFiles.list(tempDir);
+                    interruptedAfterList.set(Thread.currentThread().isInterrupted());
+                    listed.complete(result);
+                } catch (Throwable failure) {
+                    interruptedAfterList.set(Thread.currentThread().isInterrupted());
+                    listed.completeExceptionally(failure);
+                }
+            });
+
+            var result = listed.get(5, TimeUnit.SECONDS);
+            assertEquals(1, result.sessions().size());
+            assertEquals(1, result.sessions().getFirst().messageCount());
+            assertTrue(result.diagnostics().isEmpty());
+            assertTrue(interruptedAfterList.get());
+            assertFalse(externalProcessCanAcquire(path),
+                    "an interrupted discovery must not close the writer channel");
+
+            manager.appendMessage(StandardAgentMessage.of(new Message.User(
+                    List.of(new Content.Text("second")), T1.plusSeconds(1))));
+            assertEquals(2, SessionFiles.list(tempDir).sessions().getFirst().messageCount());
+            assertFalse(externalProcessCanAcquire(path));
+        } finally {
+            manager.close();
+        }
+
+        assertTrue(externalProcessCanAcquire(path));
+        assertEquals(List.of("entry-1", "entry-2"), entryIds(path));
+    }
+
+    @Test
+    void blockedDiscoveryForOneSessionDoesNotBlockAnotherSessionLifecycle() throws Exception {
+        var first = SessionFile.create(tempDir, headerWithId(1));
+        var discoveryEntered = new CountDownLatch(1);
+        var releaseDiscovery = new CountDownLatch(1);
+        first.attachDiscoverySource(() -> {
+            discoveryEntered.countDown();
+            try {
+                if (!releaseDiscovery.await(5, TimeUnit.SECONDS)) {
+                    throw new IOException("timed out waiting to release discovery");
+                }
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IOException("discovery interrupted", failure);
+            }
+            return new SessionFileAccess.DiscoveryResult(first.header(), List.of(), null);
+        });
+
+        var listing = new CompletableFuture<SessionListResult>();
+        Thread.startVirtualThread(() -> {
+            try {
+                listing.complete(SessionFiles.list(tempDir));
+            } catch (Throwable failure) {
+                listing.completeExceptionally(failure);
+            }
+        });
+
+        try {
+            assertTrue(discoveryEntered.await(5, TimeUnit.SECONDS));
+            var secondLifecycle = new CompletableFuture<Path>();
+            Thread.startVirtualThread(() -> {
+                try (var second = SessionFile.create(tempDir, headerWithId(2))) {
+                    secondLifecycle.complete(second.path());
+                } catch (Throwable failure) {
+                    secondLifecycle.completeExceptionally(failure);
+                }
+            });
+            assertNotNull(secondLifecycle.get(5, TimeUnit.SECONDS));
+        } finally {
+            releaseDiscovery.countDown();
+            first.close();
+        }
+        assertEquals(1, listing.get(5, TimeUnit.SECONDS).sessions().size());
+    }
+
+    @Test
     void appendLoopsOverShortWrites() throws Exception {
         Path path;
         try (var created = SessionFile.create(tempDir, header())) {
@@ -266,9 +380,7 @@ class SessionFileTest {
             file.append(message("one", null, "a message longer than three bytes"));
         }
 
-        try (var verified = SessionFile.open(path)) {
-            assertEquals(List.of("one"), entryIds(path));
-        }
+        assertEquals(List.of("one"), entryIds(path));
     }
 
     @Test
@@ -286,7 +398,6 @@ class SessionFileTest {
                     () -> file.append(message("one", null, "one")));
             assertTrue(first.getMessage().contains("injected"));
             assertTrue(file.writeFailed());
-            assertTrue(SessionFileAccess.read(path).entries().isEmpty());
             var sizeAfterFailure = Files.size(path);
 
             var second = assertThrows(IOException.class,
@@ -294,6 +405,7 @@ class SessionFileTest {
             assertTrue(second.getMessage().contains("uncertain"));
             assertEquals(sizeAfterFailure, Files.size(path));
         }
+        assertTrue(SessionFileAccess.read(path).entries().isEmpty());
 
         try (var recovered = SessionFile.open(path)) {
             assertNotNull(recovered.recovery());
