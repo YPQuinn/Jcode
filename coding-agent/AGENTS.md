@@ -1,6 +1,6 @@
 # coding-agent 模块知识库
 
-Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition root 所需的 `ai-providers`，提供 `CodingAgentSession`、显式设置/模型装配、Session 持久化、项目指令、编码工具以及产品级 state/result/event。第五阶段已交付 sparse settings、精确项目授信、凭证优先级、Provider/Models 装配、创建/恢复选择、idle 模型切换和短时原子保存；仍不包含 Compaction、Extension 或 UI。
+Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition root 所需的 `ai-providers`，提供 `CodingAgentSession`、显式设置/模型装配、Session 持久化、项目指令、编码工具、长会话压缩以及产品级 state/result/event。第六阶段已交付手动/阈值压缩、摘要检查点、单次溢出恢复和分支摘要；仍不包含 Extension 或 UI。
 
 ## WHERE TO LOOK
 
@@ -14,6 +14,7 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 | 产品快照 | `CodingAgentState.java` / `CodingAgentRunResult.java` / `event/` |
 | Session 产品接入、可变树与文件实现 | `CodingAgentSession.java` / 包根目录下 package-private `SessionManager`、`SessionFile`、`SessionFileAccess`、codec |
 | Session 不可变模型、诊断、树查询与分支 context | `session/`（对外使用只读 `SessionSnapshot` / `SessionInfo`） |
+| 上下文估算、截断规划与摘要生成 | `compaction/`；产品生命周期编排仍在 `CodingAgentSession.java` |
 | 显式目录会话发现 | `SessionFiles.java` / `SessionListResult.java` / `SessionFileDiagnostic.java` |
 | System Prompt | `prompt/SystemPromptBuilder.java` |
 | 项目指令配置、加载与快照 | `context/ProjectContextConfig.java` / `context/ProjectContextLoader.java` / `context/ProjectContextSnapshot.java` |
@@ -33,8 +34,11 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 | 第三阶段上下文计划（已归档） | `../docs/plans/archived/coding-agent-phase-3-project-context.md` |
 | 第四阶段 Session 计划（已归档） | `../docs/plans/archived/coding-agent-phase-4-session-persistence.md` |
 | 第五阶段 Settings/Models/Credentials 计划（已归档） | `../docs/plans/archived/coding-agent-phase-5-settings-models-credentials.md` |
+| 第六阶段 Compaction 计划（已归档） | `../docs/plans/archived/coding-agent-phase-6-compaction.md` |
 
 ## PLANNING STATUS
+
+- 第六阶段 6A～6E 已完成：Session version 1 增加 `compaction`/`branch_summary` Entry，请求视图按当前父链最后检查点重建；手动与阈值压缩使用无工具专用请求，结构化 `CONTEXT_OVERFLOW` 在一次产品操作内最多恢复一次；`branchWithSummary` 在生成成功后把摘要提交到目标节点。旧构造与默认设置保持自动压缩关闭，读取到既有摘要时仍应用其边界。
 
 - 第五阶段 5A～5D 已完成：用户配置目录始终显式；普通设置按内建/全局/授权项目/SDK 合并，项目授权精确绑定 real path；Provider 定义仅来自用户级文件或 SDK，凭证按 SDK/env/只读文件解析。新工厂区分 borrowed/owned Models；owned runtime 同时拥有并关闭 Provider 及其 `HttpClient`，borrowed Models 始终由调用方关闭。创建不猜目录首项，恢复仅在历史模型不可用时回退到不同的配置默认。model/thinking 切换复用 core idle admission，只有下一条真实完成消息才记录差异。Settings/trust 保存使用稳定旁路锁、短时 reservation、锁内重读与原子替换，不复用 Session 长期 writer。
 - 第四阶段 4A～4D 已完成：内存 Header/五种 Entry、append-only 父链树、固定 JSONL codec、独占 writer 锁和 EOF 尾片段恢复已接入 `CodingAgentSession`。产品提供默认内存模式、显式文件 create/open、只读历史与诊断、`continueRun()`、idle-only branch/reset/name/label；`SessionFiles` 只扫描显式目录的直接 `*.jsonl` 子文件，支持 cwd 过滤和 latest，并将坏文件隔离为不含历史内容的诊断。仅持久化真实 `MessageCompleted`，sink/writer 失败会按已接纳历史对齐 Agent transcript，close 保留在途 writer 直到运行或历史追加结算。

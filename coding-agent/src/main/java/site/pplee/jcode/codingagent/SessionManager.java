@@ -9,6 +9,11 @@ import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.session.SessionSnapshot;
 import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
+import site.pplee.jcode.codingagent.session.CompactionEntry;
+import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
+import site.pplee.jcode.codingagent.session.SummaryDetails;
+import site.pplee.jcode.codingagent.session.TokenEstimateSource;
+import site.pplee.jcode.ai.message.Usage;
 
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
@@ -157,6 +162,35 @@ final class SessionManager implements AutoCloseable {
         requireEntry(targetId);
         return append(id -> new LabelEntry(
                 id, currentEntryId, clock.instant(), targetId, label));
+    }
+
+    synchronized CompactionEntry appendCompaction(
+            String summary,
+            String firstKeptEntryId,
+            long tokensBefore,
+            TokenEstimateSource estimateSource,
+            ModelRef summaryModel,
+            Usage usage,
+            SummaryDetails details
+    ) throws IOException {
+        return append(id -> new CompactionEntry(
+                id, currentEntryId, clock.instant(), summary, firstKeptEntryId,
+                tokensBefore, estimateSource, summaryModel, usage, details));
+    }
+
+    synchronized BranchSummaryEntry appendBranchSummary(
+            String targetId,
+            String fromId,
+            String summary,
+            ModelRef summaryModel,
+            Usage usage,
+            SummaryDetails details
+    ) throws IOException {
+        requireWritable();
+        requireEntry(targetId);
+        requireEntry(fromId);
+        return append(id -> new BranchSummaryEntry(
+                id, targetId, clock.instant(), fromId, summary, summaryModel, usage, details));
     }
 
     synchronized void branch(String entryId) {

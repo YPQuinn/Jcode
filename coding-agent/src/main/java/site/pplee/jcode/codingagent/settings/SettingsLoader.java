@@ -24,9 +24,11 @@ import java.util.Set;
 public final class SettingsLoader {
     private static final Set<String> ROOT_FIELDS = Set.of(
             "defaultModel", "defaultThinkingLevel", "defaultTools",
-            "steeringMode", "followUpMode", "request");
+            "steeringMode", "followUpMode", "request", "compaction");
     private static final Set<String> REQUEST_FIELDS = Set.of(
             "maxOutputTokens", "temperature");
+    private static final Set<String> COMPACTION_FIELDS = Set.of(
+            "enabled", "reserveTokens", "keepRecentTokens");
     private static final Set<String> OUT_OF_SCOPE_FIELDS = Set.of(
             "apiKey", "headers", "baseUrl", "credentialSource",
             "trust", "trustDecision", "projectTrust", "projectTrustDecision");
@@ -189,6 +191,27 @@ public final class SettingsLoader {
                 builder.temperature(value.doubleValue());
             }
         }
+        if (root.has("compaction")) {
+            var compaction = requireObject(root.get("compaction"), "compaction");
+            reportUnknownFields(compaction, COMPACTION_FIELDS, path, diagnostics, "compaction");
+            Optional<Boolean> enabled = Optional.empty();
+            Optional<Integer> reserve = Optional.empty();
+            Optional<Integer> keep = Optional.empty();
+            if (compaction.has("enabled")) {
+                var value = compaction.get("enabled");
+                if (!value.isBoolean()) {
+                    throw new IllegalArgumentException("compaction.enabled must be a boolean");
+                }
+                enabled = Optional.of(value.booleanValue());
+            }
+            if (compaction.has("reserveTokens")) {
+                reserve = Optional.of(requireInt(compaction.get("reserveTokens"), "compaction.reserveTokens"));
+            }
+            if (compaction.has("keepRecentTokens")) {
+                keep = Optional.of(requireInt(compaction.get("keepRecentTokens"), "compaction.keepRecentTokens"));
+            }
+            builder.compaction(new CompactionSettingsLayer(enabled, reserve, keep));
+        }
         return builder.build();
     }
 
@@ -249,6 +272,13 @@ public final class SettingsLoader {
             throw new IllegalArgumentException(field + " must be a non-blank string");
         }
         return node.textValue();
+    }
+
+    private static int requireInt(JsonNode node, String field) {
+        if (node == null || !node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new IllegalArgumentException(field + " must be an integer");
+        }
+        return node.intValue();
     }
 
     private static <E extends Enum<E>> E parseEnum(String text, Class<E> type, String field) {

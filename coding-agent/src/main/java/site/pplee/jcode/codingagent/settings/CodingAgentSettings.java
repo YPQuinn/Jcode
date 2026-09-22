@@ -21,7 +21,8 @@ public record CodingAgentSettings(
         Optional<QueueMode> steeringMode,
         Optional<QueueMode> followUpMode,
         Optional<Integer> maxOutputTokens,
-        Optional<Double> temperature
+        Optional<Double> temperature,
+        Optional<CompactionSettingsLayer> compaction
 ) {
     public CodingAgentSettings {
         Objects.requireNonNull(defaultModel, "defaultModel must not be null");
@@ -31,6 +32,7 @@ public record CodingAgentSettings(
         Objects.requireNonNull(followUpMode, "followUpMode must not be null");
         Objects.requireNonNull(maxOutputTokens, "maxOutputTokens must not be null");
         Objects.requireNonNull(temperature, "temperature must not be null");
+        Objects.requireNonNull(compaction, "compaction must not be null");
         defaultTools = defaultTools.map(List::copyOf);
         if (defaultTools.stream().flatMap(List::stream).anyMatch(Objects::isNull)) {
             throw new NullPointerException("defaultTools must not contain null");
@@ -52,10 +54,24 @@ public record CodingAgentSettings(
         });
     }
 
+    /** Compatibility constructor for settings created before compaction existed. */
+    public CodingAgentSettings(
+            Optional<ModelRef> defaultModel,
+            Optional<ThinkingLevel> defaultThinkingLevel,
+            Optional<List<CodingTool>> defaultTools,
+            Optional<QueueMode> steeringMode,
+            Optional<QueueMode> followUpMode,
+            Optional<Integer> maxOutputTokens,
+            Optional<Double> temperature
+    ) {
+        this(defaultModel, defaultThinkingLevel, defaultTools, steeringMode, followUpMode,
+                maxOutputTokens, temperature, Optional.empty());
+    }
+
     public static CodingAgentSettings empty() {
         return new CodingAgentSettings(
                 Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
-                Optional.empty(), Optional.empty(), Optional.empty());
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     public static Builder builder() {
@@ -71,6 +87,7 @@ public record CodingAgentSettings(
         private QueueMode followUpMode;
         private Integer maxOutputTokens;
         private Double temperature;
+        private CompactionSettingsLayer compaction;
 
         public Builder defaultModel(ModelRef value) {
             defaultModel = Objects.requireNonNull(value, "defaultModel must not be null");
@@ -108,6 +125,11 @@ public record CodingAgentSettings(
             return this;
         }
 
+        public Builder compaction(CompactionSettingsLayer value) {
+            compaction = Objects.requireNonNull(value, "compaction must not be null");
+            return this;
+        }
+
         public CodingAgentSettings build() {
             return new CodingAgentSettings(
                     Optional.ofNullable(defaultModel),
@@ -116,7 +138,8 @@ public record CodingAgentSettings(
                     Optional.ofNullable(steeringMode),
                     Optional.ofNullable(followUpMode),
                     Optional.ofNullable(maxOutputTokens),
-                    Optional.ofNullable(temperature));
+                    Optional.ofNullable(temperature),
+                    Optional.ofNullable(compaction));
         }
     }
 }

@@ -17,7 +17,10 @@ public record SettingsUpdate(
         SettingChange<QueueMode> steeringMode,
         SettingChange<QueueMode> followUpMode,
         SettingChange<Integer> maxOutputTokens,
-        SettingChange<Double> temperature
+        SettingChange<Double> temperature,
+        SettingChange<Boolean> compactionEnabled,
+        SettingChange<Integer> compactionReserveTokens,
+        SettingChange<Integer> compactionKeepRecentTokens
 ) {
     public SettingsUpdate {
         Objects.requireNonNull(defaultModel, "defaultModel must not be null");
@@ -27,6 +30,9 @@ public record SettingsUpdate(
         Objects.requireNonNull(followUpMode, "followUpMode must not be null");
         Objects.requireNonNull(maxOutputTokens, "maxOutputTokens must not be null");
         Objects.requireNonNull(temperature, "temperature must not be null");
+        Objects.requireNonNull(compactionEnabled, "compactionEnabled must not be null");
+        Objects.requireNonNull(compactionReserveTokens, "compactionReserveTokens must not be null");
+        Objects.requireNonNull(compactionKeepRecentTokens, "compactionKeepRecentTokens must not be null");
         defaultTools = copyListChange(defaultTools);
         defaultTools.value().ifPresent(tools -> {
             if (new HashSet<>(tools).size() != tools.size()) {
@@ -43,6 +49,22 @@ public record SettingsUpdate(
                 throw new IllegalArgumentException("temperature must be finite and non-negative");
             }
         });
+        compactionReserveTokens.value().ifPresent(value -> requirePositive(value, "compactionReserveTokens"));
+        compactionKeepRecentTokens.value().ifPresent(value -> requirePositive(value, "compactionKeepRecentTokens"));
+    }
+
+    /** Compatibility constructor for updates created before compaction existed. */
+    public SettingsUpdate(
+            SettingChange<ModelRef> defaultModel,
+            SettingChange<ThinkingLevel> defaultThinkingLevel,
+            SettingChange<List<CodingTool>> defaultTools,
+            SettingChange<QueueMode> steeringMode,
+            SettingChange<QueueMode> followUpMode,
+            SettingChange<Integer> maxOutputTokens,
+            SettingChange<Double> temperature
+    ) {
+        this(defaultModel, defaultThinkingLevel, defaultTools, steeringMode, followUpMode,
+                maxOutputTokens, temperature, SettingChange.keep(), SettingChange.keep(), SettingChange.keep());
     }
 
     public static Builder builder() {
@@ -56,7 +78,10 @@ public record SettingsUpdate(
                 && steeringMode.operation() == SettingChange.Operation.KEEP
                 && followUpMode.operation() == SettingChange.Operation.KEEP
                 && maxOutputTokens.operation() == SettingChange.Operation.KEEP
-                && temperature.operation() == SettingChange.Operation.KEEP;
+                && temperature.operation() == SettingChange.Operation.KEEP
+                && compactionEnabled.operation() == SettingChange.Operation.KEEP
+                && compactionReserveTokens.operation() == SettingChange.Operation.KEEP
+                && compactionKeepRecentTokens.operation() == SettingChange.Operation.KEEP;
     }
 
     private static SettingChange<List<CodingTool>> copyListChange(
@@ -77,6 +102,9 @@ public record SettingsUpdate(
         private SettingChange<QueueMode> followUpMode = SettingChange.keep();
         private SettingChange<Integer> maxOutputTokens = SettingChange.keep();
         private SettingChange<Double> temperature = SettingChange.keep();
+        private SettingChange<Boolean> compactionEnabled = SettingChange.keep();
+        private SettingChange<Integer> compactionReserveTokens = SettingChange.keep();
+        private SettingChange<Integer> compactionKeepRecentTokens = SettingChange.keep();
 
         public Builder setDefaultModel(ModelRef value) {
             requireUnset(defaultModel, "defaultModel");
@@ -162,6 +190,42 @@ public record SettingsUpdate(
             return this;
         }
 
+        public Builder setCompactionEnabled(boolean value) {
+            requireUnset(compactionEnabled, "compactionEnabled");
+            compactionEnabled = SettingChange.set(value);
+            return this;
+        }
+
+        public Builder removeCompactionEnabled() {
+            requireUnset(compactionEnabled, "compactionEnabled");
+            compactionEnabled = SettingChange.remove();
+            return this;
+        }
+
+        public Builder setCompactionReserveTokens(int value) {
+            requireUnset(compactionReserveTokens, "compactionReserveTokens");
+            compactionReserveTokens = SettingChange.set(value);
+            return this;
+        }
+
+        public Builder removeCompactionReserveTokens() {
+            requireUnset(compactionReserveTokens, "compactionReserveTokens");
+            compactionReserveTokens = SettingChange.remove();
+            return this;
+        }
+
+        public Builder setCompactionKeepRecentTokens(int value) {
+            requireUnset(compactionKeepRecentTokens, "compactionKeepRecentTokens");
+            compactionKeepRecentTokens = SettingChange.set(value);
+            return this;
+        }
+
+        public Builder removeCompactionKeepRecentTokens() {
+            requireUnset(compactionKeepRecentTokens, "compactionKeepRecentTokens");
+            compactionKeepRecentTokens = SettingChange.remove();
+            return this;
+        }
+
         private static void requireUnset(SettingChange<?> current, String field) {
             if (current.operation() != SettingChange.Operation.KEEP) {
                 throw new IllegalStateException(field + " already has an update");
@@ -171,7 +235,14 @@ public record SettingsUpdate(
         public SettingsUpdate build() {
             return new SettingsUpdate(
                     defaultModel, defaultThinkingLevel, defaultTools,
-                    steeringMode, followUpMode, maxOutputTokens, temperature);
+                    steeringMode, followUpMode, maxOutputTokens, temperature,
+                    compactionEnabled, compactionReserveTokens, compactionKeepRecentTokens);
+        }
+    }
+
+    private static void requirePositive(int value, String name) {
+        if (value <= 0) {
+            throw new IllegalArgumentException(name + " must be positive");
         }
     }
 }

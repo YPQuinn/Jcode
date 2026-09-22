@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import site.pplee.jcode.ai.message.Content;
+import site.pplee.jcode.ai.message.ModelFailureKind;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.stream.AssistantMessageEvent;
@@ -215,6 +216,20 @@ class OpenAiEventMapperTest {
         assertEquals(StopReason.ERROR, error.reason());
         assertTrue(error.error().errorMessage().contains("server_error"));
         assertTrue(mapper.terminalHandled());
+    }
+
+    @Test
+    void structuredContextOverflowIsClassifiedWithoutMessageGuessing() throws Exception {
+        var failed = (AssistantMessageEvent.Error) mapper().onEvent("response.failed", json(
+                "{\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too large\"}}}"))
+                .getFirst();
+        assertEquals(ModelFailureKind.CONTEXT_OVERFLOW,
+                failed.error().metadata().failureKind().orElseThrow());
+
+        var proseOnly = (AssistantMessageEvent.Error) mapper().onEvent("error", json(
+                "{\"code\":\"server_error\",\"message\":\"context is too long\"}"))
+                .getFirst();
+        assertTrue(proseOnly.error().metadata().failureKind().isEmpty());
     }
 
     @Test

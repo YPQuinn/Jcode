@@ -41,6 +41,26 @@ public final class SessionEntries {
             throw new IllegalArgumentException(
                     "label target must appear earlier: " + label.targetId());
         }
+        if (entry instanceof BranchSummaryEntry summary && !byId.containsKey(summary.fromId())) {
+            throw new IllegalArgumentException(
+                    "branch summary source must appear earlier: " + summary.fromId());
+        }
+        if (entry instanceof CompactionEntry compaction) {
+            var current = entry.parentId() == null ? null : byId.get(entry.parentId());
+            boolean found = false;
+            while (current != null) {
+                if (current.id().equals(compaction.firstKeptEntryId())) {
+                    found = isContextVisible(current);
+                    break;
+                }
+                current = current.parentId() == null ? null : byId.get(current.parentId());
+            }
+            if (!found) {
+                throw new IllegalArgumentException(
+                        "compaction firstKeptEntryId must be a context-visible ancestor: "
+                                + compaction.firstKeptEntryId());
+            }
+        }
     }
 
     /** Return a structural copy, including mutable JSON held by messages. */
@@ -57,7 +77,19 @@ public final class SessionEntries {
                     info.id(), info.parentId(), info.timestamp(), info.name());
             case LabelEntry label -> new LabelEntry(
                     label.id(), label.parentId(), label.timestamp(), label.targetId(), label.label());
+            case CompactionEntry compaction -> new CompactionEntry(
+                    compaction.id(), compaction.parentId(), compaction.timestamp(),
+                    compaction.summary(), compaction.firstKeptEntryId(), compaction.tokensBefore(),
+                    compaction.tokenEstimateSource(), compaction.summaryModel(), compaction.usage(),
+                    compaction.details());
+            case BranchSummaryEntry summary -> new BranchSummaryEntry(
+                    summary.id(), summary.parentId(), summary.timestamp(), summary.fromId(),
+                    summary.summary(), summary.summaryModel(), summary.usage(), summary.details());
         };
+    }
+
+    private static boolean isContextVisible(SessionEntry entry) {
+        return entry instanceof SessionMessageEntry || entry instanceof BranchSummaryEntry;
     }
 
     /** Return structural copies in source order. */

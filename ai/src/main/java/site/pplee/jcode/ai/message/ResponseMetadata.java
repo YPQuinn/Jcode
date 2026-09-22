@@ -4,10 +4,10 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Bounded, provider-neutral correlation metadata for one assistant result.
- * Carries an optional response correlation id, optional provider request id,
- * and optional raw terminal reason. There is no map, raw response body, or
- * header dump.
+ * Bounded, provider-neutral metadata for one assistant result. Carries
+ * optional response correlation ids, an optional raw terminal reason, and an
+ * optional standardized failure classification. There is no map, raw response
+ * body, or header dump.
  *
  * <p>Each field has a hard length limit and is rejected when exceeded.
  * Blank values are treated as absent. {@link #empty()} is the default for
@@ -18,7 +18,8 @@ import java.util.Optional;
 public record ResponseMetadata(
         Optional<String> responseId,
         Optional<String> providerRequestId,
-        Optional<String> rawTerminalReason
+        Optional<String> rawTerminalReason,
+        Optional<ModelFailureKind> failureKind
 ) {
     /** Maximum UTF-16 length of {@link #responseId()}. */
     public static final int MAX_RESPONSE_ID_LENGTH = 256;
@@ -28,7 +29,7 @@ public record ResponseMetadata(
     public static final int MAX_RAW_TERMINAL_REASON_LENGTH = 256;
 
     private static final ResponseMetadata EMPTY = new ResponseMetadata(
-            Optional.empty(), Optional.empty(), Optional.empty());
+            Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
 
     public ResponseMetadata {
         responseId = normalize("responseId", responseId, MAX_RESPONSE_ID_LENGTH);
@@ -36,9 +37,19 @@ public record ResponseMetadata(
                 "providerRequestId", providerRequestId, MAX_PROVIDER_REQUEST_ID_LENGTH);
         rawTerminalReason = normalize(
                 "rawTerminalReason", rawTerminalReason, MAX_RAW_TERMINAL_REASON_LENGTH);
+        Objects.requireNonNull(failureKind, "failureKind must not be null");
     }
 
-    /** No correlation metadata. */
+    /** Compatibility constructor for correlation-only metadata. */
+    public ResponseMetadata(
+            Optional<String> responseId,
+            Optional<String> providerRequestId,
+            Optional<String> rawTerminalReason
+    ) {
+        this(responseId, providerRequestId, rawTerminalReason, Optional.empty());
+    }
+
+    /** No response metadata. */
     public static ResponseMetadata empty() {
         return EMPTY;
     }
@@ -51,18 +62,37 @@ public record ResponseMetadata(
         return new ResponseMetadata(
                 Optional.ofNullable(responseId),
                 Optional.ofNullable(providerRequestId),
-                Optional.ofNullable(rawTerminalReason));
+                Optional.ofNullable(rawTerminalReason),
+                Optional.empty());
+    }
+
+    /** Metadata from possibly-blank correlation values and a classified failure. */
+    public static ResponseMetadata of(
+            String responseId,
+            String providerRequestId,
+            String rawTerminalReason,
+            ModelFailureKind failureKind
+    ) {
+        return new ResponseMetadata(
+                Optional.ofNullable(responseId),
+                Optional.ofNullable(providerRequestId),
+                Optional.ofNullable(rawTerminalReason),
+                Optional.ofNullable(failureKind));
     }
 
     public boolean isEmpty() {
-        return responseId.isEmpty() && providerRequestId.isEmpty() && rawTerminalReason.isEmpty();
+        return responseId.isEmpty() && providerRequestId.isEmpty()
+                && rawTerminalReason.isEmpty() && failureKind.isEmpty();
     }
 
     @Override
     public String toString() {
-        return "ResponseMetadata[responseId=" + present(responseId)
+        String base = "ResponseMetadata[responseId=" + present(responseId)
                 + ", providerRequestId=" + present(providerRequestId)
-                + ", rawTerminalReason=" + present(rawTerminalReason) + "]";
+                + ", rawTerminalReason=" + present(rawTerminalReason);
+        return failureKind.isEmpty()
+                ? base + "]"
+                : base + ", failureKind=" + failureKind.orElseThrow().name() + "]";
     }
 
     private static Optional<String> normalize(String name, Optional<String> value, int maxLength) {

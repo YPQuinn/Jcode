@@ -383,6 +383,25 @@ class AgentTest {
         }
     }
 
+    @Test
+    void continueAfterFailureOnlyAcceptsAssistantErrorLeaf() throws Exception {
+        var error = new Message.Assistant(
+                List.of(), StopReason.ERROR, "failed", Usage.zero(), T1, MODEL);
+        var client = new site.pplee.jcode.agentcore.support.ScriptedModelClient(
+                error, assistantText("recovered", StopReason.STOP));
+        try (var agent = new Agent(configWith(client, AgentEventSink.noop()))) {
+            agent.prompt(user("hi")).toCompletableFuture().get(2, TimeUnit.SECONDS);
+            var recovered = agent.continueAfterFailure().toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            var last = (Message.Assistant) ((StandardAgentMessage)
+                    recovered.context().messages().getLast()).message();
+            assertEquals("recovered", ((Content.Text) last.content().getFirst()).text());
+
+            var rejected = agent.continueAfterFailure().toCompletableFuture();
+            assertTrue(rejected.isCompletedExceptionally());
+        }
+    }
+
     // --- close & abort ---
 
     @Test

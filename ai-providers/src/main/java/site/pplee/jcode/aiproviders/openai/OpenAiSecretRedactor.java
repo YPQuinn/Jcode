@@ -97,7 +97,8 @@ final class OpenAiSecretRedactor {
                 clamp(redact(metadata.providerRequestId().orElse(null)),
                         ResponseMetadata.MAX_PROVIDER_REQUEST_ID_LENGTH),
                 clamp(redact(metadata.rawTerminalReason().orElse(null)),
-                        ResponseMetadata.MAX_RAW_TERMINAL_REASON_LENGTH));
+                        ResponseMetadata.MAX_RAW_TERMINAL_REASON_LENGTH),
+                metadata.failureKind().orElse(null));
     }
 
     @Override

@@ -10,6 +10,7 @@ import site.pplee.jcode.ai.message.CostEstimate;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.ModelReplayState;
 import site.pplee.jcode.ai.message.ResponseMetadata;
+import site.pplee.jcode.ai.message.ModelFailureKind;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
@@ -195,7 +196,7 @@ final class SessionMessageCodec {
                 SessionJson.requireText(replay, "payload"));
     }
 
-    private ObjectNode encodeUsage(Usage usage) {
+    ObjectNode encodeUsage(Usage usage) {
         var object = mapper.createObjectNode();
         object.put("input", usage.input());
         object.put("output", usage.output());
@@ -211,7 +212,7 @@ final class SessionMessageCodec {
         return object;
     }
 
-    private Usage decodeUsage(ObjectNode object) {
+    Usage decodeUsage(ObjectNode object) {
         var cost = SessionJson.nullableObject(object, "cost");
         return new Usage(
                 SessionJson.requireLong(object, "input"),
@@ -249,14 +250,26 @@ final class SessionMessageCodec {
         putNullable(object, "responseId", metadata.responseId().orElse(null));
         putNullable(object, "providerRequestId", metadata.providerRequestId().orElse(null));
         putNullable(object, "rawTerminalReason", metadata.rawTerminalReason().orElse(null));
+        putNullable(object, "failureKind", metadata.failureKind().map(Enum::name).orElse(null));
         return object;
     }
 
     private ResponseMetadata decodeMetadata(ObjectNode object) {
+        String rawFailureKind = object.has("failureKind")
+                ? SessionJson.nullableText(object, "failureKind") : null;
+        ModelFailureKind failureKind = null;
+        if (rawFailureKind != null) {
+            try {
+                failureKind = ModelFailureKind.valueOf(rawFailureKind.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                // Future classifications are intentionally treated as unknown.
+            }
+        }
         return ResponseMetadata.of(
                 SessionJson.nullableText(object, "responseId"),
                 SessionJson.nullableText(object, "providerRequestId"),
-                SessionJson.nullableText(object, "rawTerminalReason"));
+                SessionJson.nullableText(object, "rawTerminalReason"),
+                failureKind);
     }
 
     private static void putNullable(ObjectNode object, String field, String value) {

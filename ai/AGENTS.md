@@ -16,7 +16,7 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 | 标准 LLM 消息 | `message/Message.java`（sealed：User/Assistant/ToolResultMessage；Assistant 含可选 `sourceModel` 与 `ResponseMetadata`） |
 | 消息内容块 | `message/Content.java`（sealed：Text/Thinking/ToolCall/Image；Text/Thinking 含可选 `replayState`；Image 为 base64 + `image/*`，`toString()` 只报 media type 与编码长度） |
 | 不透明重放状态 | `message/ModelReplayState.java`（format + payload；`toString()` redacts payload） |
-| 响应相关元数据 | `message/ResponseMetadata.java`（optional response/request id 与 raw terminal reason；有长度上限；`empty()`；`toString()` 只报 present/absent） |
+| 响应相关元数据 | `message/ResponseMetadata.java`（optional response/request id、raw terminal reason 与最小 `ModelFailureKind` 分类；有长度上限；`empty()`；`toString()` 不输出原始值） |
 | 停止原因 | `message/StopReason.java`（enum，`isTerminalFailure()` = ERROR/ABORTED） |
 | token 元数据 | `message/Usage.java`（input/output/cacheRead/cacheWrite/totalTokens + `reasoningTokens` + optional `CostEstimate`） |
 | 成本估算 | `message/CostEstimate.java`（currency + 四组件 + total；`BigDecimal` + DECIMAL128；estimate 而非 invoice） |
@@ -32,7 +32,7 @@ provider-neutral 模型调用协议层。零 Jcode 内部依赖；无 provider S
 ## CONVENTIONS
 
 - `Message.Assistant` 携带 `Usage`（token 元数据）、可选 `sourceModel`（null = synthetic/legacy/未知来源）和 `ResponseMetadata`（默认 `empty()`）。`errorMessage` 仅允许在 `stopReason.isTerminalFailure()` 时非空（compact constructor 校验）。兼容五/六参数构造器与 `of(...)` 将 `sourceModel` 置为 null、metadata 置为 empty。OpenAI output message id/phase 仍只在 `ModelReplayState`。
-- `ResponseMetadata` 只承载 optional response correlation id、provider request id、raw terminal reason；每字段 256 UTF-16 字符上限，越界拒绝；禁止 Map/raw response。`toString()` 不输出原值。
+- `ResponseMetadata` 只承载 optional response correlation id、provider request id、raw terminal reason 与 provider-neutral `ModelFailureKind`；首个分类仅 `CONTEXT_OVERFLOW`。字符串字段各有 256 UTF-16 字符上限，越界拒绝；禁止 Map/raw response。`toString()` 不输出原值。
 - `Usage` 保留五参数构造器（`reasoningTokens=0`、`cost` absent）。`reasoningTokens` 必须非负且 `<= output`。`cost()` 为 `Optional<CostEstimate>`：未定价必须 absent，不能用全零假装已估算。`Usage.zero()` 的 cost 亦为 absent。
 - `CostEstimate` 金额为非负 `BigDecimal`，`total` 必须等于 DECIMAL128 组件和；明确是 estimate。
 - `Content.Text` / `Content.Thinking` 携带可选 `ModelReplayState`；单参数构造器将 state 置为 null。`format + payload` 只由写入它的 adapter 解释；重建 content 若不显式保留 state 即清除。

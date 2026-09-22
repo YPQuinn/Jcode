@@ -7,7 +7,8 @@ import java.time.Instant;
  * root; non-null parents must refer to an earlier entry in the same session.
  */
 public sealed interface SessionEntry permits SessionMessageEntry, ModelChangeEntry,
-        ThinkingLevelChangeEntry, SessionInfoEntry, LabelEntry {
+        ThinkingLevelChangeEntry, SessionInfoEntry, LabelEntry, CompactionEntry,
+        BranchSummaryEntry {
 
     /** Stable serialized discriminator. */
     String type();

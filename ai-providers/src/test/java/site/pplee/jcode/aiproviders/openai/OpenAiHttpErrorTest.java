@@ -7,6 +7,7 @@ import site.pplee.jcode.ai.client.ModelRequestOptions;
 import site.pplee.jcode.ai.client.PromptCacheOptions;
 import site.pplee.jcode.ai.model.Model;
 import site.pplee.jcode.ai.model.ThinkingLevel;
+import site.pplee.jcode.ai.message.ModelFailureKind;
 
 import java.net.http.HttpHeaders;
 import java.nio.charset.StandardCharsets;
@@ -52,6 +53,21 @@ class OpenAiHttpErrorTest {
                 403, headers(Map.of()), "gateway blocked".getBytes(StandardCharsets.UTF_8), MAPPER);
         assertTrue(error.errorMessage().isEmpty());
         assertEquals("HTTP 403: gateway blocked", error.diagnosticMessage());
+    }
+
+    @Test
+    void onlyStructuredContextLengthCodeIsClassified() {
+        var classified = OpenAiHttpError.parse(
+                400, headers(Map.of()),
+                "{\"error\":{\"message\":\"large\",\"code\":\"context_length_exceeded\"}}"
+                        .getBytes(StandardCharsets.UTF_8), MAPPER);
+        assertEquals(ModelFailureKind.CONTEXT_OVERFLOW, classified.failureKind().orElseThrow());
+
+        var proseOnly = OpenAiHttpError.parse(
+                400, headers(Map.of()),
+                "{\"error\":{\"message\":\"context length exceeded\",\"code\":\"server_error\"}}"
+                        .getBytes(StandardCharsets.UTF_8), MAPPER);
+        assertTrue(proseOnly.failureKind().isEmpty());
     }
 
     @Test

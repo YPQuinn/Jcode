@@ -3,6 +3,10 @@ package site.pplee.jcode.codingagent;
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.ModelFailureKind;
+import site.pplee.jcode.ai.message.StopReason;
+import site.pplee.jcode.ai.message.Usage;
+import site.pplee.jcode.ai.client.ModelRequestOptions;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.ai.provider.Models;
@@ -27,6 +31,18 @@ import site.pplee.jcode.codingagent.event.CodingAgentEvent;
 import site.pplee.jcode.codingagent.event.CodingAgentEventSink;
 import site.pplee.jcode.codingagent.internal.SnapshotMapper;
 import site.pplee.jcode.codingagent.model.ModelSelection;
+import site.pplee.jcode.codingagent.model.ModelProfile;
+import site.pplee.jcode.codingagent.compaction.BranchSummaryResult;
+import site.pplee.jcode.codingagent.compaction.CompactionResult;
+import site.pplee.jcode.codingagent.compaction.CompactionStatus;
+import site.pplee.jcode.codingagent.compaction.ContextUsageEstimate;
+import site.pplee.jcode.codingagent.compaction.ContextUsageEstimator;
+import site.pplee.jcode.codingagent.compaction.SummaryCause;
+import site.pplee.jcode.codingagent.compaction.CompactionPlanner;
+import site.pplee.jcode.codingagent.compaction.SummaryGenerator;
+import site.pplee.jcode.codingagent.compaction.SummaryMaterialSerializer;
+import site.pplee.jcode.codingagent.compaction.SummaryDetailsExtractor;
+import site.pplee.jcode.codingagent.settings.CompactionSettings;
 import site.pplee.jcode.codingagent.prompt.SystemPromptBuilder;
 import site.pplee.jcode.codingagent.session.LabelEntry;
 import site.pplee.jcode.codingagent.session.SessionContextBuilder;
@@ -34,6 +50,10 @@ import site.pplee.jcode.codingagent.session.SessionDiagnostic;
 import site.pplee.jcode.codingagent.session.SessionHeader;
 import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionSnapshot;
+import site.pplee.jcode.codingagent.session.CompactionEntry;
+import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
+import site.pplee.jcode.codingagent.session.SummaryDetails;
+import site.pplee.jcode.codingagent.session.TokenEstimateSource;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -43,6 +63,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.Map;
+import java.util.OptionalInt;
+import java.util.ArrayList;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -66,10 +89,16 @@ public final class CodingAgentSession implements AutoCloseable {
     private final SessionManager sessionManager;
     private final List<SessionDiagnostic> sessionDiagnostics;
     private final Models modelDirectory;
+    private final Map<ModelRef, ModelProfile> modelProfiles;
+    private final CompactionSettings compactionSettings;
+    private final site.pplee.jcode.ai.client.ModelClient modelClient;
+    private final ModelRequestOptions requestOptions;
+    private final CodingAgentEventSink productEventSink;
     private final AutoCloseable ownedResource;
     private final AtomicBoolean ownedResourceClosed = new AtomicBoolean();
     private volatile ModelSelection currentSelection;
     private final ExecutorService reloadExecutor;
+    private ExecutorService maintenanceExecutor;
     // Remains set through callbacks, including callbacks that admit another reload.
     private final ThreadLocal<Boolean> reloadWorker = new ThreadLocal<>();
     private final ProjectContextConfig projectContextConfig;
@@ -78,7 +107,13 @@ public final class CodingAgentSession implements AutoCloseable {
     private final String customSystemPrompt;
     private final String appendSystemPrompt;
     private ProjectContextSnapshot projectContext;
+    private volatile String currentSystemPrompt;
     private CancellationSource reloadSource;
+    private CancellationSource summarySource;
+    private UsageObservation usageObservation;
+    private volatile Throwable pendingInfrastructureFailure;
+    private boolean skipAutomaticCompactionOnce;
+    private final List<CodingAgentRunResult> attemptResults = new ArrayList<>();
     private boolean running;
     private boolean reloading;
     private boolean historyOperation;
@@ -153,6 +188,11 @@ public final class CodingAgentSession implements AutoCloseable {
         this.sessionDiagnostics = buildSessionDiagnostics(sessionManager, workingDirectory);
         this.clock = config.clock();
         this.modelDirectory = config.modelClient() instanceof Models models ? models : null;
+        this.modelProfiles = config.modelProfiles();
+        this.compactionSettings = config.compaction();
+        this.modelClient = config.modelClient();
+        this.requestOptions = config.requestOptions();
+        this.productEventSink = config.eventSink();
         this.ownedResource = ownedResource;
         this.currentSelection = initialSelection == null
                 ? runtimeSelection(config.model(), config.thinkingLevel())
@@ -178,6 +218,8 @@ public final class CodingAgentSession implements AutoCloseable {
                     customSystemPrompt,
                     appendSystemPrompt,
                     projectContext.files());
+            this.currentSystemPrompt = systemPrompt;
+            validateCompactionBudget(config.model());
             var restored = SessionContextBuilder.build(sessionManager.snapshot());
             var context = new AgentContext(systemPrompt, restored.messages(), tools);
             var eventSink = config.eventSink();
@@ -186,7 +228,7 @@ public final class CodingAgentSession implements AutoCloseable {
                     config.model(),
                     config.modelClient(),
                     config.objectMapper(),
-                    ContextTransformer.identity(),
+                    this::transformContext,
                     MessageProjector.standard(),
                     ToolExecutionMode.PARALLEL,
                     CodingToolPolicyAdapter.adapt(config.tools().policy(), workingDirectory),
@@ -236,6 +278,508 @@ public final class CodingAgentSession implements AutoCloseable {
         return startRun(agent::continueRun);
     }
 
+    /** Estimate the effective request view without invoking a model or mutating history. */
+    public ContextUsageEstimate contextUsage() {
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            return contextUsage(sessionManager.snapshot(), currentSelection.selected());
+        }
+    }
+
+    /** Generate and append one compaction checkpoint while the session is idle. */
+    public CompletionStage<CompactionResult> compact(String additionalInstructions) {
+        var result = new CompletableFuture<CompactionResult>();
+        CancellationSource source;
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            if (running || reloading || historyOperation) {
+                throw new IllegalStateException("coding-agent session is busy");
+            }
+            historyOperation = true;
+            source = new CancellationSource();
+            summarySource = source;
+        }
+        try {
+            maintenanceExecutor().execute(() -> runManualCompaction(
+                    additionalInstructions, source, result));
+        } catch (RuntimeException failure) {
+            result.completeExceptionally(finishSummaryOperation(source, failure));
+        }
+        return result.copy();
+    }
+
+    /** Move to an existing node and optionally carry a generated summary of the branch being left. */
+    public CompletionStage<BranchSummaryResult> branchWithSummary(
+            String targetEntryId,
+            String additionalInstructions
+    ) {
+        Objects.requireNonNull(targetEntryId, "targetEntryId must not be null");
+        var result = new CompletableFuture<BranchSummaryResult>();
+        CancellationSource source;
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            if (running || reloading || historyOperation) {
+                throw new IllegalStateException("coding-agent session is busy");
+            }
+            historyOperation = true;
+            source = new CancellationSource();
+            summarySource = source;
+        }
+        try {
+            maintenanceExecutor().execute(() -> runBranchSummary(
+                    targetEntryId, additionalInstructions, source, result));
+        } catch (RuntimeException failure) {
+            result.completeExceptionally(finishSummaryOperation(source, failure));
+        }
+        return result.copy();
+    }
+
+    private void runManualCompaction(
+            String additionalInstructions,
+            CancellationSource source,
+            CompletableFuture<CompactionResult> result
+    ) {
+        try {
+            var completed = compactNow(
+                    SummaryCause.MANUAL, additionalInstructions, source.signal(), false);
+            Throwable closeFailure = finishSummaryOperation(source, null);
+            if (closeFailure != null) {
+                result.completeExceptionally(closeFailure);
+            } else {
+                result.complete(completed);
+            }
+        } catch (Throwable failure) {
+            emitSummaryFailure(SummaryCause.MANUAL, failure, source);
+            result.completeExceptionally(finishSummaryOperation(
+                    source, normalizeSummaryFailure(source, failure)));
+        }
+    }
+
+    private void runBranchSummary(
+            String targetEntryId,
+            String additionalInstructions,
+            CancellationSource source,
+            CompletableFuture<BranchSummaryResult> result
+    ) {
+        try {
+            var snapshot = sessionManager.snapshot();
+            String fromId = snapshot.currentEntryId().orElseThrow(() ->
+                    new IllegalStateException("cannot summarize a branch from an empty session"));
+            snapshot.entry(targetEntryId).orElseThrow(() ->
+                    new IllegalArgumentException("unknown session entry id: " + targetEntryId));
+            var material = departingMaterial(snapshot, fromId, targetEntryId);
+            BranchSummaryResult completed;
+            if (material.isEmpty() || fromId.equals(targetEntryId)) {
+                synchronized (lifecycleLock) {
+                    source.signal().throwIfCancelled();
+                    ensureOpen();
+                    agent.replaceMessages(SessionContextBuilder.build(snapshot, targetEntryId).messages());
+                    sessionManager.branch(targetEntryId);
+                    usageObservation = null;
+                }
+                completed = new BranchSummaryResult(fromId, targetEntryId, targetEntryId, Optional.empty());
+            } else {
+                var budget = requireBudget(currentSelection.selected());
+                emitSummaryEvent(new CodingAgentEvent.SummaryStarted(
+                        SummaryCause.BRANCH, currentSelection.selected()));
+                String serialized = serializeRecentBranchMaterial(
+                        material, additionalInstructions, budget);
+                var generated = new SummaryGenerator(modelClient).generate(
+                        currentSelection.selected(), currentSelection.thinkingLevel(),
+                        budget.summaryOutputTokens(), serialized, source.signal());
+                source.signal().throwIfCancelled();
+                BranchSummaryEntry entry;
+                synchronized (lifecycleLock) {
+                    source.signal().throwIfCancelled();
+                    ensureOpen();
+                    entry = sessionManager.appendBranchSummary(
+                            targetEntryId, fromId, generated.text(), currentSelection.selected(),
+                            generated.usage(), SummaryDetailsExtractor.extract(
+                                    material, departingSummaryDetails(snapshot, fromId, targetEntryId)));
+                    agent.replaceMessages(SessionContextBuilder.build(sessionManager.snapshot()).messages());
+                    usageObservation = null;
+                }
+                emitSummaryEvent(new CodingAgentEvent.SummaryCompleted(
+                        SummaryCause.BRANCH, entry.id(), currentSelection.selected(), generated.usage()));
+                completed = new BranchSummaryResult(fromId, targetEntryId, entry.id(), Optional.of(entry.id()));
+            }
+            Throwable closeFailure = finishSummaryOperation(source, null);
+            if (closeFailure != null) {
+                result.completeExceptionally(closeFailure);
+            } else {
+                result.complete(completed);
+            }
+        } catch (Throwable failure) {
+            emitSummaryFailure(SummaryCause.BRANCH, failure, source);
+            result.completeExceptionally(finishSummaryOperation(
+                    source, normalizeSummaryFailure(source, failure)));
+        }
+    }
+
+    private CompactionResult compactNow(
+            SummaryCause cause,
+            String additionalInstructions,
+            CancellationSignal cancellation,
+            boolean requireThreshold
+    ) throws IOException {
+        var model = currentSelection.selected();
+        var budget = requireBudget(model);
+        var snapshot = sessionManager.snapshot();
+        var before = contextUsage(snapshot, model);
+        var plan = new CompactionPlanner().plan(snapshot, compactionSettings.keepRecentTokens());
+        if (plan.isEmpty()) {
+            if (requireThreshold) {
+                throw new IllegalStateException("no valid context boundary can be compacted");
+            }
+            return new CompactionResult(
+                    CompactionStatus.SKIPPED, Optional.empty(), Optional.empty(),
+                    before, before, Usage.zero(), "NOTHING_TO_COMPACT");
+        }
+        cancellation.throwIfCancelled();
+        emitSummaryEvent(new CodingAgentEvent.SummaryStarted(cause, model));
+        String material = new SummaryMaterialSerializer().serialize(
+                plan.orElseThrow().material(), additionalInstructions);
+        if (plan.orElseThrow().splitTurn()) {
+            material = "[SPLIT TURN]\nThe retained suffix continues the same user task. "
+                    + "Preserve the original request and the work needed to connect to that suffix.\n\n"
+                    + material;
+        }
+        ensureSummaryInputFits(material, budget);
+        var generated = new SummaryGenerator(modelClient).generate(
+                model, currentSelection.thinkingLevel(), budget.summaryOutputTokens(),
+                material, cancellation);
+        cancellation.throwIfCancelled();
+
+        var candidateMessages = new ArrayList<site.pplee.jcode.agentcore.message.AgentMessage>();
+        candidateMessages.add(StandardAgentMessage.of(new Message.User(
+                List.of(new Content.Text("[compaction]\n" + generated.text())), clock.instant())));
+        candidateMessages.addAll(plan.orElseThrow().retainedMessages());
+        long candidateTokens = ContextUsageEstimator.estimate(
+                currentSystemPrompt, toolSpecs, candidateMessages);
+        if (candidateTokens >= before.tokens()) {
+            throw new IllegalStateException("generated summary did not reduce the effective context");
+        }
+        if (requireThreshold && candidateTokens > budget.threshold()) {
+            throw new IllegalStateException("generated summary is still above the model threshold");
+        }
+
+        CompactionEntry entry;
+        synchronized (lifecycleLock) {
+            cancellation.throwIfCancelled();
+            ensureOpen();
+            entry = sessionManager.appendCompaction(
+                    generated.text(), plan.orElseThrow().firstKeptEntryId(), before.tokens(),
+                    before.source(), model, generated.usage(), SummaryDetailsExtractor.extract(
+                            plan.orElseThrow().material(), inheritedSummaryDetails(snapshot)));
+            usageObservation = null;
+        }
+        var after = contextUsage(sessionManager.snapshot(), model);
+        emitSummaryEvent(new CodingAgentEvent.SummaryCompleted(
+                cause, entry.id(), model, generated.usage()));
+        return new CompactionResult(
+                CompactionStatus.COMPACTED, Optional.of(entry.id()),
+                Optional.of(entry.firstKeptEntryId()), before, after,
+                generated.usage(), after.tokens() > budget.threshold()
+                ? "COMPACTED_ABOVE_THRESHOLD" : null);
+    }
+
+    private CompletionStage<List<site.pplee.jcode.agentcore.message.AgentMessage>> transformContext(
+            List<site.pplee.jcode.agentcore.message.AgentMessage> ignoredRawMessages,
+            CancellationSignal cancellation
+    ) {
+        try {
+            var snapshot = sessionManager.snapshot();
+            boolean skip;
+            synchronized (lifecycleLock) {
+                skip = skipAutomaticCompactionOnce;
+                skipAutomaticCompactionOnce = false;
+            }
+            if (!skip && compactionSettings.enabled()) {
+                var budget = budget(currentSelection.selected());
+                if (budget.isPresent()) {
+                    var usage = contextUsage(snapshot, currentSelection.selected());
+                    if (usage.tokens() > budget.orElseThrow().threshold()) {
+                        compactNow(SummaryCause.THRESHOLD, null, cancellation, true);
+                        snapshot = sessionManager.snapshot();
+                    }
+                }
+            }
+            return CompletableFuture.completedFuture(
+                    SessionContextBuilder.buildRequestView(snapshot).messages());
+        } catch (Throwable failure) {
+            if (compactionSettings.enabled()) {
+                try {
+                    emitSummaryEvent(cancellation.isCancelled()
+                            ? new CodingAgentEvent.SummaryCancelled(SummaryCause.THRESHOLD)
+                            : new CodingAgentEvent.SummaryFailed(
+                                    SummaryCause.THRESHOLD, failure.getClass().getSimpleName()));
+                } catch (Throwable eventFailure) {
+                    failure.addSuppressed(eventFailure);
+                }
+            }
+            if (failure instanceof IOException) {
+                pendingInfrastructureFailure = failure;
+            }
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    private ContextUsageEstimate contextUsage(SessionSnapshot snapshot, ModelRef model) {
+        var profile = modelProfiles.getOrDefault(model, ModelProfile.empty());
+        OptionalInt window = profile.contextWindow();
+        OptionalInt threshold = OptionalInt.empty();
+        var maybeBudget = budget(model);
+        if (maybeBudget.isPresent()) {
+            threshold = OptionalInt.of(maybeBudget.orElseThrow().threshold());
+        }
+        var observation = usageObservation;
+        if (observation != null
+                && observation.model().equals(model)
+                && Objects.equals(observation.compactionEntryId(), latestCompactionId(snapshot))) {
+            var branch = snapshot.currentBranch();
+            int observedIndex = -1;
+            for (int index = 0; index < branch.size(); index++) {
+                if (branch.get(index).id().equals(observation.entryId())) {
+                    observedIndex = index;
+                    break;
+                }
+            }
+            if (observedIndex >= 0) {
+                long tail = 0;
+                for (int index = observedIndex + 1; index < branch.size(); index++) {
+                    if (branch.get(index) instanceof site.pplee.jcode.codingagent.session.SessionMessageEntry message) {
+                        tail += ContextUsageEstimator.estimateMessage(message.message());
+                    } else if (branch.get(index) instanceof BranchSummaryEntry summary) {
+                        tail += Math.max(1, (summary.summary().length() + 3L) / 4L);
+                    }
+                }
+                return new ContextUsageEstimate(
+                        observation.tokens() + tail,
+                        TokenEstimateSource.USAGE_PLUS_TAIL,
+                        window,
+                        threshold);
+            }
+        }
+        long estimated = ContextUsageEstimator.estimate(
+                currentSystemPrompt,
+                toolSpecs,
+                SessionContextBuilder.buildRequestView(snapshot).messages());
+        return new ContextUsageEstimate(
+                estimated, TokenEstimateSource.FULL_ESTIMATE, window, threshold);
+    }
+
+    private Optional<Budget> budget(ModelRef model) {
+        var profile = modelProfiles.getOrDefault(model, ModelProfile.empty());
+        if (profile.contextWindow().isEmpty()) {
+            return Optional.empty();
+        }
+        int reserve = Math.max(
+                compactionSettings.reserveTokens(),
+                requestOptions.maxOutputTokens() == null ? 0 : requestOptions.maxOutputTokens());
+        int window = profile.contextWindow().getAsInt();
+        int threshold = window - reserve;
+        int summaryOutput = Math.floorDiv(compactionSettings.reserveTokens() * 4, 5);
+        if (profile.maxOutputTokens().isPresent()) {
+            summaryOutput = Math.min(summaryOutput, profile.maxOutputTokens().getAsInt());
+        }
+        if (window <= reserve || compactionSettings.keepRecentTokens() >= threshold || summaryOutput <= 0) {
+            throw new IllegalArgumentException(
+                    "invalid compaction budget for model " + model.modelId());
+        }
+        if (requestOptions.maxOutputTokens() != null
+                && profile.maxOutputTokens().isPresent()
+                && requestOptions.maxOutputTokens() > profile.maxOutputTokens().getAsInt()) {
+            throw new IllegalArgumentException("request maxOutputTokens exceeds the model profile limit");
+        }
+        return Optional.of(new Budget(window, threshold, summaryOutput));
+    }
+
+    private Budget requireBudget(ModelRef model) {
+        return budget(model).orElseThrow(() ->
+                new IllegalStateException("model context window is unknown; compaction is unavailable"));
+    }
+
+    private void validateCompactionBudget(ModelRef model) {
+        if (compactionSettings.enabled()) {
+            budget(model);
+        }
+    }
+
+    private void ensureSummaryInputFits(String material, Budget budget) {
+        if (!summaryInputFits(material, budget)) {
+            throw new IllegalStateException("summary input does not fit the known model context window");
+        }
+    }
+
+    private String serializeRecentBranchMaterial(
+            List<site.pplee.jcode.agentcore.message.AgentMessage> material,
+            String additionalInstructions,
+            Budget budget
+    ) {
+        var serializer = new SummaryMaterialSerializer();
+        for (int start = 0; start < material.size(); start++) {
+            String serialized = serializer.serialize(
+                    material.subList(start, material.size()), additionalInstructions);
+            if (start > 0) {
+                serialized = "[EARLIER BRANCH MATERIAL OMITTED]\n" + serialized;
+            }
+            if (summaryInputFits(serialized, budget)) {
+                return serialized;
+            }
+        }
+        throw new IllegalStateException("recent branch material does not fit the model context window");
+    }
+
+    private static boolean summaryInputFits(String material, Budget budget) {
+        long input = (SummaryGenerator.SYSTEM_PROMPT.length() + material.length() + 3L) / 4L;
+        return input + budget.summaryOutputTokens() <= budget.window();
+    }
+
+    private static String latestCompactionId(SessionSnapshot snapshot) {
+        String id = null;
+        for (var entry : snapshot.currentBranch()) {
+            if (entry instanceof CompactionEntry compaction) {
+                id = compaction.id();
+            }
+        }
+        return id;
+    }
+
+    private static List<SummaryDetails> inheritedSummaryDetails(SessionSnapshot snapshot) {
+        var details = new ArrayList<SummaryDetails>();
+        for (var entry : snapshot.currentBranch()) {
+            if (entry instanceof CompactionEntry compaction) {
+                details.add(compaction.details());
+            } else if (entry instanceof BranchSummaryEntry summary) {
+                details.add(summary.details());
+            }
+        }
+        return List.copyOf(details);
+    }
+
+    private static List<SummaryDetails> departingSummaryDetails(
+            SessionSnapshot snapshot,
+            String fromId,
+            String targetId
+    ) {
+        var from = snapshot.branch(fromId);
+        var target = snapshot.branch(targetId);
+        int common = 0;
+        while (common < from.size() && common < target.size()
+                && from.get(common).id().equals(target.get(common).id())) {
+            common++;
+        }
+        var details = new ArrayList<SummaryDetails>();
+        for (int index = common; index < from.size(); index++) {
+            if (from.get(index) instanceof CompactionEntry compaction) {
+                details.add(compaction.details());
+            } else if (from.get(index) instanceof BranchSummaryEntry summary) {
+                details.add(summary.details());
+            }
+        }
+        return List.copyOf(details);
+    }
+
+    private static List<site.pplee.jcode.agentcore.message.AgentMessage> departingMaterial(
+            SessionSnapshot snapshot,
+            String fromId,
+            String targetId
+    ) {
+        var from = snapshot.branch(fromId);
+        var target = snapshot.branch(targetId);
+        int common = 0;
+        while (common < from.size() && common < target.size()
+                && from.get(common).id().equals(target.get(common).id())) {
+            common++;
+        }
+        var material = new ArrayList<site.pplee.jcode.agentcore.message.AgentMessage>();
+        for (int index = common; index < from.size(); index++) {
+            var entry = from.get(index);
+            if (entry instanceof site.pplee.jcode.codingagent.session.SessionMessageEntry message) {
+                material.add(message.message());
+            } else if (entry instanceof CompactionEntry compaction) {
+                material.add(syntheticSummary("compaction", compaction.summary(), compaction.timestamp()));
+            } else if (entry instanceof BranchSummaryEntry summary) {
+                material.add(syntheticSummary("branch-summary", summary.summary(), summary.timestamp()));
+            }
+        }
+        return List.copyOf(material);
+    }
+
+    private static StandardAgentMessage syntheticSummary(
+            String kind,
+            String summary,
+            java.time.Instant timestamp
+    ) {
+        return StandardAgentMessage.of(new Message.User(
+                List.of(new Content.Text("[" + kind + "]\n" + summary)), timestamp));
+    }
+
+    private ExecutorService maintenanceExecutor() {
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            if (maintenanceExecutor == null) {
+                maintenanceExecutor = Executors.newVirtualThreadPerTaskExecutor();
+            }
+            return maintenanceExecutor;
+        }
+    }
+
+    private Throwable finishSummaryOperation(CancellationSource source, Throwable failure) {
+        synchronized (lifecycleLock) {
+            if (summarySource == source) {
+                summarySource = null;
+                historyOperation = false;
+            }
+        }
+        return closed ? closeManager(failure) : failure;
+    }
+
+    private static Throwable normalizeSummaryFailure(CancellationSource source, Throwable failure) {
+        if (!source.signal().isCancelled() || failure instanceof CancellationException) {
+            return failure;
+        }
+        var cancelled = new CancellationException("summary operation cancelled");
+        cancelled.addSuppressed(failure);
+        return cancelled;
+    }
+
+    private void emitSummaryFailure(
+            SummaryCause cause,
+            Throwable failure,
+            CancellationSource source
+    ) {
+        try {
+            if (source.signal().isCancelled() || failure instanceof CancellationException) {
+                emitSummaryEvent(new CodingAgentEvent.SummaryCancelled(cause));
+            } else {
+                emitSummaryEvent(new CodingAgentEvent.SummaryFailed(
+                        cause, failure.getClass().getSimpleName()));
+            }
+        } catch (Throwable eventFailure) {
+            failure.addSuppressed(eventFailure);
+        }
+    }
+
+    private void emitSummaryEvent(CodingAgentEvent event) {
+        var stage = productEventSink.emit(event);
+        if (stage == null) {
+            throw new IllegalStateException("coding event sink returned null stage");
+        }
+        stage.toCompletableFuture().join();
+    }
+
+    private record Budget(int window, int threshold, int summaryOutputTokens) {
+    }
+
+    private record UsageObservation(
+            ModelRef model,
+            String entryId,
+            String compactionEntryId,
+            long tokens
+    ) {
+    }
+
     private CompletionStage<CodingAgentRunResult> startRun(
             java.util.function.Supplier<CompletionStage<site.pplee.jcode.agentcore.LoopResult>> starter
     ) {
@@ -251,6 +795,8 @@ public final class CodingAgentSession implements AutoCloseable {
                 return CompletableFuture.failedFuture(failure);
             }
             running = true;
+            attemptResults.clear();
+            pendingInfrastructureFailure = null;
             try {
                 runtimeStage = starter.get();
             } catch (RuntimeException | Error failure) {
@@ -270,27 +816,88 @@ public final class CodingAgentSession implements AutoCloseable {
             Throwable failure,
             CompletableFuture<CodingAgentRunResult> productStage
     ) {
-        CodingAgentRunResult productResult = null;
-        Throwable completionFailure = failure;
-        if (completionFailure == null) {
-            try {
-                productResult = SnapshotMapper.runResult(runtimeResult);
-            } catch (RuntimeException | Error mappingFailure) {
-                completionFailure = mappingFailure;
-            }
+        if (failure != null) {
+            finishRunFinal(null, failure, productStage);
+            return;
+        }
+        CodingAgentRunResult first;
+        try {
+            first = SnapshotMapper.runResult(runtimeResult);
+            attemptResults.add(first);
+        } catch (RuntimeException | Error mappingFailure) {
+            finishRunFinal(null, mappingFailure, productStage);
+            return;
+        }
+        if (!shouldRecoverOverflow(first.finalMessage())) {
+            finishRunFinal(first, null, productStage);
+            return;
         }
 
+        var source = new CancellationSource();
+        synchronized (lifecycleLock) {
+            summarySource = source;
+        }
+        try {
+            compactNow(SummaryCause.OVERFLOW, null, source.signal(), true);
+            source.signal().throwIfCancelled();
+            synchronized (lifecycleLock) {
+                summarySource = null;
+                skipAutomaticCompactionOnce = true;
+            }
+            agent.continueAfterFailure().whenComplete((second, secondFailure) -> {
+                if (secondFailure != null) {
+                    finishRunFinal(null, secondFailure, productStage);
+                    return;
+                }
+                try {
+                    var mapped = SnapshotMapper.runResult(second);
+                    attemptResults.add(mapped);
+                    finishRunFinal(combineAttemptResults(), null, productStage);
+                } catch (RuntimeException | Error mappingFailure) {
+                    finishRunFinal(null, mappingFailure, productStage);
+                }
+            });
+        } catch (Throwable recoveryFailure) {
+            emitSummaryFailure(SummaryCause.OVERFLOW, recoveryFailure, source);
+            synchronized (lifecycleLock) {
+                summarySource = null;
+            }
+            if (source.signal().isCancelled()) {
+                finishRunFinal(null, new CancellationException("overflow recovery cancelled"), productStage);
+            } else if (pendingInfrastructureFailure != null) {
+                finishRunFinal(null, pendingInfrastructureFailure, productStage);
+            } else {
+                finishRunFinal(first, null, productStage);
+            }
+        }
+    }
+
+    private void finishRunFinal(
+            CodingAgentRunResult productResult,
+            Throwable failure,
+            CompletableFuture<CodingAgentRunResult> productStage
+    ) {
+        Throwable completionFailure = pendingInfrastructureFailure != null
+                ? pendingInfrastructureFailure : failure;
+        if (completionFailure == null) {
+            try {
+                emitSummaryEvent(new CodingAgentEvent.RunCompleted(productResult));
+            } catch (Throwable eventFailure) {
+                completionFailure = eventFailure;
+            }
+        }
         boolean closeManager;
         synchronized (lifecycleLock) {
-            if (failure != null && !closed) {
+            if (completionFailure != null && !closed) {
                 try {
                     agent.replaceMessages(
                             SessionContextBuilder.build(sessionManager.snapshot()).messages());
                 } catch (RuntimeException | Error alignmentFailure) {
-                    failure.addSuppressed(alignmentFailure);
+                    completionFailure.addSuppressed(alignmentFailure);
                 }
             }
             running = false;
+            summarySource = null;
             closeManager = closed;
         }
         if (closeManager) {
@@ -301,6 +908,22 @@ public final class CodingAgentSession implements AutoCloseable {
         } else {
             productStage.complete(productResult);
         }
+    }
+
+    private boolean shouldRecoverOverflow(Message.Assistant assistant) {
+        return compactionSettings.enabled()
+                && assistant.stopReason() == StopReason.ERROR
+                && assistant.metadata().failureKind()
+                        .filter(kind -> kind == ModelFailureKind.CONTEXT_OVERFLOW)
+                        .isPresent()
+                && budget(currentSelection.selected()).isPresent();
+    }
+
+    private CodingAgentRunResult combineAttemptResults() {
+        var messages = new ArrayList<site.pplee.jcode.agentcore.message.AgentMessage>();
+        attemptResults.forEach(result -> messages.addAll(result.newMessages()));
+        return new CodingAgentRunResult(
+                messages, attemptResults.getLast().finalMessage());
     }
 
     /** Queue a steering message while this session run is admitted. */
@@ -326,8 +949,13 @@ public final class CodingAgentSession implements AutoCloseable {
         synchronized (lifecycleLock) {
             if (running) {
                 agent.abort();
+                if (summarySource != null) {
+                    summarySource.cancel();
+                }
             } else if (reloading && reloadSource != null) {
                 reloadSource.cancel();
+            } else if (historyOperation && summarySource != null) {
+                summarySource.cancel();
             }
         }
     }
@@ -409,7 +1037,9 @@ public final class CodingAgentSession implements AutoCloseable {
                         throw new IllegalStateException("project context reload is no longer active");
                     }
                     agent.updateSystemPrompt(prompt);
+                    currentSystemPrompt = prompt;
                     projectContext = candidate;
+                    usageObservation = null;
                     completed = candidate;
                     releaseReload(source);
                 }
@@ -494,11 +1124,13 @@ public final class CodingAgentSession implements AutoCloseable {
             var previous = currentSelection;
             var targetModel = requestedModel == null ? previous.selected() : requestedModel;
             validateModel(targetModel);
+            validateCompactionBudget(targetModel);
             synchronized (lifecycleLock) {
                 ensureOpen();
                 agent.updateModel(targetModel, thinkingLevel);
                 var updated = runtimeSelection(targetModel, thinkingLevel);
                 currentSelection = updated;
+                usageObservation = null;
                 result = updated;
             }
         } catch (IOException | RuntimeException | Error operationFailure) {
@@ -574,6 +1206,7 @@ public final class CodingAgentSession implements AutoCloseable {
                 ensureOpen();
                 agent.replaceMessages(messages);
                 sessionManager.branch(entryId);
+                usageObservation = null;
             }
         } catch (RuntimeException | Error operationFailure) {
             failure = operationFailure;
@@ -593,6 +1226,7 @@ public final class CodingAgentSession implements AutoCloseable {
                 ensureOpen();
                 agent.replaceMessages(List.of());
                 sessionManager.resetLeaf();
+                usageObservation = null;
             }
         } catch (RuntimeException | Error operationFailure) {
             failure = operationFailure;
@@ -667,6 +1301,9 @@ public final class CodingAgentSession implements AutoCloseable {
             if (reloadSource != null) {
                 reloadSource.cancel();
             }
+            if (summarySource != null) {
+                summarySource.cancel();
+            }
         }
         RuntimeException runtimeFailure = null;
         Error errorFailure = null;
@@ -690,6 +1327,9 @@ public final class CodingAgentSession implements AutoCloseable {
                     }
                 }
             }
+        }
+        if (maintenanceExecutor != null) {
+            maintenanceExecutor.shutdownNow();
         }
         // An uninterruptible load retains admission and settles only when its worker actually cleans up.
         try {
@@ -749,21 +1389,37 @@ public final class CodingAgentSession implements AutoCloseable {
             }
             try {
                 var selection = currentSelection;
-                sessionManager.appendCompletedMessage(
+                var entry = sessionManager.appendCompletedMessage(
                         standard, selection.selected(), selection.thinkingLevel());
+                if (standard.message() instanceof Message.Assistant assistant) {
+                    long usageTokens = usageTokens(assistant.usage());
+                    if (!assistant.stopReason().isTerminalFailure() && usageTokens > 0) {
+                        usageObservation = new UsageObservation(
+                                selection.selected(), entry.id(),
+                                latestCompactionId(sessionManager.snapshot()), usageTokens);
+                    }
+                }
             } catch (IOException | RuntimeException failure) {
                 return CompletableFuture.failedFuture(failure);
             }
         }
 
-        CodingAgentEvent productEvent = event instanceof AgentEvent.AgentCompleted completed
-                ? new CodingAgentEvent.RunCompleted(SnapshotMapper.runResult(completed.result()))
-                : new CodingAgentEvent.RuntimeEvent(event);
+        if (event instanceof AgentEvent.AgentCompleted) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CodingAgentEvent productEvent = new CodingAgentEvent.RuntimeEvent(event);
         var stage = eventSink.emit(productEvent);
         if (stage == null) {
             throw new IllegalStateException("coding event sink returned null stage");
         }
         return stage;
+    }
+
+    private static long usageTokens(Usage usage) {
+        if (usage.totalTokens() > 0) {
+            return usage.totalTokens();
+        }
+        return usage.input() + usage.output() + usage.cacheRead() + usage.cacheWrite();
     }
 
     private static List<SessionDiagnostic> buildSessionDiagnostics(

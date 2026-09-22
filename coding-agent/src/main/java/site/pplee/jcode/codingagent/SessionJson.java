@@ -9,6 +9,8 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Objects;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Strict field access used by the fixed version-one session codec. */
 final class SessionJson {
@@ -37,6 +39,18 @@ final class SessionJson {
             throw invalid(field, "must be an array");
         }
         return array;
+    }
+
+    static List<String> requireStringArray(ObjectNode object, String field) {
+        var array = requireArray(object, field);
+        var values = new ArrayList<String>(array.size());
+        for (var value : array) {
+            if (!value.isTextual()) {
+                throw invalid(field, "must contain only strings");
+            }
+            values.add(value.textValue());
+        }
+        return List.copyOf(values);
     }
 
     static String requireText(ObjectNode object, String field) {

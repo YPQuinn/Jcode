@@ -49,6 +49,10 @@ public final class SettingsResolver {
                 values.steeringMode,
                 values.followUpMode,
                 requestOptions,
+                new CompactionSettings(
+                        values.compactionEnabled,
+                        values.compactionReserveTokens,
+                        values.compactionKeepRecentTokens),
                 values.sources,
                 overrides.settings().defaultModel().isPresent(),
                 overrides.settings().defaultThinkingLevel().isPresent());
@@ -63,6 +67,9 @@ public final class SettingsResolver {
         private QueueMode followUpMode = QueueMode.ONE_AT_A_TIME;
         private Integer maxOutputTokens;
         private Double temperature;
+        private boolean compactionEnabled;
+        private int compactionReserveTokens = CompactionSettings.DEFAULT_RESERVE_TOKENS;
+        private int compactionKeepRecentTokens = CompactionSettings.DEFAULT_KEEP_RECENT_TOKENS;
         private final EnumMap<SettingsField, SettingsSource> sources =
                 new EnumMap<>(SettingsField.class);
 
@@ -73,6 +80,9 @@ public final class SettingsResolver {
             sources.put(SettingsField.FOLLOW_UP_MODE, SettingsSource.BUILT_IN);
             sources.put(SettingsField.REQUEST_MAX_OUTPUT_TOKENS, SettingsSource.BUILT_IN);
             sources.put(SettingsField.REQUEST_TEMPERATURE, SettingsSource.BUILT_IN);
+            sources.put(SettingsField.COMPACTION_ENABLED, SettingsSource.BUILT_IN);
+            sources.put(SettingsField.COMPACTION_RESERVE_TOKENS, SettingsSource.BUILT_IN);
+            sources.put(SettingsField.COMPACTION_KEEP_RECENT_TOKENS, SettingsSource.BUILT_IN);
         }
 
         private void apply(CodingAgentSettings layer, SettingsSource source) {
@@ -103,6 +113,20 @@ public final class SettingsResolver {
             layer.temperature().ifPresent(value -> {
                 temperature = value;
                 sources.put(SettingsField.REQUEST_TEMPERATURE, source);
+            });
+            layer.compaction().ifPresent(compaction -> {
+                compaction.enabled().ifPresent(value -> {
+                    compactionEnabled = value;
+                    sources.put(SettingsField.COMPACTION_ENABLED, source);
+                });
+                compaction.reserveTokens().ifPresent(value -> {
+                    compactionReserveTokens = value;
+                    sources.put(SettingsField.COMPACTION_RESERVE_TOKENS, source);
+                });
+                compaction.keepRecentTokens().ifPresent(value -> {
+                    compactionKeepRecentTokens = value;
+                    sources.put(SettingsField.COMPACTION_KEEP_RECENT_TOKENS, source);
+                });
             });
         }
     }

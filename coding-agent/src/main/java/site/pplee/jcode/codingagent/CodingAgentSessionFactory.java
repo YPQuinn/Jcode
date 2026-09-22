@@ -180,7 +180,8 @@ public final class CodingAgentSessionFactory {
                 settings.steeringMode(),
                 settings.followUpMode(),
                 settings.maxOutputTokens(),
-                settings.temperature());
+                settings.temperature(),
+                settings.compaction());
         return new SettingsOverrides(withExplicitTools, overrides.requestOptions());
     }
 
@@ -210,7 +211,9 @@ public final class CodingAgentSessionFactory {
                 options.eventSink(),
                 options.clock(),
                 tools,
-                options.projectContext());
+                options.projectContext(),
+                settings.settings().compaction(),
+                runtime.profiles());
     }
 
     private static void closeTools(BuiltInTools.ToolSet tools, Throwable failure) {

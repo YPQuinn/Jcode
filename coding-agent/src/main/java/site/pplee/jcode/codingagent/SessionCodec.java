@@ -7,6 +7,10 @@ import site.pplee.jcode.codingagent.session.SessionHeader;
 import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
+import site.pplee.jcode.codingagent.session.CompactionEntry;
+import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
+import site.pplee.jcode.codingagent.session.SummaryDetails;
+import site.pplee.jcode.codingagent.session.TokenEstimateSource;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -76,6 +80,22 @@ final class SessionCodec {
                 object.put("targetId", label.targetId());
                 putNullable(object, "label", label.label());
             }
+            case CompactionEntry compaction -> {
+                object.put("summary", compaction.summary());
+                object.put("firstKeptEntryId", compaction.firstKeptEntryId());
+                object.put("tokensBefore", compaction.tokensBefore());
+                object.put("tokenEstimateSource", compaction.tokenEstimateSource().name().toLowerCase(Locale.ROOT));
+                object.set("summaryModel", messages.encodeModel(compaction.summaryModel()));
+                object.set("usage", messages.encodeUsage(compaction.usage()));
+                object.set("details", encodeDetails(compaction.details()));
+            }
+            case BranchSummaryEntry summary -> {
+                object.put("fromId", summary.fromId());
+                object.put("summary", summary.summary());
+                object.set("summaryModel", messages.encodeModel(summary.summaryModel()));
+                object.set("usage", messages.encodeUsage(summary.usage()));
+                object.set("details", encodeDetails(summary.details()));
+            }
         }
         return mapper.writeValueAsBytes(object);
     }
@@ -110,6 +130,26 @@ final class SessionCodec {
                     timestamp,
                     SessionJson.requireText(object, "targetId"),
                     SessionJson.nullableText(object, "label"));
+            case CompactionEntry.TYPE -> new CompactionEntry(
+                    id,
+                    parentId,
+                    timestamp,
+                    SessionJson.requireText(object, "summary"),
+                    SessionJson.requireText(object, "firstKeptEntryId"),
+                    SessionJson.requireLong(object, "tokensBefore"),
+                    parseEstimateSource(SessionJson.requireText(object, "tokenEstimateSource")),
+                    messages.decodeModel(SessionJson.required(object, "summaryModel"), "entry.summaryModel"),
+                    messages.decodeUsage(SessionJson.requireObject(object, "usage")),
+                    decodeDetails(SessionJson.requireObject(object, "details")));
+            case BranchSummaryEntry.TYPE -> new BranchSummaryEntry(
+                    id,
+                    parentId,
+                    timestamp,
+                    SessionJson.requireText(object, "fromId"),
+                    SessionJson.requireText(object, "summary"),
+                    messages.decodeModel(SessionJson.required(object, "summaryModel"), "entry.summaryModel"),
+                    messages.decodeUsage(SessionJson.requireObject(object, "usage")),
+                    decodeDetails(SessionJson.requireObject(object, "details")));
             default -> throw SessionJson.invalid("entry.type", "is unknown: " + type);
         };
     }
@@ -127,6 +167,29 @@ final class SessionCodec {
             return ThinkingLevel.valueOf(value.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
             throw SessionJson.invalid("entry.thinkingLevel", "has an unknown value", e);
+        }
+    }
+
+    private ObjectNode encodeDetails(SummaryDetails details) {
+        var object = mapper.createObjectNode();
+        var read = object.putArray("readFiles");
+        details.readFiles().forEach(read::add);
+        var modified = object.putArray("modifiedFiles");
+        details.modifiedFiles().forEach(modified::add);
+        return object;
+    }
+
+    private static SummaryDetails decodeDetails(ObjectNode object) {
+        return new SummaryDetails(
+                SessionJson.requireStringArray(object, "readFiles"),
+                SessionJson.requireStringArray(object, "modifiedFiles"));
+    }
+
+    private static TokenEstimateSource parseEstimateSource(String value) {
+        try {
+            return TokenEstimateSource.valueOf(value.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw SessionJson.invalid("entry.tokenEstimateSource", "has an unknown value", e);
         }
     }
 

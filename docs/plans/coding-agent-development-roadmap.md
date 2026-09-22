@@ -1,6 +1,6 @@
 # Coding Agent 总开发计划
 
-> 状态：进行中（阶段一至阶段五已完成）
+> 状态：进行中（阶段一至阶段六已完成）
 >
 > Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
 >
@@ -19,6 +19,8 @@
 > 第四阶段实施计划（已完成）：[`archived/coding-agent-phase-4-session-persistence.md`](archived/coding-agent-phase-4-session-persistence.md)
 >
 > 第五阶段实施计划（已完成）：[`archived/coding-agent-phase-5-settings-models-credentials.md`](archived/coding-agent-phase-5-settings-models-credentials.md)
+>
+> 第六阶段实施计划（已完成）：[`archived/coding-agent-phase-6-compaction.md`](archived/coding-agent-phase-6-compaction.md)
 >
 > 实施范围：阶段一至阶段七；不包含 TUI、Server 或其他产品入口
 
@@ -108,13 +110,12 @@ Jcode 已通过第一阶段创建 `coding-agent`，把现有 provider-neutral �
 
 ### 2.2 产品层缺口
 
-第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果；第二阶段已补齐显式授权的本地编码工具闭环；第三阶段已完成项目上下文发现；第四阶段已完成 append-only Session 树与 JSONL 持久化；第五阶段已完成显式设置、项目授信、默认模型、凭证、Provider 装配、恢复选择、idle 切换和原子保存。当前仍需补齐：
+第一阶段已提供 Session 门面、工作目录、最小 coding prompt、`read` 工具和防御性产品事件/状态/结果；第二阶段已补齐显式授权的本地编码工具闭环；第三阶段已完成项目上下文发现；第四阶段已完成 append-only Session 树与 JSONL 持久化；第五阶段已完成显式设置、项目授信、默认模型、凭证、Provider 装配、恢复选择、idle 切换和原子保存；第六阶段已完成长会话 compaction、单次溢出恢复和分支摘要。当前仍需补齐：
 
-- context window 策略和 compaction；
 - Skill、Prompt Template、Resource Loader、Extension；
 - 随后续能力扩展的产品事件，而不是重新定义已交付的基础事件协议。
 
-这些能力都依赖产品语义，不应进入 `ai` 或 `agent-core`。其中产品设置、默认模型、凭证装配和 idle 切换已在第五阶段完成；当前后续缺口从 Compaction 开始。
+这些能力都依赖产品语义，不应进入 `ai` 或 `agent-core`。当前后续缺口从 Resource 与 Extension 开始。
 
 ## 3. 对标原则与有意差异
 
@@ -540,6 +541,8 @@ Compaction/branch summary 由阶段六增加；typed custom/custom message 由�
 
 ## 11. 阶段六：Compaction
 
+本阶段已完成；详细行为、范围与验收记录见 [`archived/coding-agent-phase-6-compaction.md`](archived/coding-agent-phase-6-compaction.md)。
+
 ### 11.1 目标
 
 在不修改历史事实的前提下，为后续模型请求构造可持续的短 context，并把摘要决策写入 Session 树。
@@ -578,11 +581,7 @@ Compaction/branch summary 由阶段六增加；typed custom/custom message 由�
 
 ### 11.5 前置依赖：overflow 分类
 
-当前 `StopReason.ERROR` 和 `ResponseMetadata` 不提供标准化的 context-overflow 分类；不能假定产品层已经能可靠识别该错误，也不能在 coding-agent 中匹配 OpenAI 错误文本、HTTP status 或 wire error code。
-
-阶段六详细设计开始时，必须先记录真实失败样本和兼容影响，评估 provider-neutral 的错误分类 seam。若需新增协议字段，分类契约属于 `ai`、wire 到分类的映射属于 `ai-providers`，产品层只消费分类并决定是否 compact。不得为此把 compaction 策略放入 adapter 或 Agent Loop。
-
-分类能力未交付前只允许手动/阈值 compaction，overflow 自动恢复保持关闭并返回原 terminal failure；这只能算阶段六部分交付，不能宣称已达到完整阶段门槛。
+`ResponseMetadata.failureKind` 提供最小的 provider-neutral 分类，首个值为 `CONTEXT_OVERFLOW`。OpenAI adapter 只从结构化 `context_length_exceeded` code 映射该值；产品层消费分类并决定是否 compact，core 只提供窄的 `continueAfterFailure()` 入口。
 
 ## 12. 阶段七：Resource 与 Extension
 

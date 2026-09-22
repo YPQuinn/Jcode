@@ -19,6 +19,7 @@ public record ResolvedSettings(
         QueueMode steeringMode,
         QueueMode followUpMode,
         ModelRequestOptions requestOptions,
+        CompactionSettings compaction,
         Map<SettingsField, SettingsSource> sources,
         boolean sdkModelOverride,
         boolean sdkThinkingOverride
@@ -30,6 +31,7 @@ public record ResolvedSettings(
         Objects.requireNonNull(steeringMode, "steeringMode must not be null");
         Objects.requireNonNull(followUpMode, "followUpMode must not be null");
         Objects.requireNonNull(requestOptions, "requestOptions must not be null");
+        Objects.requireNonNull(compaction, "compaction must not be null");
         sources = Map.copyOf(Objects.requireNonNull(sources, "sources must not be null"));
     }
 

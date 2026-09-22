@@ -92,6 +92,24 @@ public final class SettingsFiles {
                 root.remove("request");
             }
         }
+        if (update.compactionEnabled().operation() != SettingChange.Operation.KEEP
+                || update.compactionReserveTokens().operation() != SettingChange.Operation.KEEP
+                || update.compactionKeepRecentTokens().operation() != SettingChange.Operation.KEEP) {
+            ObjectNode compaction;
+            if (!root.has("compaction")) {
+                compaction = root.putObject("compaction");
+            } else if (root.get("compaction") instanceof ObjectNode object) {
+                compaction = object;
+            } else {
+                throw new IOException("compaction must be an object before it can be updated");
+            }
+            applyBoolean(compaction, "enabled", update.compactionEnabled());
+            applyNumber(compaction, "reserveTokens", update.compactionReserveTokens());
+            applyNumber(compaction, "keepRecentTokens", update.compactionKeepRecentTokens());
+            if (compaction.isEmpty()) {
+                root.remove("compaction");
+            }
+        }
     }
 
     private static void applyModel(
@@ -155,6 +173,18 @@ public final class SettingsFiles {
                     root.put(field, value.doubleValue());
                 }
             }
+        }
+    }
+
+    private static void applyBoolean(
+            ObjectNode root,
+            String field,
+            SettingChange<Boolean> change
+    ) {
+        switch (change.operation()) {
+            case KEEP -> { }
+            case REMOVE -> root.remove(field);
+            case SET -> root.put(field, change.value().orElseThrow());
         }
     }
 }

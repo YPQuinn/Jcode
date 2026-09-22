@@ -11,7 +11,7 @@
 
 ## Agent 生命周期与事件
 
-- 一个 `Agent` 同时最多接纳一个 active run；并发 `prompt()` 或 `continueRun()` 必须 fail fast。
+- 一个 `Agent` 同时最多接纳一个 active run；并发 `prompt()`、`continueRun()` 或 `continueAfterFailure()` 必须 fail fast。`continueAfterFailure()` 只接受标准 assistant `ERROR` 末尾，core 不判断错误分类或自行重试。
 - `updateSystemPrompt()` 与 `replaceMessages()` 只允许在 idle 状态同步执行；busy/closed 时拒绝且不得部分修改 context。消息替换只更新 transcript 及公开状态快照，保留 system prompt、tools、steering/follow-up 队列与 error，不触发模型、工具、hook、投影或事件。
 - 归约 event sink 先更新 `AgentState`，再调用用户 sink，确保用户处理事件时看到已归约状态。
 - `AgentEventSink.emit()` 返回的 stage 具有 backpressure，必须等待；`RunEventEmitter` 是唯一等待点。
@@ -27,11 +27,14 @@
 - `branch()`、`resetLeaf()`、`setName()` 与 `setLabel()` 是 idle-only 历史操作，与 run、reload 和 close 互斥。branch/reset 只移动当前 leaf 并替换 Agent transcript，不删除旧 Entry、不执行工具、不回滚工作区，且保留 steering/follow-up 队列。
 - 取消调用方拿到的观察 Future 不取消或释放已接纳运行。close 时若运行或历史追加仍在途，Session writer、文件锁及 Session 自建 Provider 必须保留到对应完成回调结束。
 - model/thinking 切换是 idle-only 产品操作，与 run、reload、历史操作和 close 互斥；core 在接纳 run 时原子捕获该对参数。切换本身不写历史或默认设置，下一条真实完成消息前按实际 run 参数追加必要差异。
+- Compaction 与 branch summary 只追加专用 Entry，不删除或改写原消息。raw transcript 不包含 synthetic summary；每次请求视图按当前父链最后一个适用检查点、保留边界和后续内容重建。
+- 自动压缩只在下一次正常模型请求前检查；手动压缩和带摘要分支只在 idle 接纳。只有当前产品操作真实返回、已分类为 `CONTEXT_OVERFLOW` 的普通模型 `ERROR` 可触发一次压缩和一次 `continueAfterFailure()`；摘要调用自身失败不得递归恢复。
+- 摘要请求不声明工具，使用独立输出预算与 `PromptCacheOptions.NONE`。摘要响应仅接受 `STOP`、非空文本且无工具调用；提交后事件失败不能回滚已经追加的 Entry。
 
 ## Settings、凭证与模型装配
 
 - 新工厂只读取宿主显式提供的用户配置目录和工作目录；不推导 HOME，不扫描祖先 settings。项目设置必须先由 SDK 决定或独立 trust store 的精确规范路径决定授权；未授权时不得打开项目 settings。
-- sparse settings 按“内建 < 全局 < 已授权项目 < SDK”合并，缺失与空工具列表不同；ModelRef 和工具列表整体覆盖，request 仅按已知叶字段合并。非法已知字段使整层不应用，未知字段只诊断、不进入运行时。
+- sparse settings 按“内建 < 全局 < 已授权项目 < SDK”合并，缺失与空工具列表不同；ModelRef 和工具列表整体覆盖，request 与 compaction 对象按已知叶字段合并。非法已知字段使整层不应用，未知字段只诊断、不进入运行时。
 - 凭证优先级固定为 SDK、显式启用的单变量环境查询、只读 `auth.json`。高层非法值不得降级到低层；密钥只进入现有秘密持有类型，不进入设置结果、诊断、事件或 Session。
 - 新 Session 必须有显式/默认模型，不从目录挑第一个。恢复时优先历史模型，历史不可用才尝试不同的配置默认；SDK 明确模型不可用时直接失败。该选择只检查本地 provider/supports/auth 配置，不表示远端认证成功，也不触发网络。
 - borrowed `Models` 由宿主关闭；工厂自建 Provider 随 Session 关闭且只关闭一次。构造或恢复失败必须释放已取得的 Session writer 和自建资源。
@@ -39,7 +42,7 @@
 
 ## Session 文件
 
-- Session JSONL 使用显式 version/type/role/content 分派，不使用 Java 默认多态反序列化。标准消息的多模态内容、工具参数、usage、metadata、source model 与 replay state 必须无损往返；JSON 浮点数按 `BigDecimal` 读取，不能先经过二进制浮点而损失工具参数精度。
+- Session JSONL 使用显式 version/type/role/content 分派，不使用 Java 默认多态反序列化。标准消息的多模态内容、工具参数、usage、metadata、source model 与 replay state 必须无损往返；`compaction` 与 `branch_summary` 继续使用 version 1 的显式类型。JSON 浮点数按 `BigDecimal` 读取，不能先经过二进制浮点而损失工具参数精度。
 - `SessionManager` 是 Entry 序列及索引的唯一长期内存所有者；reader 只做一次临时解析与校验，`SessionFile` 只持有 Header、通道、锁、追加位置、尾部恢复和失败状态。
 - 一个 Session 文件在 writer 生命周期内持有独占文件锁；锁冲突立即失败，不进行多写者协调、等待或重试。同一 JVM 必须协调 writer reservation 与同文件临时读取生命周期。活动 owner 的发现查询从 `SessionManager` 已接纳历史计算，不能在查询线程读取 writer 通道；无 owner 的临时读取仅阻塞同文件 writer，registry 全局锁不得覆盖摘要计算、文件 I/O 或资源关闭。
 - open 只读取和诊断，不修改文件。只有 EOF 截断 JSON 或不完整 UTF-8 后缀可恢复；首次后续追加先截断该尾片段。中部损坏、未知版本/类型、坏父链和完整但非法的末行必须失败且保持原文件不变。

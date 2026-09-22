@@ -10,6 +10,7 @@ import site.pplee.jcode.agentcore.queue.QueueMode;
 
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 
@@ -75,12 +76,22 @@ public final class Agent implements AutoCloseable {
     /** Start a new run with a user message; fails if a run is already active. */
     public CompletionStage<LoopResult> prompt(Message.User message) {
         Objects.requireNonNull(message, "message must not be null");
-        return submit(message, false);
+        return submit(message, ContinueMode.NONE);
     }
 
     /** Resume the loop from the current context; fails if the last message is an assistant. */
     public CompletionStage<LoopResult> continueRun() {
-        return submit(null, true);
+        return submit(null, ContinueMode.NORMAL);
+    }
+
+    /**
+     * Resume after a terminal assistant model failure without adding another
+     * user message. This narrow entry point accepts only an {@code ERROR}
+     * assistant leaf; callers remain responsible for deciding whether the
+     * classified failure is recoverable.
+     */
+    public CompletionStage<LoopResult> continueAfterFailure() {
+        return submit(null, ContinueMode.AFTER_FAILURE);
     }
 
     /** Enqueue a steering message injected before the next model call of the active run. */
@@ -227,7 +238,7 @@ public final class Agent implements AutoCloseable {
         }
     }
 
-    private CompletableFuture<LoopResult> submit(Message.User message, boolean isContinue) {
+    private CompletableFuture<LoopResult> submit(Message.User message, ContinueMode continueMode) {
         var source = new CancellationSource();
         var future = new CompletableFuture<LoopResult>();
         var run = new ActiveRun(source, future);
@@ -244,7 +255,7 @@ public final class Agent implements AutoCloseable {
             snapshot = context;
             loopConfig = getLoopConfig();
         }
-        if (isContinue) {
+        if (continueMode != ContinueMode.NONE) {
             if (snapshot.messages().isEmpty()) {
                 synchronized (admissionLock) {
                     activeRun.compareAndSet(run, null);
@@ -253,11 +264,19 @@ public final class Agent implements AutoCloseable {
                 return future;
             }
             var last = snapshot.messages().getLast();
-            if (isStandardAssistant(last)) {
+            if (continueMode == ContinueMode.NORMAL && isStandardAssistant(last)) {
                 synchronized (admissionLock) {
                     activeRun.compareAndSet(run, null);
                 }
                 future.completeExceptionally(new IllegalStateException("last message is assistant; use prompt() instead"));
+                return future;
+            }
+            if (continueMode == ContinueMode.AFTER_FAILURE && !isErrorAssistant(last)) {
+                synchronized (admissionLock) {
+                    activeRun.compareAndSet(run, null);
+                }
+                future.completeExceptionally(new IllegalStateException(
+                        "last message must be an assistant ERROR"));
                 return future;
             }
         }
@@ -266,7 +285,7 @@ public final class Agent implements AutoCloseable {
                 LoopResult result = null;
                 Throwable failure = null;
                 try {
-                    result = isContinue
+                    result = continueMode != ContinueMode.NONE
                             ? loop.continueRun(snapshot, loopConfig, source.signal())
                             : loop.runPrompt(List.of(StandardAgentMessage.of(message)), snapshot, loopConfig, source.signal());
                     // Publish the successful context before releasing admission.
@@ -310,6 +329,18 @@ public final class Agent implements AutoCloseable {
             future.completeExceptionally(new IllegalStateException("Agent is closed", rej));
         }
         return future;
+    }
+
+    private static boolean isErrorAssistant(AgentMessage message) {
+        return message instanceof StandardAgentMessage standard
+                && standard.message() instanceof Message.Assistant assistant
+                && assistant.stopReason() == StopReason.ERROR;
+    }
+
+    private enum ContinueMode {
+        NONE,
+        NORMAL,
+        AFTER_FAILURE
     }
 
     private void requireIdle() {

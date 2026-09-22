@@ -246,7 +246,12 @@ final class OpenAiResponsesAdapter implements AutoCloseable {
                         exchange.redactor());
                 exchange.acceptCorrelation(OpenAiResponseCorrelation.fromHttpFailure(error.requestId()));
                 if (retriesRemaining <= 0 || !OpenAiRetry.isRetryable(error)) {
-                    exchange.completeOnce(StopReason.ERROR, error.diagnosticMessage());
+                    var metadata = ResponseMetadata.of(
+                            null,
+                            error.requestId().orElse(null),
+                            null,
+                            error.failureKind().orElse(null));
+                    exchange.completeOnce(StopReason.ERROR, error.diagnosticMessage(), metadata);
                     return;
                 }
                 OpenAiRetry.Delay delay = OpenAiRetry.delayForHttp(

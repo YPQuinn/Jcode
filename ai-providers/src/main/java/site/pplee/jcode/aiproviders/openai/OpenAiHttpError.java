@@ -7,6 +7,7 @@ import java.net.http.HttpHeaders;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Optional;
+import site.pplee.jcode.ai.message.ModelFailureKind;
 
 /**
  * Package-private snapshot of a non-2xx Responses HTTP failure. Only the
@@ -33,6 +34,7 @@ final class OpenAiHttpError {
     private final Optional<String> errorCode;
     private final Optional<String> errorMessage;
     private final Optional<String> errorType;
+    private final Optional<ModelFailureKind> failureKind;
     private final String diagnosticMessage;
 
     private OpenAiHttpError(
@@ -46,6 +48,7 @@ final class OpenAiHttpError {
             Optional<String> errorCode,
             Optional<String> errorMessage,
             Optional<String> errorType,
+            Optional<ModelFailureKind> failureKind,
             String diagnosticMessage
     ) {
         this.status = status;
@@ -58,6 +61,7 @@ final class OpenAiHttpError {
         this.errorCode = errorCode;
         this.errorMessage = errorMessage;
         this.errorType = errorType;
+        this.failureKind = failureKind;
         this.diagnosticMessage = diagnosticMessage;
     }
 
@@ -87,6 +91,9 @@ final class OpenAiHttpError {
         }
         String body = new String(bounded, StandardCharsets.UTF_8);
         Envelope envelope = readEnvelope(body, mapper);
+        Optional<ModelFailureKind> failureKind = envelope.code
+                .filter("context_length_exceeded"::equals)
+                .map(ignored -> ModelFailureKind.CONTEXT_OVERFLOW);
         if (redactor != null) {
             requestId = requestId.map(redactor::redact);
             body = redactor.redact(body);
@@ -103,6 +110,7 @@ final class OpenAiHttpError {
                 envelope.code,
                 envelope.message,
                 envelope.type,
+                failureKind,
                 diagnostic(status, envelope, body, truncated));
     }
 
@@ -140,6 +148,10 @@ final class OpenAiHttpError {
 
     Optional<String> errorType() {
         return errorType;
+    }
+
+    Optional<ModelFailureKind> failureKind() {
+        return failureKind;
     }
 
     /**

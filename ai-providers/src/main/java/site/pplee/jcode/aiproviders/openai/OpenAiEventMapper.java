@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
+import site.pplee.jcode.ai.message.ModelFailureKind;
 import site.pplee.jcode.ai.message.ModelReplayState;
 import site.pplee.jcode.ai.message.ResponseMetadata;
 import site.pplee.jcode.ai.message.StopReason;
@@ -323,6 +324,7 @@ final class OpenAiEventMapper {
             case "response.failed" -> {
                 acceptTerminalResponse(data.get("response"), true);
                 var error = data.path("response").path("error");
+                classifyFailure(error.path("code").asText(null));
                 String message = error.isMissingNode() || !error.isObject()
                         ? "provider response failed"
                         : error.path("code").asText("unknown") + ": " + error.path("message").asText("no message");
@@ -330,12 +332,24 @@ final class OpenAiEventMapper {
             }
             case "error" -> {
                 metadata = OpenAiResponseCorrelation.knownSoFar(createdResponseId, providerRequestId);
+                classifyFailure(data.path("code").asText(null));
                 String message = data.path("code").asText("unknown")
                         + ": " + data.path("message").asText("no message");
                 yield List.of(new AssistantMessageEvent.Error(StopReason.ERROR, errorMessage(message)));
             }
             default -> List.of();
         };
+    }
+
+    private void classifyFailure(String code) {
+        if (!"context_length_exceeded".equals(code)) {
+            return;
+        }
+        metadata = ResponseMetadata.of(
+                metadata.responseId().orElse(null),
+                metadata.providerRequestId().orElse(null),
+                metadata.rawTerminalReason().orElse(null),
+                ModelFailureKind.CONTEXT_OVERFLOW);
     }
 
     /**

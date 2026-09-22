@@ -7,6 +7,10 @@ import site.pplee.jcode.codingagent.session.SessionHeader;
 import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
+import site.pplee.jcode.codingagent.session.CompactionEntry;
+import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
+import site.pplee.jcode.codingagent.session.SummaryDetails;
+import site.pplee.jcode.codingagent.session.TokenEstimateSource;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +21,7 @@ import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.CostEstimate;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.message.ModelReplayState;
+import site.pplee.jcode.ai.message.ModelFailureKind;
 import site.pplee.jcode.ai.message.ResponseMetadata;
 import site.pplee.jcode.ai.message.StopReason;
 import site.pplee.jcode.ai.message.Usage;
@@ -71,6 +76,20 @@ class SessionCodecTest {
     }
 
     @Test
+    void summaryEntryTypesRoundTrip() throws Exception {
+        var details = new SummaryDetails(List.of("read.txt"), List.of("changed.txt"));
+        var compaction = new CompactionEntry(
+                "compact", "kept", T1, "summary", "kept", 123,
+                TokenEstimateSource.FULL_ESTIMATE, MODEL, new Usage(10, 2, 0, 0, 12), details);
+        var branch = new BranchSummaryEntry(
+                "branch", "kept", T1, "source", "branch summary", MODEL,
+                Usage.zero(), details);
+
+        assertEquals(compaction, codec.decodeEntry(codec.encodeEntry(compaction)));
+        assertEquals(branch, codec.decodeEntry(codec.encodeEntry(branch)));
+    }
+
+    @Test
     void completeStandardMessagesAndOpaqueFieldsRoundTripExactly() throws Exception {
         var replay = new ModelReplayState(
                 "provider/replay-v1", "{\"opaque\":\"秘密\\nvalue\"}");
@@ -85,7 +104,8 @@ class SessionCodecTest {
                 new BigDecimal("0.0030"),
                 new BigDecimal("0.0040"));
         var usage = new Usage(10, 20, 3, 4, 37, 8, Optional.of(cost));
-        var metadata = ResponseMetadata.of("response-id", "request-id", "provider_done");
+        var metadata = ResponseMetadata.of(
+                "response-id", "request-id", "provider_done", ModelFailureKind.CONTEXT_OVERFLOW);
         var assistant = new Message.Assistant(
                 List.of(
                         new Content.Text("", replay),

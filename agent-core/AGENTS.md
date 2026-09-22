@@ -10,7 +10,7 @@
 | 理解流式消费 | `AgentLoop.java` → `consumeStream()`（Start → deltas → Done/Error，emit MessageStarted/MessageUpdated） |
 | 理解工具三阶段管道 | `ToolCallExecutor.java` → `prepareCall()`/`executeAndFinalize()`（prepare → execute → finalize；并行批次双排序） |
 | 工具执行编排 | `ToolCallExecutor.java`（pkg-private，三阶段管道 + 顺序/并行分发 + `ExecutorCompletionService` 完成序投递 + `LoopToolUpdateSink` close-and-drain + `ToolOutcome`） |
-| 公开 API | `Agent.java`：`prompt()`/`continueRun()`/`updateSystemPrompt()`/`replaceMessages()`/`updateModel()`/`steer()`/`followUp()`/`abort()`/`context()`/`state()`/`close()` |
+| 公开 API | `Agent.java`：`prompt()`/`continueRun()`/`continueAfterFailure()`/`updateSystemPrompt()`/`replaceMessages()`/`updateModel()`/`steer()`/`followUp()`/`abort()`/`context()`/`state()`/`close()` |
 | 实时状态快照 | `AgentState.java`（public record：streaming/streamingMessage/pendingToolCalls/errorMessage） |
 | 事件归约器 | `Agent.java` → `reduceState()`（`AtomicReference<AgentState>` + CAS；先归约 AgentState，再委托用户 sink） |
 | 构造 Agent | `AgentConfig.java`（record，含 beforeToolCall/afterToolCall 默认 noop，以及固定 `ModelRequestOptions`） |
@@ -63,6 +63,7 @@
 
 - executor 已关闭时（`RejectedExecutionException`）不伪造 ABORTED assistant——loop 从未运行，context 不变。
 - `continueRun()` 在最后消息是 assistant 时失败（要求用 `prompt()`）。
+- `continueAfterFailure()` 只接纳标准 assistant `ERROR` 末尾；它不判断 overflow、不重试或删除失败记录。
 - 成功时先发布 context 再在 admission lock 内清 activeRun ref，保证后续 run 或 prompt 更新看到完整状态。
 - Schema 失败/Before hook 阻止 → error result，不执行工具。
 - Before hook 同步抛/failed stage/null stage/null decision → immediate failure；execute 同步抛/failed stage/null stage/null result → error result；After hook 同步抛/failed stage/null stage/null result → 保留原 result。
