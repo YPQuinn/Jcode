@@ -1780,6 +1780,7 @@ public final class CodingAgentSession implements AutoCloseable {
     @Override
     public void close() {
         boolean closeAgentBeforeSettlement;
+        boolean acceptedOperationOwnsFinalization;
         synchronized (lifecycleLock) {
             if (closed) {
                 return;
@@ -1803,13 +1804,13 @@ public final class CodingAgentSession implements AutoCloseable {
             closeAgentBeforeSettlement = running
                     && !summaryInProgress
                     && summarySource == null;
+            acceptedOperationOwnsFinalization = running
+                    || historyOperation
+                    || summaryInProgress
+                    || reloading;
         }
         Throwable failure = closeAgentBeforeSettlement ? closeAgent(null) : null;
-        boolean deferRuntimeClose;
-        synchronized (lifecycleLock) {
-            deferRuntimeClose = running || historyOperation || summaryInProgress || reloading;
-        }
-        if (deferRuntimeClose) {
+        if (acceptedOperationOwnsFinalization) {
             if (reloadExecutor != null) {
                 reloadExecutor.shutdownNow();
             }
@@ -1820,13 +1821,7 @@ public final class CodingAgentSession implements AutoCloseable {
             return;
         }
         failure = closeRuntimeResources(failure, true);
-        boolean closeManagerNow;
-        synchronized (lifecycleLock) {
-            closeManagerNow = !running && !historyOperation && !reloading;
-        }
-        if (closeManagerNow) {
-            failure = closeManager(failure);
-        }
+        failure = closeManager(failure);
         rethrowCloseFailure(failure);
     }
 

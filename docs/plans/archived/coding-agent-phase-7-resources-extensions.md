@@ -859,6 +859,7 @@ git diff --check
 - R5 断言资源 reload 期间 prompt/branch/compact 均因 busy 拒绝；发布后请求同时看到新 Skill、SYSTEM 和项目 context，Extension 工具贡献只读取一次；旧 `reloadProjectContext()` 保留现有 Skill/SYSTEM。
 - R6 断言未完成命令期间 close 不虚构完成，真实结算后只发一次 shutdown 且不关闭借入对象；第二条记录写失败时保留第一条及 accepted id，writer 在模型前拒绝后续操作，handler 不重跑。
 - 审查修复增加真实断言：普通 run 的挂起 transform 在 close 后、真实结算前不发送 shutdown；取消后的成功 transform 不启动下一项；`AssertionError` 保留原失败且不写合成 assistant ERROR；shutdown 遇到回调 `Error`、普通失败及诊断 sink 失败仍通知全部扩展并聚合故障；YAML null 进入字段回退规则；同名败选资源不占用物理路径接纳集合。
-- `mvn verify` 通过：`ai` 71、`ai-providers` 269、`agent-core` 209、`coding-agent` 369，共 918 个测试，0 failure、0 error、0 skip。Maven Enforcer 全部通过。
-- 严格 native profile 使用 `/bin/bash`、`/opt/homebrew/Caskroom/codex/0.155.1/codex-path/rg`、`/opt/homebrew/bin/fd` 通过；`git diff --check` 通过。旧构造重载、默认资源关闭、旧 Session、legacy trust boolean 和阶段一至六回归均包含在上述全仓验证中。
+- 二次审查修复关闭交接：`close()` 在接纳请求时固定完整收尾归属，不再于 core 有限等待返回后根据已变化的 `running` 状态接管后半段。新增真实 file-backed writer、owned resource 与异步 shutdown gate 回归，断言 shutdown 未完成时公开 run 未结算、writer 锁和 owned resource 均未提前释放，放行后只完成一次完整清理。
+- `mvn verify` 通过：`ai` 71、`ai-providers` 269、`agent-core` 209、`coding-agent` 370，共 919 个测试，0 failure、0 error、0 skip。Maven Enforcer 全部通过。
+- 严格 native profile 使用 `/bin/bash`、`/opt/homebrew/bin/rg`、`/opt/homebrew/bin/fd` 通过；`git diff --check` 通过。旧构造重载、默认资源关闭、旧 Session、legacy trust boolean 和阶段一至六回归均包含在上述全仓验证中。
 - 未执行真实 Provider 网络 probe；本阶段验收使用 deterministic fake model、临时文件系统和本地原生工具，不需要 API Key。

@@ -25,6 +25,7 @@ import site.pplee.jcode.codingagent.model.ModelProfile;
 import site.pplee.jcode.codingagent.session.CompactionEntry;
 import site.pplee.jcode.codingagent.session.CustomEntry;
 import site.pplee.jcode.codingagent.session.CustomMessageEntry;
+import site.pplee.jcode.codingagent.session.SessionFileLockException;
 import site.pplee.jcode.codingagent.settings.CompactionSettings;
 import site.pplee.jcode.codingagent.support.ScriptedModelClient;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
@@ -715,6 +716,98 @@ class ResourceExtensionIntegrationTest {
         assertEquals(0, laterTransforms.get());
         assertEquals(0, modelCalls.get());
         assertEquals(1, shutdowns.get());
+    }
+
+    @Test
+    void closeDoesNotTakeOverFinalizationWhileRunWaitsForShutdown() throws Exception {
+        var transformEntered = new CountDownLatch(1);
+        var cancellationObserved = new CountDownLatch(1);
+        var releaseTransform = new CompletableFuture<Void>();
+        var shutdownEntered = new CountDownLatch(1);
+        var releaseShutdown = new CompletableFuture<Void>();
+        var shutdowns = new AtomicInteger();
+        var ownedClosed = new AtomicBoolean();
+        var modelCalls = new AtomicInteger();
+        var extension = new CodingExtension() {
+            @Override
+            public String id() {
+                return "finalization-owner";
+            }
+
+            @Override
+            public List<site.pplee.jcode.codingagent.extension.ExtensionContextTransform> contextTransforms() {
+                return List.of((context, messages) -> {
+                    context.cancellation().onCancellation(cancellationObserved::countDown);
+                    transformEntered.countDown();
+                    return releaseTransform.thenApply(ignored -> messages);
+                });
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<Void> onSessionShutdown(
+                    site.pplee.jcode.codingagent.extension.ExtensionContext context
+            ) {
+                shutdowns.incrementAndGet();
+                shutdownEntered.countDown();
+                return releaseShutdown;
+            }
+        };
+        var client = new ScriptedModelClient(request -> {
+            modelCalls.incrementAndGet();
+            return assistant("must not run");
+        });
+        var configured = config(client, List.of(extension));
+        var manager = SessionManager.createFileBacked(
+                new site.pplee.jcode.codingagent.session.SessionHeader(
+                        UUID.randomUUID(), configured.clock().instant(), directory),
+                Files.createDirectory(directory.resolve("finalization-sessions")),
+                configured.clock());
+        Path sessionFile = manager.filePath();
+        var session = new CodingAgentSession(
+                configured,
+                (workingDirectory, ignored, revision, cancellation) ->
+                        ProjectContextSnapshot.disabled(workingDirectory),
+                manager,
+                null,
+                () -> ownedClosed.set(true));
+        var run = session.prompt("wait for finalization").toCompletableFuture();
+        assertTrue(transformEntered.await(5, TimeUnit.SECONDS));
+        var close = CompletableFuture.runAsync(session::close);
+
+        try {
+            assertTrue(cancellationObserved.await(5, TimeUnit.SECONDS));
+            assertFalse(close.isDone());
+            releaseTransform.complete(null);
+            assertTrue(shutdownEntered.await(5, TimeUnit.SECONDS));
+
+            close.get(10, TimeUnit.SECONDS);
+
+            assertFalse(run.isDone());
+            assertFalse(ownedClosed.get());
+            assertThrows(SessionFileLockException.class, () -> {
+                try (var ignored = SessionFile.open(sessionFile)) {
+                    // The accepted run still owns finalization and therefore the writer lock.
+                }
+            });
+
+            releaseShutdown.complete(null);
+            assertTrue(run.get(5, TimeUnit.SECONDS).aborted());
+            assertTrue(ownedClosed.get());
+            assertEquals(0, modelCalls.get());
+            assertEquals(1, shutdowns.get());
+            try (var ignored = SessionFile.open(sessionFile)) {
+                // Finalization released the writer lock after shutdown completed.
+            }
+        } finally {
+            releaseTransform.complete(null);
+            releaseShutdown.complete(null);
+            try {
+                close.get(10, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // Preserve the assertion failure while still releasing all test resources.
+            }
+            session.close();
+        }
     }
 
     @Test
