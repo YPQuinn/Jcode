@@ -1,28 +1,32 @@
 # Coding Agent 总开发计划
 
-> 状态：阶段一至阶段七已完成
+> 状态：阶段一至阶段七已完成并归档
 >
 > Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
+>
+> 功能收口基线：`8c10108e0878053b028aeb5ea268af7c2498b4fa`（2026-09-23）
+>
+> 归档路径：`docs/plans/archived/coding-agent-development-roadmap.md`
 >
 > pi 源码基线：`60e7e76bd7ea25cad1dd6f3f1ce0d18814a42759`（`@earendil-works/pi-coding-agent` 0.85.1，2026-09-16）
 >
 > pi-book 基线：`c01f38d5440f7b51cb1e545c2110c27b694fb0bf`（2026-07-27）
 >
-> 架构基线：[`archived/pi-inspired-module-boundaries.md`](archived/pi-inspired-module-boundaries.md)
+> 架构基线：[`pi-inspired-module-boundaries.md`](pi-inspired-module-boundaries.md)
 >
-> 第一阶段实施计划（已完成）：[`archived/coding-agent-phase-1-headless-foundation.md`](archived/coding-agent-phase-1-headless-foundation.md)
+> 第一阶段实施计划（已完成）：[`coding-agent-phase-1-headless-foundation.md`](coding-agent-phase-1-headless-foundation.md)
 >
-> 第二阶段实施计划（已完成）：[`archived/coding-agent-phase-2-local-tools.md`](archived/coding-agent-phase-2-local-tools.md)
+> 第二阶段实施计划（已完成）：[`coding-agent-phase-2-local-tools.md`](coding-agent-phase-2-local-tools.md)
 >
-> 第三阶段实施计划（已完成）：[`archived/coding-agent-phase-3-project-context.md`](archived/coding-agent-phase-3-project-context.md)
+> 第三阶段实施计划（已完成）：[`coding-agent-phase-3-project-context.md`](coding-agent-phase-3-project-context.md)
 >
-> 第四阶段实施计划（已完成）：[`archived/coding-agent-phase-4-session-persistence.md`](archived/coding-agent-phase-4-session-persistence.md)
+> 第四阶段实施计划（已完成）：[`coding-agent-phase-4-session-persistence.md`](coding-agent-phase-4-session-persistence.md)
 >
-> 第五阶段实施计划（已完成）：[`archived/coding-agent-phase-5-settings-models-credentials.md`](archived/coding-agent-phase-5-settings-models-credentials.md)
+> 第五阶段实施计划（已完成）：[`coding-agent-phase-5-settings-models-credentials.md`](coding-agent-phase-5-settings-models-credentials.md)
 >
-> 第六阶段实施计划（已完成）：[`archived/coding-agent-phase-6-compaction.md`](archived/coding-agent-phase-6-compaction.md)
+> 第六阶段实施计划（已完成）：[`coding-agent-phase-6-compaction.md`](coding-agent-phase-6-compaction.md)
 >
-> 第七阶段实施计划（已完成）：[`archived/coding-agent-phase-7-resources-extensions.md`](archived/coding-agent-phase-7-resources-extensions.md)
+> 第七阶段实施计划（已完成）：[`coding-agent-phase-7-resources-extensions.md`](coding-agent-phase-7-resources-extensions.md)
 >
 > 实施范围：阶段一至阶段七；不包含 TUI、Server 或其他产品入口
 
@@ -256,7 +260,7 @@ coding-agent/
 
 ## 6. 阶段一：Headless 产品闭环
 
-详细方案及完成证据见 [`archived/coding-agent-phase-1-headless-foundation.md`](archived/coding-agent-phase-1-headless-foundation.md)。
+详细方案及完成证据见 [`coding-agent-phase-1-headless-foundation.md`](coding-agent-phase-1-headless-foundation.md)。
 
 ### 6.1 目标
 
@@ -310,7 +314,7 @@ caller
 
 ## 7. 阶段二：编码工具集
 
-阶段二已完成全部七个本地工具、显式 profile/policy、fake-model 工作区闭环及 native 验证。原始实施记录见 [`coding-agent-phase-2-local-tools.md`](archived/coding-agent-phase-2-local-tools.md)；后续按参考行为收敛的当前契约见 [`local-tools-behavior-alignment.md`](archived/local-tools-behavior-alignment.md)。后者替代原子 mutation、严格匹配、自研 glob 和固定 Bash 限制等原始选择。
+阶段二已完成全部七个本地工具、显式 profile/policy、fake-model 工作区闭环及 native 验证。原始实施记录见 [`coding-agent-phase-2-local-tools.md`](coding-agent-phase-2-local-tools.md)；后续按参考行为收敛的当前契约见 [`local-tools-behavior-alignment.md`](local-tools-behavior-alignment.md)。后者替代原子 mutation、严格匹配、自研 glob 和固定 Bash 限制等原始选择。
 
 ### 7.1 目标
 
@@ -372,7 +376,7 @@ PR 2～6 审查发现的五项问题均已修复并补齐回归：进程终止�
 - 移除文件事务与自研 glob，实现原生直接写入、hardlink 保持、write 大文件覆盖、edit 规范化匹配及有效错误诊断。
 - grep 使用 rg `--glob --hidden`，显式 glob 可覆盖 ignore；find 使用 fd 原生 glob 并遵守 ignore，Git 边界与无仓库根场景分别测试。取消 rg 14+ 和 help 文本握手、单文件 8 MiB 搜索上限。
 - `SearchConfig(rg, fd, environment)` 支持独立 binary；旧二参数构造用于 grep-only，启用 find 时必须补充 fd。Bash 环境/timeout 可缺省，显式旧配置仍受支持。
-- 保留 core 调度、policy、进程树清理、背压和有界输出；不新增完整输出文件或通用存储机制。当前 Java 特有边界与未覆盖差异详见[对齐记录](archived/local-tools-behavior-alignment.md)。
+- 保留 core 调度、policy、进程树清理、背压和有界输出；不新增完整输出文件或通用存储机制。当前 Java 特有边界与未覆盖差异详见[对齐记录](local-tools-behavior-alignment.md)。
 - 全仓 `mvn clean verify -Djcode.test.fd=...`：772 tests（本模块 230），0 failure/error/skipped；显式 Bash/rg/fd 的严格 native smoke 通过。第一批 10 个对齐回归先在旧实现失败，再随调整通过；旧事务和禁令测试改为当前行为契约。
 
 ## 8. 阶段三：项目上下文与 System Prompt
@@ -417,7 +421,7 @@ PR 2～6 审查发现的五项问题均已修复并补齐回归：进程终止�
 
 ### 8.5 完成状态（2026-09-19，2026-09-20 纠偏）
 
-第三阶段已完成，实施与后续纠偏记录见 [`archived/coding-agent-phase-3-project-context.md`](archived/coding-agent-phase-3-project-context.md)。`coding-agent` 提供显式 `ProjectContextConfig`、不可变来源/诊断/snapshot、纯 Prompt 装配，以及 Session 初始加载、快照查询和 idle reload；旧构造默认关闭发现，且关闭时不创建 reload executor。
+第三阶段已完成，实施与后续纠偏记录见 [`coding-agent-phase-3-project-context.md`](coding-agent-phase-3-project-context.md)。`coding-agent` 提供显式 `ProjectContextConfig`、不可变来源/诊断/snapshot、纯 Prompt 装配，以及 Session 初始加载、快照查询和 idle reload；旧构造默认关闭发现，且关闭时不创建 reload executor。
 
 发现顺序为显式全局来源后接配置 working directory 的词法祖先链。同目录依次尝试 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，高优先级候选缺失、非普通文件、不可读或非法 UTF-8 时继续回退；不读取 CLAUDE/SYSTEM/settings 等旁路文件。保留普通文件筛选、严格 UTF-8/BOM、物理来源去重和 1 MiB 聚合实际读取上限，删除单文件、保留总量、来源数、祖先数、路径、诊断、渲染及 deadline 等重叠限制和多阶段文件稳定性契约。
 
@@ -540,7 +544,7 @@ Compaction/branch summary 由阶段六增加；typed custom/custom message 由�
 
 ## 11. 阶段六：Compaction
 
-本阶段已完成；详细行为、范围与验收记录见 [`archived/coding-agent-phase-6-compaction.md`](archived/coding-agent-phase-6-compaction.md)。
+本阶段已完成；详细行为、范围与验收记录见 [`coding-agent-phase-6-compaction.md`](coding-agent-phase-6-compaction.md)。
 
 ### 11.1 目标
 
@@ -584,7 +588,7 @@ Compaction/branch summary 由阶段六增加；typed custom/custom message 由�
 
 ## 12. 阶段七：Resource 与 Extension
 
-本阶段已完成；详细行为、差异和验收记录见 [`archived/coding-agent-phase-7-resources-extensions.md`](archived/coding-agent-phase-7-resources-extensions.md)。
+本阶段已完成；详细行为、差异和验收记录见 [`coding-agent-phase-7-resources-extensions.md`](coding-agent-phase-7-resources-extensions.md)。
 
 ### 12.1 目标
 
@@ -597,8 +601,9 @@ Compaction/branch summary 由阶段六增加；typed custom/custom message 由�
 - Skill；
 - Prompt Template；
 - System Prompt override/append；
-- 项目 context；
-- 后续 UI theme 只保留资源类型扩展位，本阶段不实现 TUI theme。
+- 项目 context。
+
+本阶段不实现 UI theme，也不为尚无消费者的主题能力增加空资源类型；后续如有 TUI 的真实需求，应在独立产品入口计划中设计。
 
 Loader 必须返回资源和 diagnostics，诊断至少区分：
 
@@ -718,7 +723,7 @@ mvn verify
 
 风险：Session、AgentContext 和产品 state 各保存一套消息。
 
-处置：active run 以 AgentContext 为准，持久历史以 Session entries 为准，切换 branch 时重新构造 Agent；`CodingAgentState` 只派生快照，不独立修改 transcript。
+处置：active run 以 AgentContext 为准，持久历史以 Session entries 为准；切换 branch 时复用现有 idle 消息替换接口同步 transcript，不重建 Agent。`CodingAgentState` 只派生快照，不独立修改 transcript。
 
 ### 15.3 为 TUI 提前污染产品 API
 
@@ -755,21 +760,29 @@ mvn verify
 阶段一至七全部完成时，Jcode coding-agent 必须满足：
 
 1. headless 调用方可以创建、恢复、驱动和关闭一个 coding session。
-2. 默认工具支持读取、搜索、修改文件和执行可取消命令。
+2. 内置工具提供读取、搜索、修改文件和执行可取消命令的能力，并由宿主按配置显式启用；兼容配置默认只启用 `read`。
 3. System Prompt 能装配真实工具、工作目录和项目 instructions。
 4. Session 以 versioned JSONL tree 持久化并支持分支。
 5. 配置、模型、凭证和 secrets 具有明确来源及优先级。
 6. 长会话可手动和自动 compact，原始历史保持 append-only。
-7. Skill、Prompt Template 和显式 Extension 可以加载、诊断和 reload。
+7. Skill、Prompt Template、SYSTEM/APPEND 等文本资源可以加载、诊断和 reload；显式 Java Extension 实例及其固定工具、命令贡献在 Session 生命周期内不热替换。
 8. 全部产品事件可被后续 TUI/CLI/RPC 消费，不需要直接接触底层 Agent。
 9. 模块依赖、敏感值、取消、事件和资源关闭不变量有自动化测试。
 10. `mvn verify` 通过，默认测试不访问公网、不要求真实凭证。
 
 达到该门槛后，才开始制定 TUI 开发计划。
 
-## 17. 参考来源
+## 17. 最终收口记录
 
-### 17.1 pi 0.85.1 源码
+- 阶段一至阶段七的详细计划均已完成并归档；功能收口基线为 `8c10108e0878053b028aeb5ea268af7c2498b4fa`。
+- 最终交付物是可嵌入的 Headless Coding Agent 内核，不代表复制 pi 的全部功能，也不包含 CLI、TUI、HTTP/RPC Server、Spring Boot 启动入口、动态插件装载、包管理或扩展代码热替换。
+- 收口验证记录为 `mvn verify` 共 919 个测试，0 failure、0 error、0 skip；模块分布为 `ai` 71、`ai-providers` 269、`agent-core` 209、`coding-agent` 370。严格 native profile、Maven Enforcer 与 `git diff --check` 均通过。
+- 验证使用 deterministic fake model、临时文件系统和本地原生工具；未执行真实 Provider 网络 probe，也不把长期生产运行验证表述为本计划已完成的门槛。
+- 达到本路线图门槛后，CLI/TUI 等最终用户入口应以独立计划推进并继续通过 `CodingAgentSession` 消费内核。
+
+## 18. 参考来源
+
+### 18.1 pi 0.85.1 源码
 
 - `packages/coding-agent/src/core/sdk.ts`
 - `packages/coding-agent/src/core/agent-session.ts`
@@ -782,7 +795,7 @@ mvn verify
 - `packages/coding-agent/src/core/extensions/`
 - `packages/coding-agent/src/core/tools/`
 
-### 17.2 pi-book
+### 18.2 pi-book
 
 - 第 11 章：Session tree
 - 第 12 章：Compaction
@@ -794,7 +807,7 @@ mvn verify
 - 第 26b 章：SDK
 - 第 30～32 章：极简核心与边界
 
-### 17.3 Jcode 基线
+### 18.3 Jcode 基线
 
 - `ai/src/main/java/site/pplee/jcode/ai/`
 - `ai-providers/src/main/java/site/pplee/jcode/aiproviders/openai/`

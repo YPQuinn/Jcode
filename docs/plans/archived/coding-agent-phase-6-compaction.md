@@ -14,7 +14,7 @@
 >
 > 验证记录：见第 21 节。
 >
-> 总路线图：`docs/plans/coding-agent-development-roadmap.md`。本文第 19 节列出需要同步的范围与语义。
+> 总路线图：`docs/plans/archived/coding-agent-development-roadmap.md`。本文第 19 节列出需要同步的范围与语义。
 >
 > 本文保留实施前的行为设计和验收依据；实际交付状态、偏离和验证结果以第 21 节为准。本次开发未创建提交或推送远端。
 

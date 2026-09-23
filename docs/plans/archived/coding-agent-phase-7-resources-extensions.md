@@ -10,7 +10,7 @@
 >
 > 归档路径：`docs/plans/archived/coding-agent-phase-7-resources-extensions.md`。
 >
-> 关联路线图：`docs/plans/coding-agent-development-roadmap.md`。需同步的旧口径见第 22 节。
+> 关联路线图：`docs/plans/archived/coding-agent-development-roadmap.md`。需同步的旧口径见第 22 节。
 >
 > 本文保留实施前的行为约束和接口草案；第 24 节记录初次实现、审查修复与最终验证结果。
 

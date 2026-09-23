@@ -6,7 +6,7 @@
 
 [![Java 21](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/build-Maven-C71A36?logo=apachemaven&logoColor=white)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/status-active_development-orange)](docs/plans/coding-agent-development-roadmap.md)
+[![Status](https://img.shields.io/badge/status-active_development-orange)](docs/plans/archived/coding-agent-development-roadmap.md)
 
 [特性](#核心特性) · [架构](#架构与模块) · [快速开始](#快速开始) · [嵌入应用](#嵌入应用) · [文档](#文档)
 
@@ -252,7 +252,7 @@ Jcode/
 
 - [架构文档入口](docs/architecture/src/index.md)
 - [项目全局视图](docs/architecture/src/00-overview.md)
-- [Coding Agent 开发路线图](docs/plans/coding-agent-development-roadmap.md)
+- [Coding Agent 开发路线图（已归档）](docs/plans/archived/coding-agent-development-roadmap.md)
 - [模块结构说明](docs/agents/project-structure.md)
 - [架构与依赖边界](docs/agents/architecture-boundaries.md)
 - [运行时正确性契约](docs/agents/runtime-contracts.md)

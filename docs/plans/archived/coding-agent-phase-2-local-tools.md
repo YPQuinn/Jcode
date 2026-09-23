@@ -6,7 +6,7 @@
 >
 > Jcode 基线：`849ae9a46dc730caed26773252d6da0810c43cef`（2026-09-18）
 >
-> 总路线图：[`coding-agent-development-roadmap.md`](../coding-agent-development-roadmap.md)
+> 总路线图：[`coding-agent-development-roadmap.md`](coding-agent-development-roadmap.md)
 >
 > 前置阶段：[`coding-agent-phase-1-headless-foundation.md`](coding-agent-phase-1-headless-foundation.md)
 >

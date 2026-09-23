@@ -33,6 +33,7 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 | rg/fd 后端与 record 解析 | `tool/SearchProcessBackend.java` / `tool/BoundedByteRecordReader.java` / `tool/ConfiguredSearchTools.java` |
 | 完整行截断 | `tool/OutputTruncator.java` |
 | 递归快照 | `internal/SnapshotMapper.java` |
+| Coding Agent 总路线图（已归档） | `../docs/plans/archived/coding-agent-development-roadmap.md` |
 | 第二阶段工具计划（已归档） | `../docs/plans/archived/coding-agent-phase-2-local-tools.md` |
 | 第三阶段上下文计划（已归档） | `../docs/plans/archived/coding-agent-phase-3-project-context.md` |
 | 第四阶段 Session 计划（已归档） | `../docs/plans/archived/coding-agent-phase-4-session-persistence.md` |

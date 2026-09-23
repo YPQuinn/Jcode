@@ -12,7 +12,7 @@
 >
 > 建议仓库路径：`docs/plans/coding-agent-phase-5-settings-models-credentials.md`。
 >
-> 总路线图：`docs/plans/coding-agent-development-roadmap.md`。第 17 节列出必须同步的范围修订。
+> 总路线图：`docs/plans/archived/coding-agent-development-roadmap.md`。第 17 节列出必须同步的范围修订。
 >
 > 本文保留实施前的设计决策和阶段门槛；实际交付入口与验证结果以第 19 节实施记录及现行模块契约为准。本文不是 Issue 或 PR 记录。
 

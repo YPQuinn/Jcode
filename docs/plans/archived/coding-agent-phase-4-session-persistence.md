@@ -12,7 +12,7 @@
 >
 > 归档路径：`docs/plans/archived/coding-agent-phase-4-session-persistence.md`。
 >
-> 总路线图：`docs/plans/coding-agent-development-roadmap.md`。本计划第 15 节列出必须同步的范围修订；不能同时保留相互矛盾的验收要求。
+> 总路线图：`docs/plans/archived/coding-agent-development-roadmap.md`。本计划第 15 节列出必须同步的范围修订；不能同时保留相互矛盾的验收要求。
 >
 > 本文保留阶段四的决策、验收范围与完成证据；实施切片不是已创建的 GitHub Issue 或 PR。
 

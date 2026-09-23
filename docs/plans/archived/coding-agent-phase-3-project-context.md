@@ -8,7 +8,7 @@
 >
 > Jcode 基线：`15a7d6d171fd5362c58d662d23ab7153d1f2605c`
 >
-> 总路线图：[`../coding-agent-development-roadmap.md`](../coding-agent-development-roadmap.md)
+> 总路线图：[`coding-agent-development-roadmap.md`](coding-agent-development-roadmap.md)
 >
 > 前置阶段：[`coding-agent-phase-2-local-tools.md`](coding-agent-phase-2-local-tools.md)
 >

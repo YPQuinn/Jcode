@@ -2,7 +2,7 @@
 
 > 状态：已完成（2026-09-18）
 >
-> 父计划：[`coding-agent-development-roadmap.md`](../coding-agent-development-roadmap.md)
+> 父计划：[`coding-agent-development-roadmap.md`](coding-agent-development-roadmap.md)
 >
 > Jcode 基线：`663c3e28ac9219c12aa2bb29c00ffef59c97796c`（2026-09-17）
 >
