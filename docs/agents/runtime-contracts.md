@@ -66,7 +66,7 @@
 - context transform 按注册顺序串行执行，每项只收到上一个成功视图的结构副本。普通异常产生 `ExtensionDiagnostic` 并保留上一个视图；取消后不得启动后续 transform，`Error` 必须由公开操作原样传播且不得持久化成合成模型错误。诊断直接交给宿主 sink，不再投给扩展观察器；宿主 sink 故障属于基础设施失败。
 - 命令只在 idle 接纳，与 run/reload/分支/压缩互斥。多条记录先校验后按序追加，但 JSONL 不是事务：中途失败保留已写前缀、同步 runtime transcript、返回已接纳 id，并由失效 writer 拒绝后续操作，handler 不自动重试。
 - `custom` 保存扩展 JSON 状态且永不进入请求、估算或摘要；`custom_message` 只允许 Text/Image，其 content 作为带扩展来源的 user-like 消息参与请求、分支和压缩，details/display 不入模。重开 Session 不要求原扩展在场，也不重放命令副作用。
-- Extension、扩展工具及其外部资源始终由宿主拥有。Session close 取消已接纳工作，并在其真实结算及必要历史同步之后按反注册顺序发送一次 shutdown 通知；关闭接纳时若已有 run、命令、摘要或 reload，完整收尾归属对应 finish 路径，外部 close 不得在有限等待返回后接管 Manager 或 owned resource。单个通知、取消、`Error` 或诊断递送失败不得跳过后续扩展，全部尝试后传播聚合故障。不得自动调用借入对象的 `close()`。
+- Extension、扩展工具及其外部资源始终由宿主拥有。Session close 取消已接纳工作，并在其真实结算及必要历史同步之后按反注册顺序发送一次 shutdown 通知；完整收尾归属必须在接纳或释放操作的同一生命周期临界区内确定：若 close 接纳时已有 run、命令、摘要或 reload，则由对应 finish 路径收尾，否则由 close 收尾。任何一方都不得在锁外根据已变化的状态接管 Manager 或 owned resource。单个通知、取消、`Error` 或诊断递送失败不得跳过后续扩展，全部尝试后传播聚合故障。不得自动调用借入对象的 `close()`。
 
 ## Context 投影与 Turn hook
 

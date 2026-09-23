@@ -978,13 +978,15 @@ public final class CodingAgentSession implements AutoCloseable {
     }
 
     private Throwable finishSummaryOperation(CancellationSource source, Throwable failure) {
+        boolean finishOwnsFinalization;
         synchronized (lifecycleLock) {
             if (summarySource == source) {
                 summarySource = null;
                 historyOperation = false;
             }
+            finishOwnsFinalization = closed;
         }
-        if (!closed) {
+        if (!finishOwnsFinalization) {
             return failure;
         }
         failure = closeRuntimeResources(failure, false);
