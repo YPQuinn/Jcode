@@ -12,7 +12,7 @@
 >
 > 关联路线图：`docs/plans/coding-agent-development-roadmap.md`。需同步的旧口径见第 22 节。
 >
-> 本文保留实施前的行为约束和接口草案；第 24 节记录实际实现与验证结果。本次工作树未创建 Git 提交或推送。
+> 本文保留实施前的行为约束和接口草案；第 24 节记录初次实现、审查修复与最终验证结果。
 
 ## 1. 目标与完成标准
 
@@ -848,7 +848,7 @@ git diff --check
 
 ## 24. 实施记录
 
-- 实施工作树基于 `a1964e51f19b5a7ca5a6ed75870b55284b11c682`，未创建提交或推送。验证环境为 OpenJDK `21.0.10`、Maven `3.9.14`。
+- 初次实施基于 `a1964e51f19b5a7ca5a6ed75870b55284b11c682`，提交为 `288350858388152e4ea84a722197c1fcaa01ba92`；2026-09-23 根据该提交的独立审查继续修正生命周期和资源边界。验证环境为 OpenJDK `21.0.10`、Maven `3.9.14`。
 - 新增依赖固定为 SnakeYAML Engine `3.1.1` 与 JGit `7.8.0.202609011348-r`，仅由 `coding-agent` 使用。资源文件统一使用严格 UTF-8、有界 4 MiB 读取，以满足模块现有的不受信任文件读取约束。
 - 7A～7E 均已接入真实消费者：ResourceSnapshot 与 scoped trust；Skill/模板/SYSTEM 展开和 prompt 装配；显式 Java Extension 工具、命令、context/observer/lifecycle；`custom`/`custom_message` codec、重开、分支和 compaction；资源原子 reload、旧 context reload 保留资源及真实关闭收尾。
 - 与固定 pi 的差异保持计划约束：普通 `prompt()` 不解释 slash；Java Extension 只接收宿主实例且不热替换；借入扩展/工具不由 Session 调用 `close()`；项目文本资源使用独立 `TEXT_RESOURCES` 范围；不实现包管理、动态脚本、UI 或 Provider hook。
@@ -858,6 +858,7 @@ git diff --check
 - R4 断言失败 transform 对 JSON 副本的修改不污染下一项，上一成功临时文本只进入当次请求且不写 JSONL；ExtensionDiagnostic 的宿主 sink 故障保留原异常并阻止模型调用。
 - R5 断言资源 reload 期间 prompt/branch/compact 均因 busy 拒绝；发布后请求同时看到新 Skill、SYSTEM 和项目 context，Extension 工具贡献只读取一次；旧 `reloadProjectContext()` 保留现有 Skill/SYSTEM。
 - R6 断言未完成命令期间 close 不虚构完成，真实结算后只发一次 shutdown 且不关闭借入对象；第二条记录写失败时保留第一条及 accepted id，writer 在模型前拒绝后续操作，handler 不重跑。
-- `mvn verify` 通过：`ai` 71、`ai-providers` 269、`agent-core` 209、`coding-agent` 364，共 913 个测试，0 failure、0 error、0 skip。Maven Enforcer 全部通过。
+- 审查修复增加真实断言：普通 run 的挂起 transform 在 close 后、真实结算前不发送 shutdown；取消后的成功 transform 不启动下一项；`AssertionError` 保留原失败且不写合成 assistant ERROR；shutdown 遇到回调 `Error`、普通失败及诊断 sink 失败仍通知全部扩展并聚合故障；YAML null 进入字段回退规则；同名败选资源不占用物理路径接纳集合。
+- `mvn verify` 通过：`ai` 71、`ai-providers` 269、`agent-core` 209、`coding-agent` 369，共 918 个测试，0 failure、0 error、0 skip。Maven Enforcer 全部通过。
 - 严格 native profile 使用 `/bin/bash`、`/opt/homebrew/Caskroom/codex/0.155.1/codex-path/rg`、`/opt/homebrew/bin/fd` 通过；`git diff --check` 通过。旧构造重载、默认资源关闭、旧 Session、legacy trust boolean 和阶段一至六回归均包含在上述全仓验证中。
 - 未执行真实 Provider 网络 probe；本阶段验收使用 deterministic fake model、临时文件系统和本地原生工具，不需要 API Key。

@@ -3,6 +3,7 @@ package site.pplee.jcode.codingagent.resource;
 import org.snakeyaml.engine.v2.api.Load;
 import org.snakeyaml.engine.v2.api.LoadSettings;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -49,7 +50,7 @@ final class FrontmatterParser {
             }
             metadata.put(key, entry.getValue());
         }
-        return new Parsed(Map.copyOf(metadata), body);
+        return new Parsed(Collections.unmodifiableMap(new LinkedHashMap<>(metadata)), body);
     }
 
     private static String stripBom(String value) {

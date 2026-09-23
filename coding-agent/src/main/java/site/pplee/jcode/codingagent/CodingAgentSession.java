@@ -110,6 +110,7 @@ public final class CodingAgentSession implements AutoCloseable {
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
     private final AutoCloseable ownedResource;
     private final AtomicBoolean ownedResourceClosed = new AtomicBoolean();
+    private final AtomicBoolean agentClosed = new AtomicBoolean();
     private final AtomicBoolean runtimeResourcesClosed = new AtomicBoolean();
     private final AtomicBoolean extensionShutdown = new AtomicBoolean();
     private volatile ModelSelection currentSelection;
@@ -734,7 +735,7 @@ public final class CodingAgentSession implements AutoCloseable {
             return transformed.whenComplete((ignored, failure) -> {
                 if (failure != null) {
                     Throwable actual = unwrapCompletionFailure(failure);
-                    if (!(actual instanceof CancellationException) && !(actual instanceof Error)) {
+                    if (!(actual instanceof CancellationException)) {
                         pendingInfrastructureFailure = actual;
                     }
                 }
@@ -1778,7 +1779,7 @@ public final class CodingAgentSession implements AutoCloseable {
      */
     @Override
     public void close() {
-        boolean deferRuntimeClose;
+        boolean closeAgentBeforeSettlement;
         synchronized (lifecycleLock) {
             if (closed) {
                 return;
@@ -1799,7 +1800,14 @@ public final class CodingAgentSession implements AutoCloseable {
             if (running) {
                 agent.abort();
             }
-            deferRuntimeClose = historyOperation || summaryInProgress || reloading;
+            closeAgentBeforeSettlement = running
+                    && !summaryInProgress
+                    && summarySource == null;
+        }
+        Throwable failure = closeAgentBeforeSettlement ? closeAgent(null) : null;
+        boolean deferRuntimeClose;
+        synchronized (lifecycleLock) {
+            deferRuntimeClose = running || historyOperation || summaryInProgress || reloading;
         }
         if (deferRuntimeClose) {
             if (reloadExecutor != null) {
@@ -1808,9 +1816,10 @@ public final class CodingAgentSession implements AutoCloseable {
             if (maintenanceExecutor != null) {
                 maintenanceExecutor.shutdown();
             }
+            rethrowCloseFailure(failure);
             return;
         }
-        Throwable failure = closeRuntimeResources(null, true);
+        failure = closeRuntimeResources(failure, true);
         boolean closeManagerNow;
         synchronized (lifecycleLock) {
             closeManagerNow = !running && !historyOperation && !reloading;
@@ -1822,14 +1831,9 @@ public final class CodingAgentSession implements AutoCloseable {
     }
 
     private Throwable closeRuntimeResources(Throwable existingFailure, boolean interruptMaintenance) {
+        Throwable failure = closeAgent(existingFailure);
         if (!runtimeResourcesClosed.compareAndSet(false, true)) {
-            return existingFailure;
-        }
-        Throwable failure = existingFailure;
-        try {
-            agent.close();
-        } catch (RuntimeException | Error closeFailure) {
-            failure = combineFailures(failure, closeFailure);
+            return failure;
         }
         if (extensionShutdown.compareAndSet(false, true)) {
             try {
@@ -1866,6 +1870,18 @@ public final class CodingAgentSession implements AutoCloseable {
             failure = combineFailures(failure, closeFailure);
         }
         return failure;
+    }
+
+    private Throwable closeAgent(Throwable existingFailure) {
+        if (!agentClosed.compareAndSet(false, true)) {
+            return existingFailure;
+        }
+        try {
+            agent.close();
+            return existingFailure;
+        } catch (RuntimeException | Error closeFailure) {
+            return combineFailures(existingFailure, closeFailure);
+        }
     }
 
     private static Throwable combineFailures(Throwable failure, Throwable added) {

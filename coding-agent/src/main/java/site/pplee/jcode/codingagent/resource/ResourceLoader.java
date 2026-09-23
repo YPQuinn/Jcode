@@ -393,7 +393,7 @@ public final class ResourceLoader {
         var byName = new LinkedHashMap<String, Candidate<T>>();
         var physical = new HashSet<Path>();
         for (var candidate : candidates) {
-            if (!physical.add(candidate.physicalPath())) {
+            if (physical.contains(candidate.physicalPath())) {
                 diagnostics.add(ResourceDiagnostic.of(
                         ResourceDiagnostic.Code.DUPLICATE_PHYSICAL_PATH,
                         type, source(candidate.value()), candidate.discoveredPath(),
@@ -406,6 +406,8 @@ public final class ResourceLoader {
                 diagnostics.add(ResourceDiagnostic.collision(
                         type, source(candidate.value()), candidateName,
                         winner.discoveredPath(), candidate.discoveredPath()));
+            } else {
+                physical.add(candidate.physicalPath());
             }
         }
         return byName.values().stream().map(Candidate::value).toList();

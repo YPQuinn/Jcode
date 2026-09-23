@@ -662,6 +662,123 @@ class ResourceExtensionIntegrationTest {
     }
 
     @Test
+    void closeDefersShutdownUntilRunSettlesAndCancellationSkipsLaterTransforms() throws Exception {
+        var firstEntered = new CountDownLatch(1);
+        var cancellationObserved = new CountDownLatch(1);
+        var releaseFirst = new CompletableFuture<Void>();
+        var laterTransforms = new AtomicInteger();
+        var shutdowns = new AtomicInteger();
+        var extension = new CodingExtension() {
+            @Override
+            public String id() {
+                return "closing-context";
+            }
+
+            @Override
+            public List<site.pplee.jcode.codingagent.extension.ExtensionContextTransform> contextTransforms() {
+                return List.of(
+                        (context, messages) -> {
+                            context.cancellation().onCancellation(cancellationObserved::countDown);
+                            firstEntered.countDown();
+                            return releaseFirst.thenApply(ignored -> messages);
+                        },
+                        (context, messages) -> {
+                            laterTransforms.incrementAndGet();
+                            return CompletableFuture.completedStage(messages);
+                        });
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<Void> onSessionShutdown(
+                    site.pplee.jcode.codingagent.extension.ExtensionContext context
+            ) {
+                shutdowns.incrementAndGet();
+                return CompletableFuture.completedStage(null);
+            }
+        };
+        var modelCalls = new AtomicInteger();
+        var client = new ScriptedModelClient(request -> {
+            modelCalls.incrementAndGet();
+            return assistant("must not run");
+        });
+        var session = new CodingAgentSession(config(client, List.of(extension)));
+        var run = session.prompt("wait for context").toCompletableFuture();
+        assertTrue(firstEntered.await(5, TimeUnit.SECONDS));
+
+        session.close();
+
+        assertTrue(cancellationObserved.await(5, TimeUnit.SECONDS));
+        assertFalse(run.isDone());
+        assertEquals(0, shutdowns.get());
+        releaseFirst.complete(null);
+        assertTrue(run.get(5, TimeUnit.SECONDS).aborted());
+        assertEquals(0, laterTransforms.get());
+        assertEquals(0, modelCalls.get());
+        assertEquals(1, shutdowns.get());
+    }
+
+    @Test
+    void fatalContextTransformFailurePropagatesWithoutPersistingAModelError() {
+        var fatal = new AssertionError("fatal transform");
+        var modelCalls = new AtomicInteger();
+        var extension = new CodingExtension() {
+            @Override
+            public String id() {
+                return "fatal-context";
+            }
+
+            @Override
+            public List<site.pplee.jcode.codingagent.extension.ExtensionContextTransform> contextTransforms() {
+                return List.of((context, messages) -> CompletableFuture.failedStage(fatal));
+            }
+        };
+        var client = new ScriptedModelClient(request -> {
+            modelCalls.incrementAndGet();
+            return assistant("must not run");
+        });
+
+        try (var session = new CodingAgentSession(config(client, List.of(extension)))) {
+            var failure = assertThrows(CompletionException.class,
+                    () -> session.prompt("fatal").toCompletableFuture().join());
+
+            assertSame(fatal, rootCause(failure));
+            assertEquals(0, modelCalls.get());
+            assertEquals(0, session.history().entries().stream()
+                    .filter(site.pplee.jcode.codingagent.session.SessionMessageEntry.class::isInstance)
+                    .map(site.pplee.jcode.codingagent.session.SessionMessageEntry.class::cast)
+                    .filter(entry -> entry.message().message() instanceof Message.Assistant)
+                    .count());
+        }
+    }
+
+    @Test
+    void shutdownAttemptsEveryExtensionAndAggregatesDiagnosticFailures() {
+        var order = new ArrayList<String>();
+        var fatal = new AssertionError("fatal shutdown");
+        var ordinary = new IllegalStateException("ordinary shutdown");
+        var diagnostic = new IllegalArgumentException("diagnostic sink");
+        CodingExtension first = shutdownExtension("first", order,
+                CompletableFuture.completedStage(null));
+        CodingExtension second = shutdownExtension("second", order,
+                CompletableFuture.failedStage(ordinary));
+        CodingExtension third = shutdownExtension("third", order,
+                CompletableFuture.failedStage(fatal));
+        var configured = withEventSink(
+                config(new ScriptedModelClient(), List.of(first, second, third)),
+                event -> event instanceof site.pplee.jcode.codingagent.event.CodingAgentEvent.ExtensionDiagnostic
+                        ? CompletableFuture.failedStage(diagnostic)
+                        : CompletableFuture.completedStage(null));
+        var session = new CodingAgentSession(configured);
+
+        var failure = assertThrows(AssertionError.class, session::close);
+
+        assertSame(fatal, failure);
+        assertEquals(List.of("third", "second", "first"), order);
+        assertEquals(List.of(ordinary), List.of(fatal.getSuppressed()));
+        assertEquals(List.of(diagnostic), List.of(ordinary.getSuppressed()));
+    }
+
+    @Test
     void resourceReloadIsExclusiveAndProjectContextReloadPreservesTextResources() throws Exception {
         Path skill = directory.resolve("reload-skill/SKILL.md");
         Path system = directory.resolve("reload-system.md");
@@ -941,6 +1058,27 @@ class ResourceExtensionIntegrationTest {
             ) {
                 executions.incrementAndGet();
                 started.countDown();
+                return result;
+            }
+        };
+    }
+
+    private static CodingExtension shutdownExtension(
+            String id,
+            List<String> order,
+            java.util.concurrent.CompletionStage<Void> result
+    ) {
+        return new CodingExtension() {
+            @Override
+            public String id() {
+                return id;
+            }
+
+            @Override
+            public java.util.concurrent.CompletionStage<Void> onSessionShutdown(
+                    site.pplee.jcode.codingagent.extension.ExtensionContext context
+            ) {
+                order.add(id);
                 return result;
             }
         };

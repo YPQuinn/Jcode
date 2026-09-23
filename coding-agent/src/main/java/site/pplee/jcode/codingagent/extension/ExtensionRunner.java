@@ -89,8 +89,12 @@ public final class ExtensionRunner {
                 SnapshotMapper.agentMessages(initial));
         for (var extension : extensions) {
             for (var transform : extension.transforms()) {
-                stage = stage.thenCompose(previous -> runTransform(
-                        extension.id(), transform, previous, contexts, diagnostics));
+                stage = stage.thenCompose(previous -> {
+                    var context = contexts.apply(extension.id());
+                    context.cancellation().throwIfCancelled();
+                    return runTransform(
+                            extension.id(), transform, previous, context, diagnostics);
+                });
             }
         }
         return stage;
@@ -131,14 +135,15 @@ public final class ExtensionRunner {
     ) {
         var reversed = new ArrayList<>(extensions);
         java.util.Collections.reverse(reversed);
-        CompletionStage<Void> stage = CompletableFuture.completedStage(null);
+        CompletionStage<Throwable> stage = CompletableFuture.completedStage(null);
         for (var registered : reversed) {
-            stage = stage.thenCompose(ignored -> recoverVoid(
-                    registered.id(), "session-shutdown",
-                    () -> registered.extension().onSessionShutdown(contexts.apply(registered.id())),
-                    diagnostics));
+            stage = stage.thenCompose(previous -> runShutdown(
+                    registered, contexts, diagnostics)
+                    .thenApply(current -> combineFailures(previous, current)));
         }
-        return stage;
+        return stage.thenCompose(failure -> failure == null
+                ? CompletableFuture.completedStage(null)
+                : CompletableFuture.failedStage(failure));
     }
 
     private CompletionStage<Void> lifecycle(
@@ -161,30 +166,31 @@ public final class ExtensionRunner {
             String extensionId,
             ExtensionContextTransform transform,
             List<AgentMessage> previous,
-            Function<String, ExtensionContext> contexts,
+            ExtensionContext context,
             Function<CodingAgentEvent.ExtensionDiagnostic, CompletionStage<Void>> diagnostics
     ) {
         CompletionStage<List<AgentMessage>> invoked;
         try {
             invoked = Objects.requireNonNull(
                     transform.transform(
-                            contexts.apply(extensionId), SnapshotMapper.agentMessages(previous)),
+                            context, SnapshotMapper.agentMessages(previous)),
                     "context transform returned null stage");
         } catch (Throwable failure) {
-            return recoverTransform(extensionId, previous, failure, contexts, diagnostics);
+            return recoverTransform(extensionId, previous, failure, context, diagnostics);
         }
         return invoked.handle((value, failure) -> new TransformOutcome(value, failure))
                 .thenCompose(outcome -> {
                     if (outcome.failure() != null) {
                         return recoverTransform(
-                                extensionId, previous, outcome.failure(), contexts, diagnostics);
+                                extensionId, previous, outcome.failure(), context, diagnostics);
                     }
                     try {
+                        context.cancellation().throwIfCancelled();
                         return CompletableFuture.completedStage(
                                 validateMessages(outcome.messages()));
                     } catch (Throwable failure) {
                         return recoverTransform(
-                                extensionId, previous, failure, contexts, diagnostics);
+                                extensionId, previous, failure, context, diagnostics);
                     }
                 });
     }
@@ -193,16 +199,82 @@ public final class ExtensionRunner {
             String extensionId,
             List<AgentMessage> previous,
             Throwable failure,
-            Function<String, ExtensionContext> contexts,
+            ExtensionContext context,
             Function<CodingAgentEvent.ExtensionDiagnostic, CompletionStage<Void>> diagnostics
     ) {
         Throwable actual = unwrap(failure);
-        if (actual instanceof Error || actual instanceof CancellationException
-                || contexts.apply(extensionId).cancellation().isCancelled()) {
+        if (actual instanceof Error || actual instanceof CancellationException) {
             return CompletableFuture.failedStage(actual);
         }
+        try {
+            context.cancellation().throwIfCancelled();
+        } catch (CancellationException cancelled) {
+            return CompletableFuture.failedStage(cancelled);
+        }
         return requireStage(diagnostics.apply(diagnostic(extensionId, "context-transform", actual)))
-                .thenApply(ignored -> SnapshotMapper.agentMessages(previous));
+                .thenApply(ignored -> {
+                    context.cancellation().throwIfCancelled();
+                    return SnapshotMapper.agentMessages(previous);
+                });
+    }
+
+    private CompletionStage<Throwable> runShutdown(
+            Registered registered,
+            Function<String, ExtensionContext> contexts,
+            Function<CodingAgentEvent.ExtensionDiagnostic, CompletionStage<Void>> diagnostics
+    ) {
+        CompletionStage<Void> invoked;
+        try {
+            invoked = requireStage(registered.extension().onSessionShutdown(
+                    contexts.apply(registered.id())));
+        } catch (Throwable failure) {
+            return reportShutdownFailure(registered.id(), failure, diagnostics);
+        }
+        return invoked.handle((ignored, failure) -> failure)
+                .thenCompose(failure -> failure == null
+                        ? CompletableFuture.completedStage(null)
+                        : reportShutdownFailure(registered.id(), failure, diagnostics));
+    }
+
+    private CompletionStage<Throwable> reportShutdownFailure(
+            String extensionId,
+            Throwable failure,
+            Function<CodingAgentEvent.ExtensionDiagnostic, CompletionStage<Void>> diagnostics
+    ) {
+        Throwable actual = unwrap(failure);
+        if (actual instanceof Error || actual instanceof CancellationException) {
+            return CompletableFuture.completedStage(actual);
+        }
+        CompletionStage<Void> reported;
+        try {
+            reported = requireStage(diagnostics.apply(
+                    diagnostic(extensionId, "session-shutdown", actual)));
+        } catch (Throwable diagnosticFailure) {
+            addSuppressed(actual, unwrap(diagnosticFailure));
+            return CompletableFuture.completedStage(actual);
+        }
+        return reported.handle((ignored, diagnosticFailure) -> {
+            if (diagnosticFailure != null) {
+                addSuppressed(actual, unwrap(diagnosticFailure));
+            }
+            return actual;
+        });
+    }
+
+    private static Throwable combineFailures(Throwable first, Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (next != null) {
+            addSuppressed(first, next);
+        }
+        return first;
+    }
+
+    private static void addSuppressed(Throwable target, Throwable suppressed) {
+        if (target != suppressed) {
+            target.addSuppressed(suppressed);
+        }
     }
 
     private CompletionStage<Void> recoverVoid(

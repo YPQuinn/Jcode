@@ -177,6 +177,68 @@ class ResourceLoaderTest {
     }
 
     @Test
+    void frontmatterNullValuesReachResourceSpecificFallbackRules() throws Exception {
+        Path skill = directory.resolve("nullable-skill/SKILL.md");
+        Files.createDirectories(skill.getParent());
+        Files.writeString(skill, """
+                ---
+                name: null
+                description: Nullable skill
+                unused: null
+                ---
+                Skill body
+                """);
+        Path template = directory.resolve("nullable-template.md");
+        Files.writeString(template, """
+                ---
+                description: null
+                argument-hint: null
+                unused: null
+                ---
+                Review $1
+                """);
+
+        var snapshot = load(ResourceConfig.builder()
+                .enabled(true)
+                .includeDefaults(false)
+                .skillPaths(List.of(skill))
+                .promptPaths(List.of(template))
+                .build(), true, false, null, null);
+
+        assertEquals("nullable-skill", snapshot.skill("nullable-skill").orElseThrow().name());
+        var loadedTemplate = snapshot.template("nullable-template").orElseThrow();
+        assertEquals("Review $1", loadedTemplate.description());
+        assertNull(loadedTemplate.argumentHint());
+        assertTrue(snapshot.diagnostics().stream().noneMatch(diagnostic ->
+                diagnostic.code() == ResourceDiagnostic.Code.PARSE_FAILURE));
+    }
+
+    @Test
+    void physicalPathIsReservedOnlyAfterAResourceWinsItsName() throws Exception {
+        Path first = writeTemplate(directory.resolve("first/review.md"), "first");
+        Path losing = writeTemplate(directory.resolve("second/review.md"), "second");
+        Path alternate = directory.resolve("alternate.md");
+        Files.createSymbolicLink(alternate, losing);
+
+        var snapshot = load(ResourceConfig.builder()
+                .enabled(true)
+                .includeDefaults(false)
+                .promptPaths(List.of(first, losing, alternate))
+                .build(), false, false, null, null);
+
+        assertEquals(List.of("alternate", "review"), snapshot.templates().stream()
+                .map(PromptTemplateResource::name)
+                .sorted()
+                .toList());
+        assertEquals(alternate.toAbsolutePath().normalize(),
+                snapshot.template("alternate").orElseThrow().filePath());
+        assertTrue(snapshot.diagnostics().stream().anyMatch(diagnostic ->
+                diagnostic.code() == ResourceDiagnostic.Code.COLLISION
+                        && diagnostic.winnerPath().equals(first)
+                        && diagnostic.loserPath().equals(losing)));
+    }
+
+    @Test
     void absentProjectDefaultsDoNotProduceAnUntrustedDiagnostic() {
         var snapshot = load(ResourceConfig.builder().enabled(true).build(),
                 true, false, null, null);
