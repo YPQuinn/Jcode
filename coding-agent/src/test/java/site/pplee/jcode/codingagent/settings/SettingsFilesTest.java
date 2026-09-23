@@ -229,6 +229,32 @@ class SettingsFilesTest {
     }
 
     @Test
+    void scopedTrustKeepsLegacySettingsSeparateFromTextResources() throws Exception {
+        var project = Files.createDirectory(directory.resolve("scoped-project"));
+        var user = Files.createDirectory(directory.resolve("scoped-user"));
+        Files.writeString(user.resolve("trust.json"),
+                "{\"projects\":{\"" + project.toRealPath() + "\":true}}");
+        var store = new ProjectTrustStore(user, MAPPER);
+
+        assertEquals(ProjectTrustDecision.ALLOW,
+                store.lookup(project, ProjectTrustScope.SETTINGS).decision());
+        assertEquals(ProjectTrustDecision.UNSPECIFIED,
+                store.lookup(project, ProjectTrustScope.TEXT_RESOURCES).decision());
+
+        store.remember(project, ProjectTrustScope.TEXT_RESOURCES, ProjectTrustDecision.DENY);
+        assertEquals(ProjectTrustDecision.ALLOW,
+                store.lookup(project, ProjectTrustScope.SETTINGS).decision());
+        assertEquals(ProjectTrustDecision.DENY,
+                store.lookup(project, ProjectTrustScope.TEXT_RESOURCES).decision());
+
+        store.remove(project, ProjectTrustScope.TEXT_RESOURCES);
+        assertEquals(ProjectTrustDecision.ALLOW,
+                store.lookup(project, ProjectTrustScope.SETTINGS).decision());
+        assertEquals(ProjectTrustDecision.UNSPECIFIED,
+                store.lookup(project, ProjectTrustScope.TEXT_RESOURCES).decision());
+    }
+
+    @Test
     void trustStoreSymlinkIntoProjectIsRejectedForLookupAndWrites() throws Exception {
         var project = Files.createDirectory(directory.resolve("linked-project"));
         var user = Files.createDirectory(directory.resolve("linked-user"));

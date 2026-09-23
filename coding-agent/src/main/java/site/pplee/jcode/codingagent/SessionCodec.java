@@ -9,6 +9,8 @@ import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
 import site.pplee.jcode.codingagent.session.CompactionEntry;
 import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
+import site.pplee.jcode.codingagent.session.CustomEntry;
+import site.pplee.jcode.codingagent.session.CustomMessageEntry;
 import site.pplee.jcode.codingagent.session.SummaryDetails;
 import site.pplee.jcode.codingagent.session.TokenEstimateSource;
 
@@ -96,6 +98,27 @@ final class SessionCodec {
                 object.set("usage", messages.encodeUsage(summary.usage()));
                 object.set("details", encodeDetails(summary.details()));
             }
+            case CustomEntry custom -> {
+                object.put("extensionId", custom.extensionId());
+                object.put("customType", custom.customType());
+                if (custom.data() == null) {
+                    object.putNull("data");
+                } else {
+                    object.set("data", custom.data());
+                }
+            }
+            case CustomMessageEntry custom -> {
+                var message = custom.message();
+                object.put("extensionId", message.extensionId());
+                object.put("customType", message.customType());
+                object.set("content", messages.encodeContents(message.content()));
+                if (message.details() == null) {
+                    object.putNull("details");
+                } else {
+                    object.set("details", message.details());
+                }
+                object.put("display", message.display());
+            }
         }
         return mapper.writeValueAsBytes(object);
     }
@@ -150,8 +173,28 @@ final class SessionCodec {
                     messages.decodeModel(SessionJson.required(object, "summaryModel"), "entry.summaryModel"),
                     messages.decodeUsage(SessionJson.requireObject(object, "usage")),
                     decodeDetails(SessionJson.requireObject(object, "details")));
+            case CustomEntry.TYPE -> new CustomEntry(
+                    id, parentId, timestamp,
+                    SessionJson.requireText(object, "extensionId"),
+                    SessionJson.requireText(object, "customType"),
+                    nullableTree(object, "data"));
+            case CustomMessageEntry.TYPE -> new CustomMessageEntry(
+                    id, parentId, timestamp,
+                    SessionJson.requireText(object, "extensionId"),
+                    SessionJson.requireText(object, "customType"),
+                    messages.decodeContents(SessionJson.requireArray(object, "content")),
+                    nullableTree(object, "details"),
+                    SessionJson.requireBoolean(object, "display"));
             default -> throw SessionJson.invalid("entry.type", "is unknown: " + type);
         };
+    }
+
+    private static com.fasterxml.jackson.databind.JsonNode nullableTree(ObjectNode object, String field) {
+        var value = object.get(field);
+        if (value == null) {
+            throw SessionJson.invalid("entry." + field, "is required");
+        }
+        return value.isNull() ? null : value.deepCopy();
     }
 
     private static UUID parseUuid(String value) {

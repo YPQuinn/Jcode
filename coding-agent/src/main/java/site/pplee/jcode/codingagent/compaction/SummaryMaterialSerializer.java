@@ -4,6 +4,7 @@ import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
+import site.pplee.jcode.codingagent.message.CustomAgentMessage;
 
 import java.util.List;
 
@@ -15,6 +16,11 @@ public final class SummaryMaterialSerializer {
         var output = new StringBuilder();
         for (var agentMessage : messages) {
             if (!(agentMessage instanceof StandardAgentMessage standard)) {
+                if (agentMessage instanceof CustomAgentMessage custom) {
+                    output.append("\n[EXTENSION MESSAGE id=").append(custom.extensionId())
+                            .append(" type=").append(custom.customType()).append("]\n");
+                    appendContent(output, custom.content(), false);
+                }
                 continue;
             }
             appendMessage(output, standard.message());

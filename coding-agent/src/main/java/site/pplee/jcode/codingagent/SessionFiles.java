@@ -6,6 +6,7 @@ import site.pplee.jcode.codingagent.session.SessionFormatException;
 import site.pplee.jcode.codingagent.session.SessionInfo;
 import site.pplee.jcode.codingagent.session.SessionInfoEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
+import site.pplee.jcode.codingagent.session.CustomMessageEntry;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
@@ -138,6 +139,11 @@ public final class SessionFiles {
                             ? messageEntry.timestamp()
                             : max(latestActivity, messageEntry.timestamp());
                 }
+            } else if (entry instanceof CustomMessageEntry customMessage) {
+                messageCount++;
+                latestActivity = latestActivity == null
+                        ? customMessage.timestamp()
+                        : max(latestActivity, customMessage.timestamp());
             }
         }
         return new SessionInfo(

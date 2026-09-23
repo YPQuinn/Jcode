@@ -21,6 +21,8 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <lombok.version>1.18.46</lombok.version>
         <jackson.version>2.18.2</jackson.version>
+        <snakeyaml-engine.version>3.1.1</snakeyaml-engine.version>
+        <jgit.version>7.8.0.202609011348-r</jgit.version>
         <junit.version>5.11.4</junit.version>
         <maven.surefire.version>3.5.2</maven.surefire.version>
         <maven.enforcer.version>3.5.0</maven.enforcer.version>
@@ -67,6 +69,16 @@
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
                 <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.snakeyaml</groupId>
+                <artifactId>snakeyaml-engine</artifactId>
+                <version>${snakeyaml-engine.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.jgit</groupId>
+                <artifactId>org.eclipse.jgit</artifactId>
+                <version>${jgit.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.junit.jupiter</groupId>

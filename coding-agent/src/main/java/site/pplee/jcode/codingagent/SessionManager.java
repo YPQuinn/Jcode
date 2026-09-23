@@ -11,6 +11,8 @@ import site.pplee.jcode.codingagent.session.SessionSnapshot;
 import site.pplee.jcode.codingagent.session.ThinkingLevelChangeEntry;
 import site.pplee.jcode.codingagent.session.CompactionEntry;
 import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
+import site.pplee.jcode.codingagent.session.CustomEntry;
+import site.pplee.jcode.codingagent.session.CustomMessageEntry;
 import site.pplee.jcode.codingagent.session.SummaryDetails;
 import site.pplee.jcode.codingagent.session.TokenEstimateSource;
 import site.pplee.jcode.ai.message.Usage;
@@ -18,6 +20,7 @@ import site.pplee.jcode.ai.message.Usage;
 import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.model.ThinkingLevel;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -140,6 +143,30 @@ final class SessionManager implements AutoCloseable {
             appendThinkingLevelChange(thinkingLevel);
         }
         return appendMessage(message);
+    }
+
+    synchronized CustomEntry appendCustom(
+            String extensionId,
+            String customType,
+            JsonNode data
+    ) throws IOException {
+        return append(id -> new CustomEntry(
+                id, currentEntryId, clock.instant(), extensionId, customType, data));
+    }
+
+    synchronized CustomMessageEntry appendCustomMessage(
+            String extensionId,
+            String customType,
+            java.util.List<site.pplee.jcode.ai.message.Content> content,
+            JsonNode details,
+            boolean display
+    ) throws IOException {
+        return append(id -> {
+            var timestamp = clock.instant();
+            return new CustomMessageEntry(
+                    id, currentEntryId, timestamp,
+                    extensionId, customType, content, details, display);
+        });
     }
 
     synchronized ModelChangeEntry appendModelChange(ModelRef model) throws IOException {

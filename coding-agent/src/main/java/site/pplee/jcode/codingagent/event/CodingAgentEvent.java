@@ -13,7 +13,8 @@ import java.util.Objects;
 public sealed interface CodingAgentEvent
         permits CodingAgentEvent.RuntimeEvent, CodingAgentEvent.RunCompleted,
         CodingAgentEvent.SummaryStarted, CodingAgentEvent.SummaryCompleted,
-        CodingAgentEvent.SummaryFailed, CodingAgentEvent.SummaryCancelled {
+        CodingAgentEvent.SummaryFailed, CodingAgentEvent.SummaryCancelled,
+        CodingAgentEvent.ExtensionDiagnostic {
 
     /** Snapshot of a non-terminal Agent runtime event. */
     record RuntimeEvent(AgentEvent event) implements CodingAgentEvent {
@@ -76,6 +77,19 @@ public sealed interface CodingAgentEvent
     record SummaryCancelled(SummaryCause cause) implements CodingAgentEvent {
         public SummaryCancelled {
             Objects.requireNonNull(cause, "cause must not be null");
+        }
+    }
+
+    /** Recoverable failure from one explicitly registered extension callback. */
+    record ExtensionDiagnostic(
+            String extensionId,
+            String phase,
+            String category
+    ) implements CodingAgentEvent {
+        public ExtensionDiagnostic {
+            Objects.requireNonNull(extensionId, "extensionId must not be null");
+            Objects.requireNonNull(phase, "phase must not be null");
+            Objects.requireNonNull(category, "category must not be null");
         }
     }
 }

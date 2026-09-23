@@ -5,6 +5,7 @@ import site.pplee.jcode.ai.message.Message;
 import site.pplee.jcode.ai.tool.ToolSpec;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
+import site.pplee.jcode.codingagent.message.CustomAgentMessage;
 
 import java.util.List;
 
@@ -29,6 +30,11 @@ public final class ContextUsageEstimator {
         long images = 0;
         for (var agentMessage : messages) {
             if (!(agentMessage instanceof StandardAgentMessage standard)) {
+                if (agentMessage instanceof CustomAgentMessage custom) {
+                    var counted = count(custom);
+                    characters += counted.characters();
+                    images += counted.images();
+                }
                 continue;
             }
             var counted = count(standard.message());
@@ -40,7 +46,12 @@ public final class ContextUsageEstimator {
 
     public static long estimateMessage(AgentMessage agentMessage) {
         if (!(agentMessage instanceof StandardAgentMessage standard)) {
-            return 0;
+            if (agentMessage instanceof CustomAgentMessage custom) {
+                var counted = count(custom);
+                return divideByFour(counted.characters()) + counted.images() * IMAGE_TOKENS;
+            }
+            throw new IllegalArgumentException(
+                    "unsupported product message type: " + agentMessage.getClass().getName());
         }
         var counted = count(standard.message());
         return divideByFour(counted.characters()) + counted.images() * IMAGE_TOKENS;
@@ -62,6 +73,13 @@ public final class ContextUsageEstimator {
             contents = result.content();
             characters += result.toolCallId().length() + result.toolName().length();
         }
+        var contentCount = countContents(contents);
+        return new Count(characters + contentCount.characters(), images + contentCount.images());
+    }
+
+    private static Count countContents(List<Content> contents) {
+        long characters = 0;
+        long images = 0;
         for (var content : contents) {
             switch (content) {
                 case Content.Text text -> characters += text.text().length();
@@ -72,6 +90,14 @@ public final class ContextUsageEstimator {
             }
         }
         return new Count(characters, images);
+    }
+
+    private static Count count(CustomAgentMessage message) {
+        var content = countContents(message.content());
+        long envelopeCharacters = 62L
+                + message.extensionId().length()
+                + message.customType().length();
+        return new Count(content.characters() + envelopeCharacters, content.images());
     }
 
     private static long divideByFour(long characters) {

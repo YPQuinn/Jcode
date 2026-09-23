@@ -9,6 +9,8 @@ import site.pplee.jcode.codingagent.session.CompactionEntry;
 import site.pplee.jcode.codingagent.session.SessionEntry;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.session.SessionSnapshot;
+import site.pplee.jcode.codingagent.session.CustomMessageEntry;
+import site.pplee.jcode.codingagent.message.CustomAgentMessage;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -47,7 +49,8 @@ public final class CompactionPlanner {
             return Optional.empty();
         }
         var firstKept = units.get(keepIndex).entry();
-        if (!(firstKept instanceof SessionMessageEntry || firstKept instanceof BranchSummaryEntry)) {
+        if (!(firstKept instanceof SessionMessageEntry || firstKept instanceof CustomMessageEntry
+                || firstKept instanceof BranchSummaryEntry)) {
             return Optional.empty();
         }
         var material = units.subList(0, keepIndex).stream().map(Unit::message).toList();
@@ -85,6 +88,7 @@ public final class CompactionPlanner {
     private static boolean hasVisibleContentAfter(List<SessionEntry> branch, int checkpointIndex) {
         for (int index = checkpointIndex + 1; index < branch.size(); index++) {
             if (branch.get(index) instanceof SessionMessageEntry
+                    || branch.get(index) instanceof CustomMessageEntry
                     || branch.get(index) instanceof BranchSummaryEntry) {
                 return true;
             }
@@ -99,6 +103,8 @@ public final class CompactionPlanner {
                 units.add(new Unit(entry, message.message()));
             } else if (entry instanceof BranchSummaryEntry summary) {
                 units.add(new Unit(entry, synthetic("branch-summary", summary.summary(), summary.timestamp())));
+            } else if (entry instanceof CustomMessageEntry custom) {
+                units.add(new Unit(entry, custom.message()));
             }
         }
     }
@@ -110,6 +116,9 @@ public final class CompactionPlanner {
         var resultIds = new HashSet<String>();
         for (int index = requested; index < units.size(); index++) {
             var message = standard(units.get(index).message());
+            if (message == null) {
+                break;
+            }
             if (message instanceof Message.ToolResultMessage result) {
                 resultIds.add(result.toolCallId());
             } else {
@@ -118,6 +127,9 @@ public final class CompactionPlanner {
         }
         for (int index = requested - 1; index >= 0; index--) {
             var message = standard(units.get(index).message());
+            if (message == null) {
+                continue;
+            }
             if (message instanceof Message.Assistant assistant) {
                 var callIds = assistant.content().stream()
                         .filter(Content.ToolCall.class::isInstance)
@@ -138,7 +150,8 @@ public final class CompactionPlanner {
 
     private static int latestUserIndex(List<Unit> units) {
         for (int index = units.size() - 1; index >= 0; index--) {
-            if (standard(units.get(index).message()) instanceof Message.User) {
+            if (units.get(index).message() instanceof CustomAgentMessage
+                    || standard(units.get(index).message()) instanceof Message.User) {
                 return index;
             }
         }
@@ -148,6 +161,9 @@ public final class CompactionPlanner {
     private static boolean hasToolActivityAfter(List<Unit> units, int userIndex) {
         for (int index = userIndex + 1; index < units.size(); index++) {
             var message = standard(units.get(index).message());
+            if (message == null) {
+                continue;
+            }
             if (message instanceof Message.ToolResultMessage) {
                 return true;
             }
@@ -160,7 +176,7 @@ public final class CompactionPlanner {
     }
 
     private static Message standard(AgentMessage message) {
-        return ((StandardAgentMessage) message).message();
+        return message instanceof StandardAgentMessage standard ? standard.message() : null;
     }
 
     private static int indexOf(List<SessionEntry> branch, String id) {

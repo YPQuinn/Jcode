@@ -15,7 +15,7 @@
 Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它将模型协议、Provider 适配、通用 Agent Loop 与编码产品能力拆分为边界清晰的库模块，使应用可以显式选择模型、工具、权限策略、上下文与生命周期行为，而不依赖全局注册表或自动扫描。
 
 > [!IMPORTANT]
-> Jcode 当前处于开发阶段，版本为 `1.0-SNAPSHOT`，需要从源码构建。仓库只提供可嵌入的库模块，不包含 CLI、TUI、HTTP Server 或 Spring Boot 启动入口；Extension 系统尚未实现。
+> Jcode 当前处于开发阶段，版本为 `1.0-SNAPSHOT`，需要从源码构建。仓库只提供可嵌入的库模块，不包含 CLI、TUI、HTTP Server 或 Spring Boot 启动入口。
 
 ## 核心特性
 
@@ -30,6 +30,9 @@ Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它�
 - **长会话压缩**：支持手动与请求前阈值压缩、append-only 摘要检查点、结构化上下文溢出单次恢复，以及显式分支摘要。
 - **本地编码工具**：内置 `read`、`write`、`edit`、`bash`、`grep`、`find`、`ls`，工具集与授权策略均由调用方显式配置。
 - **项目指令发现**：沿配置工作目录的词法祖先链依次尝试 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`，生成不可变上下文快照并组装 system prompt。
+- **文本资源**：宿主显式启用后加载 Skill、Prompt Template、SYSTEM/APPEND 文本，提供来源、冲突、授信和解析诊断，并支持 idle 原子 reload。
+- **显式 Java Extension**：宿主直接注册扩展实例，复用既有工具授权与执行管道，并提供命令、请求上下文变换、事件观察和生命周期通知。
+- **扩展历史**：`custom` 状态和 `custom_message` 可见消息进入同一 append-only Session 树，支持 JSONL 重开、分支与压缩。
 
 ## 架构与模块
 
@@ -153,6 +156,9 @@ try (var provider = new OpenAiProvider(providerConfig)) {
 - `abort()`：取消当前运行；
 - `state()` / `isRunning()`：读取不可变状态快照；
 - `reloadProjectContext()`：在空闲边界重新发现项目指令；
+- `resources()` / `reloadResources()`：读取或原子重载当前文本资源快照；
+- `expandTemplate(...)` / `expandSkill(...)` / `expandInput(...)`：显式展开已加载文本资源；
+- `executeCommand(extensionId, commandName, arguments)`：执行扩展命令并接纳其固定历史记录，不隐式调用模型；
 - `history()`、`branch(entryId)`、`resetLeaf()`：读取或切换 append-only 历史分支；
 - `contextUsage()`、`compact(instructions)`：估算有效请求视图或在 idle 边界生成摘要检查点；
 - `branchWithSummary(entryId, instructions)`：总结离开分支并把摘要追加到目标节点；
@@ -161,6 +167,8 @@ try (var provider = new OpenAiProvider(providerConfig)) {
 默认构造只使用内存历史。文件模式必须由宿主显式调用 `CodingAgentSession.create(config, sessionDirectory)` 或 `open(config, sessionFile)`；可通过 `SessionFiles.list/latest` 扫描显式目录并按可选 cwd 过滤。`branch()` / `resetLeaf()` 不回滚工作区文件，`open()` 以调用方当前模型、工具和配置为准。普通 JSONL append 不逐条 `force()`，因此不承诺断电 durability。
 
 设置驱动装配使用 `CodingAgentSessionFactory.inMemory/create/open` 与 `CodingAgentSessionOptions`。用户配置目录始终由宿主显式传入；项目 `.jcode/settings.json` 只有在 SDK 或独立 `trust.json` 明确允许时才读取。`SettingsFiles` 和 `ProjectTrustStore` 提供同步显式保存，`session.setModel(...)` 只改变当前会话，不自动修改默认设置。
+
+文本资源默认关闭。启用后，默认来源为显式用户资源目录和已授信的 `<workingDirectory>/.jcode`；项目设置授权不会自动授权项目文本资源。普通 `prompt("/name ...")` 始终保留原文本，只有 `expandInput()` 才解释已存在的模板或 `/skill:name`。Java Extension 只接受宿主提供的实例，不扫描 classpath、不使用 `ServiceLoader`，也不执行项目目录中的 jar 或脚本。Session 关闭会在已接纳工作真实结束后发送一次反序生命周期通知，但不会替宿主调用借入扩展或扩展工具的 `close()`。
 
 自动压缩默认关闭。启用时必须为当前 `ModelRef` 提供带 `contextWindow` 的 `ModelProfile`；`reserveTokens` 和 `keepRecentTokens` 按设置层逐叶继承：
 

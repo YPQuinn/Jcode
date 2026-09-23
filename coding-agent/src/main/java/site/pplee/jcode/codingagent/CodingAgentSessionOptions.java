@@ -10,6 +10,8 @@ import site.pplee.jcode.codingagent.model.ProviderDefinition;
 import site.pplee.jcode.codingagent.settings.ProjectTrustDecision;
 import site.pplee.jcode.codingagent.settings.SettingsOverrides;
 import site.pplee.jcode.codingagent.tool.CodingToolConfig;
+import site.pplee.jcode.codingagent.extension.CodingExtension;
+import site.pplee.jcode.codingagent.resource.ResourceConfig;
 
 import site.pplee.jcode.ai.model.ModelRef;
 
@@ -42,6 +44,7 @@ public final class CodingAgentSessionOptions {
     private final CodingToolConfig tools;
     private final boolean toolsExplicitlyConfigured;
     private final ProjectContextConfig projectContext;
+    private final CustomizationConfig customization;
 
     private CodingAgentSessionOptions(Builder builder) {
         workingDirectory = builder.workingDirectory.toAbsolutePath().normalize();
@@ -66,6 +69,10 @@ public final class CodingAgentSessionOptions {
         tools = builder.tools;
         toolsExplicitlyConfigured = builder.toolsExplicitlyConfigured;
         projectContext = builder.projectContext;
+        var configuredCustomization = builder.customization;
+        customization = new CustomizationConfig(
+                configuredCustomization.resources().withUserConfigDirectory(userConfigDirectory),
+                configuredCustomization.extensions());
         if (borrowedModels != null
                 && (!providerDefinitions.isEmpty() || !credentials.isEmpty())) {
             throw new IllegalArgumentException(
@@ -149,6 +156,10 @@ public final class CodingAgentSessionOptions {
         return projectContext;
     }
 
+    public CustomizationConfig customization() {
+        return customization;
+    }
+
     /** Builder that keeps every discovery source disabled until explicitly supplied. */
     public static final class Builder {
         private final Path workingDirectory;
@@ -169,6 +180,7 @@ public final class CodingAgentSessionOptions {
         private CodingToolConfig tools = CodingToolConfig.readOnly();
         private boolean toolsExplicitlyConfigured;
         private ProjectContextConfig projectContext = ProjectContextConfig.disabled();
+        private CustomizationConfig customization = CustomizationConfig.none();
 
         private Builder(Path workingDirectory) {
             this.workingDirectory = Objects.requireNonNull(
@@ -254,6 +266,25 @@ public final class CodingAgentSessionOptions {
 
         public Builder projectContext(ProjectContextConfig value) {
             projectContext = Objects.requireNonNull(value, "projectContext must not be null");
+            return this;
+        }
+
+        public Builder customization(CustomizationConfig value) {
+            customization = Objects.requireNonNull(value, "customization must not be null");
+            return this;
+        }
+
+        public Builder resources(ResourceConfig value) {
+            customization = new CustomizationConfig(
+                    Objects.requireNonNull(value, "resources must not be null"),
+                    customization.extensions());
+            return this;
+        }
+
+        public Builder extensions(List<CodingExtension> value) {
+            customization = new CustomizationConfig(
+                    customization.resources(),
+                    Objects.requireNonNull(value, "extensions must not be null"));
             return this;
         }
 

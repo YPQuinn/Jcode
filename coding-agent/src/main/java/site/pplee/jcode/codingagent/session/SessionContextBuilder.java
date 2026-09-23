@@ -63,6 +63,10 @@ public final class SessionContextBuilder {
                 case BranchSummaryEntry ignored -> {
                     // Branch summaries are request-only synthetic context.
                 }
+                case CustomEntry ignored -> {
+                    // Extension state never enters model context.
+                }
+                case CustomMessageEntry custom -> messages.add(custom.message());
             }
         }
         return new SessionContext(
@@ -104,6 +108,7 @@ public final class SessionContextBuilder {
                 case SessionMessageEntry message -> messages.add(message.message());
                 case BranchSummaryEntry summary -> messages.add(summaryMessage(
                         "branch-summary", summary.id(), summary.summary(), summary.timestamp()));
+                case CustomMessageEntry custom -> messages.add(custom.message());
                 default -> {
                     // Configuration, display metadata, and older checkpoints are not messages.
                 }

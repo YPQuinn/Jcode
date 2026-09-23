@@ -8,7 +8,7 @@ import java.time.Instant;
  */
 public sealed interface SessionEntry permits SessionMessageEntry, ModelChangeEntry,
         ThinkingLevelChangeEntry, SessionInfoEntry, LabelEntry, CompactionEntry,
-        BranchSummaryEntry {
+        BranchSummaryEntry, CustomEntry, CustomMessageEntry {
 
     /** Stable serialized discriminator. */
     String type();

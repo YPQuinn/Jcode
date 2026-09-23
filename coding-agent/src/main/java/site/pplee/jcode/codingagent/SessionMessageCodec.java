@@ -118,13 +118,13 @@ final class SessionMessageCodec {
         return object;
     }
 
-    private ArrayNode encodeContents(java.util.List<Content> contents) {
+    ArrayNode encodeContents(java.util.List<Content> contents) {
         var array = mapper.createArrayNode();
         contents.forEach(content -> array.add(encodeContent(content)));
         return array;
     }
 
-    private java.util.List<Content> decodeContents(ArrayNode array) {
+    java.util.List<Content> decodeContents(ArrayNode array) {
         var contents = new ArrayList<Content>(array.size());
         for (var node : array) {
             contents.add(decodeContent(node));

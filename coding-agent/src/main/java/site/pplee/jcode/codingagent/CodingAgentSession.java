@@ -16,8 +16,6 @@ import site.pplee.jcode.agentcore.AgentConfig;
 import site.pplee.jcode.agentcore.AgentContext;
 import site.pplee.jcode.agentcore.concurrent.CancellationSource;
 import site.pplee.jcode.agentcore.event.AgentEvent;
-import site.pplee.jcode.agentcore.message.ContextTransformer;
-import site.pplee.jcode.agentcore.message.MessageProjector;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.tool.AfterToolCall;
 import site.pplee.jcode.agentcore.tool.ToolExecutionMode;
@@ -44,6 +42,18 @@ import site.pplee.jcode.codingagent.compaction.SummaryMaterialSerializer;
 import site.pplee.jcode.codingagent.compaction.SummaryDetailsExtractor;
 import site.pplee.jcode.codingagent.settings.CompactionSettings;
 import site.pplee.jcode.codingagent.prompt.SystemPromptBuilder;
+import site.pplee.jcode.codingagent.resource.ExpandedPrompt;
+import site.pplee.jcode.codingagent.resource.ResourceConfig;
+import site.pplee.jcode.codingagent.resource.ResourceExpander;
+import site.pplee.jcode.codingagent.resource.ResourceLoader;
+import site.pplee.jcode.codingagent.resource.ResourceSnapshot;
+import site.pplee.jcode.codingagent.extension.CommandResult;
+import site.pplee.jcode.codingagent.extension.CommandExecutionException;
+import site.pplee.jcode.codingagent.extension.CustomRecordDraft;
+import site.pplee.jcode.codingagent.extension.ExtensionContext;
+import site.pplee.jcode.codingagent.extension.ExtensionRunner;
+import site.pplee.jcode.codingagent.message.ProductMessageProjector;
+import site.pplee.jcode.codingagent.tool.CodingTool;
 import site.pplee.jcode.codingagent.session.LabelEntry;
 import site.pplee.jcode.codingagent.session.SessionContextBuilder;
 import site.pplee.jcode.codingagent.session.SessionDiagnostic;
@@ -55,6 +65,7 @@ import site.pplee.jcode.codingagent.session.CompactionEntry;
 import site.pplee.jcode.codingagent.session.BranchSummaryEntry;
 import site.pplee.jcode.codingagent.session.SummaryDetails;
 import site.pplee.jcode.codingagent.session.TokenEstimateSource;
+import site.pplee.jcode.codingagent.session.CustomMessageEntry;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -96,24 +107,34 @@ public final class CodingAgentSession implements AutoCloseable {
     private final site.pplee.jcode.ai.client.ModelClient modelClient;
     private final ModelRequestOptions requestOptions;
     private final CodingAgentEventSink productEventSink;
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
     private final AutoCloseable ownedResource;
     private final AtomicBoolean ownedResourceClosed = new AtomicBoolean();
     private final AtomicBoolean runtimeResourcesClosed = new AtomicBoolean();
+    private final AtomicBoolean extensionShutdown = new AtomicBoolean();
     private volatile ModelSelection currentSelection;
     private final ExecutorService reloadExecutor;
     private ExecutorService maintenanceExecutor;
     // Remains set through callbacks, including callbacks that admit another reload.
     private final ThreadLocal<Boolean> reloadWorker = new ThreadLocal<>();
     private final ProjectContextConfig projectContextConfig;
+    private final ResourceConfig resourceConfig;
+    private final ResourceLoader resourceLoader = new ResourceLoader();
+    private final ResourceExpander resourceExpander = new ResourceExpander();
+    private final ExtensionRunner extensionRunner;
     private final ContextLoader contextLoader;
     private final List<ToolSpec> toolSpecs;
+    private final boolean builtInReadEnabled;
+    private final boolean builtInBashEnabled;
     private final String customSystemPrompt;
     private final String appendSystemPrompt;
     private ProjectContextSnapshot projectContext;
+    private volatile ResourceSnapshot resources;
     private volatile String currentSystemPrompt;
     private CancellationSource reloadSource;
     private CancellationSource summarySource;
     private CancellationSource runSource;
+    private CancellationSource commandSource;
     private UsageObservation usageObservation;
     private volatile Throwable pendingInfrastructureFailure;
     private boolean skipAutomaticCompactionOnce;
@@ -198,13 +219,18 @@ public final class CodingAgentSession implements AutoCloseable {
         this.modelClient = config.modelClient();
         this.requestOptions = config.requestOptions();
         this.productEventSink = config.eventSink();
+        this.objectMapper = config.objectMapper();
         this.ownedResource = ownedResource;
         this.currentSelection = initialSelection == null
                 ? runtimeSelection(config.model(), config.thinkingLevel())
                 : requireMatchingSelection(initialSelection, config);
         this.projectContextConfig = config.projectContext();
+        this.resourceConfig = config.customization().resources();
+        this.extensionRunner = new ExtensionRunner(config.customization().extensions());
         this.customSystemPrompt = config.customSystemPrompt();
         this.appendSystemPrompt = config.appendSystemPrompt();
+        this.builtInReadEnabled = config.tools().enabledTools().contains(CodingTool.READ);
+        this.builtInBashEnabled = config.tools().enabledTools().contains(CodingTool.BASH);
 
         var initialCancellation = new CancellationSource();
         this.projectContext = projectContextConfig.enabled()
@@ -215,14 +241,29 @@ public final class CodingAgentSession implements AutoCloseable {
                 : suppliedToolSet;
         Agent createdAgent;
         try {
-            var tools = createdToolSet.tools();
+            var tools = new ArrayList<>(createdToolSet.tools());
+            var toolNames = new java.util.LinkedHashMap<String, String>();
+            for (var tool : tools) {
+                toolNames.put(tool.spec().name(), "built-in");
+            }
+            for (var tool : extensionRunner.tools()) {
+                String previous = toolNames.putIfAbsent(tool.spec().name(), "extension");
+                if (previous != null) {
+                    throw new IllegalArgumentException(
+                            "duplicate tool name between " + previous + " and extension: "
+                                    + tool.spec().name());
+                }
+                tools.add(tool);
+            }
+            tools = new ArrayList<>(List.copyOf(tools));
             this.toolSpecs = tools.stream().map(tool -> tool.spec()).toList();
-            String systemPrompt = SystemPromptBuilder.build(
-                    workingDirectory,
-                    toolSpecs,
-                    customSystemPrompt,
-                    appendSystemPrompt,
-                    projectContext.files());
+            this.resources = resourceLoader.load(new ResourceLoader.Request(
+                    workingDirectory, resourceConfig, objectMapper, projectContext,
+                    customSystemPrompt, appendSystemPrompt,
+                    resourceConfig.enabled() ? 1 : 0,
+                    builtInReadEnabled,
+                    builtInBashEnabled));
+            String systemPrompt = buildSystemPrompt();
             this.currentSystemPrompt = systemPrompt;
             validateCompactionBudget(config.model());
             var restored = SessionContextBuilder.build(sessionManager.snapshot());
@@ -234,7 +275,7 @@ public final class CodingAgentSession implements AutoCloseable {
                     config.modelClient(),
                     config.objectMapper(),
                     this::transformContext,
-                    MessageProjector.standard(),
+                    ProductMessageProjector.create(),
                     ToolExecutionMode.PARALLEL,
                     CodingToolPolicyAdapter.adapt(config.tools().policy(), workingDirectory),
                     AfterToolCall.noop(),
@@ -262,8 +303,35 @@ public final class CodingAgentSession implements AutoCloseable {
         }
         this.toolSet = createdToolSet;
         this.agent = createdAgent;
-        this.reloadExecutor = projectContextConfig.enabled()
+        this.reloadExecutor = projectContextConfig.enabled() || resourceConfig.enabled()
                 ? Executors.newVirtualThreadPerTaskExecutor() : null;
+        try {
+            extensionRunner.started(
+                    id -> extensionContext(id, initialCancellation.signal()),
+                    this::emitExtensionDiagnostic).toCompletableFuture().join();
+        } catch (RuntimeException | Error failure) {
+            if (reloadExecutor != null) {
+                reloadExecutor.shutdownNow();
+            }
+            try {
+                createdAgent.close();
+            } catch (RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            try {
+                createdToolSet.close();
+            } catch (RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            if (ownedResource != null && ownedResourceClosed.compareAndSet(false, true)) {
+                try {
+                    ownedResource.close();
+                } catch (Exception closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+            throw failure;
+        }
     }
 
     /**
@@ -282,6 +350,110 @@ public final class CodingAgentSession implements AutoCloseable {
     public CompletionStage<CodingAgentRunResult> continueRun() {
         return startRun(agent::continueRun);
     }
+
+    /** Execute one explicitly named extension command without implicitly invoking the model. */
+    public CompletionStage<CommandResult> executeCommand(
+            String extensionId,
+            String commandName,
+            List<String> arguments
+    ) {
+        Objects.requireNonNull(extensionId, "extensionId must not be null");
+        Objects.requireNonNull(commandName, "commandName must not be null");
+        var argumentSnapshot = List.copyOf(
+                Objects.requireNonNull(arguments, "arguments must not be null"));
+        var command = extensionRunner.command(extensionId, commandName);
+        var result = new CompletableFuture<CommandResult>();
+        CancellationSource source;
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            if (running || reloading || historyOperation) {
+                throw new IllegalStateException("coding-agent session is busy");
+            }
+            try {
+                sessionManager.requireWritable();
+            } catch (IOException failure) {
+                return CompletableFuture.failedFuture(failure);
+            }
+            historyOperation = true;
+            source = new CancellationSource();
+            commandSource = source;
+        }
+        CompletionStage<site.pplee.jcode.codingagent.extension.CommandOutcome> handlerStage;
+        try {
+            handlerStage = Objects.requireNonNull(
+                    command.handler().execute(
+                            extensionContext(extensionId, source.signal()), argumentSnapshot),
+                    "extension command returned null stage");
+        } catch (Throwable failure) {
+            finishCommand(extensionId, source, null, failure, result);
+            return result.copy();
+        }
+        handlerStage.whenComplete((outcome, failure) ->
+                finishCommand(extensionId, source, outcome, failure, result));
+        return result.copy();
+    }
+
+    private void finishCommand(
+            String extensionId,
+            CancellationSource source,
+            site.pplee.jcode.codingagent.extension.CommandOutcome outcome,
+            Throwable handlerFailure,
+            CompletableFuture<CommandResult> result
+    ) {
+        var accepted = new ArrayList<String>();
+        Throwable failure = handlerFailure == null ? null : unwrapCompletionFailure(handlerFailure);
+        try {
+            if (failure != null) {
+                throw failure;
+            }
+            Objects.requireNonNull(outcome, "extension command returned null outcome");
+            synchronized (lifecycleLock) {
+                source.signal().throwIfCancelled();
+                ensureOpen();
+                if (commandSource != source || !historyOperation) {
+                    throw new CancellationException("extension command is no longer active");
+                }
+            }
+            for (var record : outcome.records()) {
+                source.signal().throwIfCancelled();
+                SessionEntry entry = switch (record) {
+                    case CustomRecordDraft.Data data -> sessionManager.appendCustom(
+                            extensionId, data.customType(), data.data());
+                    case CustomRecordDraft.Message message -> sessionManager.appendCustomMessage(
+                            extensionId, message.customType(), message.content(),
+                            message.details(), message.display());
+                };
+                accepted.add(entry.id());
+            }
+            synchronized (lifecycleLock) {
+                agent.replaceMessages(SessionContextBuilder.build(sessionManager.snapshot()).messages());
+                usageObservation = null;
+            }
+        } catch (Throwable operationFailure) {
+            failure = unwrapCompletionFailure(operationFailure);
+            try {
+                synchronized (lifecycleLock) {
+                    agent.replaceMessages(SessionContextBuilder.build(sessionManager.snapshot()).messages());
+                    usageObservation = null;
+                }
+            } catch (Throwable alignmentFailure) {
+                failure.addSuppressed(alignmentFailure);
+            }
+        }
+        synchronized (lifecycleLock) {
+            if (commandSource == source) {
+                commandSource = null;
+            }
+        }
+        failure = finishHistoryOperation(failure);
+        if (failure != null) {
+            result.completeExceptionally(new CommandExecutionException(
+                    "extension command failed", failure, accepted));
+        } else {
+            result.complete(new CommandResult(outcome.displayText(), accepted));
+        }
+    }
+
 
     /** Estimate the effective request view without invoking a model or mutating history. */
     public ContextUsageEstimate contextUsage() {
@@ -554,8 +726,19 @@ public final class CodingAgentSession implements AutoCloseable {
                     }
                 }
             }
-            return CompletableFuture.completedFuture(
-                    SessionContextBuilder.buildRequestView(snapshot).messages());
+            var baseView = SessionContextBuilder.buildRequestView(snapshot).messages();
+            var transformed = extensionRunner.transform(
+                    baseView,
+                    id -> extensionContext(id, cancellation),
+                    this::emitExtensionDiagnostic);
+            return transformed.whenComplete((ignored, failure) -> {
+                if (failure != null) {
+                    Throwable actual = unwrapCompletionFailure(failure);
+                    if (!(actual instanceof CancellationException) && !(actual instanceof Error)) {
+                        pendingInfrastructureFailure = actual;
+                    }
+                }
+            });
         } catch (Throwable failure) {
             var infrastructure = infrastructureFailure(failure);
             if (compactionSettings.enabled()) {
@@ -569,6 +752,12 @@ public final class CodingAgentSession implements AutoCloseable {
             }
             return CompletableFuture.failedFuture(failure);
         }
+    }
+
+    private String buildSystemPrompt() {
+        return SystemPromptBuilder.build(
+                workingDirectory, toolSpecs, resources,
+                builtInReadEnabled, builtInBashEnabled);
     }
 
     private static SessionSnapshot withPreparedCompaction(
@@ -590,7 +779,8 @@ public final class CodingAgentSession implements AutoCloseable {
             threshold = OptionalInt.of(maybeBudget.orElseThrow().threshold());
         }
         var observation = usageObservation;
-        if (observation != null
+        if (!extensionRunner.hasContextTransforms()
+                && observation != null
                 && observation.model().equals(model)
                 && Objects.equals(observation.compactionEntryId(), latestCompactionId(snapshot))) {
             var branch = snapshot.currentBranch();
@@ -606,6 +796,8 @@ public final class CodingAgentSession implements AutoCloseable {
                 for (int index = observedIndex + 1; index < branch.size(); index++) {
                     if (branch.get(index) instanceof site.pplee.jcode.codingagent.session.SessionMessageEntry message) {
                         tail += ContextUsageEstimator.estimateMessage(message.message());
+                    } else if (branch.get(index) instanceof CustomMessageEntry custom) {
+                        tail += ContextUsageEstimator.estimateMessage(custom.message());
                     } else if (branch.get(index) instanceof BranchSummaryEntry summary) {
                         tail += Math.max(1, (summary.summary().length() + 3L) / 4L);
                     }
@@ -754,6 +946,8 @@ public final class CodingAgentSession implements AutoCloseable {
             var entry = from.get(index);
             if (entry instanceof site.pplee.jcode.codingagent.session.SessionMessageEntry message) {
                 material.add(message.message());
+            } else if (entry instanceof CustomMessageEntry custom) {
+                material.add(custom.message());
             } else if (entry instanceof CompactionEntry compaction) {
                 material.add(syntheticSummary("compaction", compaction.summary(), compaction.timestamp()));
             } else if (entry instanceof BranchSummaryEntry summary) {
@@ -856,11 +1050,28 @@ public final class CodingAgentSession implements AutoCloseable {
     }
 
     private void emitEvent(CodingAgentEvent event) {
-        var stage = productEventSink.emit(event);
+        extensionRunner.observe(event, this::emitExtensionDiagnostic)
+                .thenCompose(ignored -> requireEventStage(productEventSink.emit(event)))
+                .toCompletableFuture().join();
+    }
+
+    private CompletionStage<Void> emitExtensionDiagnostic(
+            CodingAgentEvent.ExtensionDiagnostic diagnostic
+    ) {
+        return requireEventStage(productEventSink.emit(diagnostic));
+    }
+
+    private static CompletionStage<Void> requireEventStage(CompletionStage<Void> stage) {
         if (stage == null) {
             throw new IllegalStateException("coding event sink returned null stage");
         }
-        stage.toCompletableFuture().join();
+        return stage;
+    }
+
+    private ExtensionContext extensionContext(String extensionId, CancellationSignal cancellation) {
+        return new ExtensionContext(
+                extensionId, workingDirectory, resources, sessionManager.snapshot(),
+                currentSelection, cancellation);
     }
 
     private static Throwable infrastructureFailure(Throwable failure) {
@@ -1107,22 +1318,40 @@ public final class CodingAgentSession implements AutoCloseable {
                 reloadSource.cancel();
             } else if (historyOperation && summarySource != null) {
                 summarySource.cancel();
+            } else if (historyOperation && commandSource != null) {
+                commandSource.cancel();
             }
         }
     }
 
     /** Return the last successfully applied project instruction snapshot. */
     public ProjectContextSnapshot projectContext() {
-        synchronized (lifecycleLock) {
-            return projectContext;
-        }
+        return resources.projectContext();
     }
 
     /** Return diagnostics from the last successfully applied project instruction snapshot. */
     public List<ProjectContextDiagnostic> projectContextDiagnostics() {
-        synchronized (lifecycleLock) {
-            return projectContext.diagnostics();
-        }
+        return resources.projectContext().diagnostics();
+    }
+
+    /** Return the currently published combined resource snapshot. */
+    public ResourceSnapshot resources() {
+        return resources;
+    }
+
+    /** Expand one captured prompt template without writing history or invoking a model. */
+    public ExpandedPrompt expandTemplate(String name, List<String> arguments) {
+        return resourceExpander.expandTemplate(resources, name, arguments);
+    }
+
+    /** Read and expand one selected skill body on demand. */
+    public ExpandedPrompt expandSkill(String name, String additionalText) {
+        return resourceExpander.expandSkill(resources, name, additionalText);
+    }
+
+    /** Explicitly expand a known text resource; unknown slash input remains unchanged. */
+    public ExpandedPrompt expandInput(String text) {
+        return resourceExpander.expandInput(resources, text);
     }
 
     /** True while an admitted project instruction reload is in progress. */
@@ -1166,6 +1395,86 @@ public final class CodingAgentSession implements AutoCloseable {
         return operation.copy();
     }
 
+    /** Reload enabled text resources and project instructions without replacing Java extensions. */
+    public CompletionStage<ResourceSnapshot> reloadResources() {
+        var operation = new CompletableFuture<ResourceSnapshot>();
+        CancellationSource source;
+        long revision;
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            if (running || reloading || historyOperation) {
+                throw new IllegalStateException("coding-agent session is busy");
+            }
+            if (!resourceConfig.enabled()) {
+                throw new IllegalStateException("text resource discovery is disabled");
+            }
+            reloading = true;
+            source = new CancellationSource();
+            reloadSource = source;
+            revision = resources.revision() + 1;
+        }
+        try {
+            Objects.requireNonNull(reloadExecutor, "reload executor must exist when resources are enabled")
+                    .execute(() -> runResourceReload(source, revision, operation));
+        } catch (RuntimeException failure) {
+            operation.completeExceptionally(releaseFailedReload(source, failure));
+        }
+        return operation.copy();
+    }
+
+    private void runResourceReload(
+            CancellationSource source,
+            long revision,
+            CompletableFuture<ResourceSnapshot> operation
+    ) {
+        reloadWorker.set(true);
+        ResourceSnapshot previous = resources;
+        boolean published = false;
+        try {
+            ProjectContextSnapshot context = projectContextConfig.enabled()
+                    ? contextLoader.load(
+                            workingDirectory, projectContextConfig,
+                            previous.projectContext().revision() + 1, source.signal())
+                    : previous.projectContext();
+            source.signal().throwIfCancelled();
+            var candidate = resourceLoader.load(new ResourceLoader.Request(
+                    workingDirectory, resourceConfig, objectMapper, context,
+                    customSystemPrompt, appendSystemPrompt, revision,
+                    builtInReadEnabled, builtInBashEnabled));
+            String prompt = SystemPromptBuilder.build(
+                    workingDirectory, toolSpecs, candidate,
+                    builtInReadEnabled, builtInBashEnabled);
+            synchronized (lifecycleLock) {
+                source.signal().throwIfCancelled();
+                ensureOpen();
+                if (!reloading || reloadSource != source) {
+                    throw new IllegalStateException("resource reload is no longer active");
+                }
+                agent.updateSystemPrompt(prompt);
+                currentSystemPrompt = prompt;
+                resources = candidate;
+                projectContext = context;
+                usageObservation = null;
+                published = true;
+            }
+            extensionRunner.resourcesReloaded(
+                    previous,
+                    id -> extensionContext(id, source.signal()),
+                    this::emitExtensionDiagnostic).toCompletableFuture().join();
+            Throwable closeFailure = finishReloadOperation(source, null, false);
+            if (closeFailure == null) {
+                operation.complete(candidate);
+            } else {
+                operation.completeExceptionally(closeFailure);
+            }
+        } catch (Throwable failure) {
+            operation.completeExceptionally(finishReloadOperation(
+                    source, unwrapCompletionFailure(failure), !published));
+        } finally {
+            reloadWorker.remove();
+        }
+    }
+
     /** Finish loading and release admission before invoking any completion callbacks. */
     private void runReload(
             CancellationSource source,
@@ -1179,8 +1488,16 @@ public final class CodingAgentSession implements AutoCloseable {
                 var candidate = contextLoader.load(
                         workingDirectory, projectContextConfig, revision, source.signal());
                 source.signal().throwIfCancelled();
+                ResourceSnapshot previous = resources;
+                var combined = new ResourceSnapshot(
+                        previous.revision() + 1,
+                        previous.skills(), previous.templates(),
+                        previous.systemPrompt().orElse(null),
+                        previous.appendSystemPrompt().orElse(null),
+                        candidate, previous.diagnostics());
                 String prompt = SystemPromptBuilder.build(
-                        workingDirectory, toolSpecs, customSystemPrompt, appendSystemPrompt, candidate.files());
+                        workingDirectory, toolSpecs, combined,
+                        builtInReadEnabled, builtInBashEnabled);
                 synchronized (lifecycleLock) {
                     source.signal().throwIfCancelled();
                     ensureOpen();
@@ -1190,6 +1507,7 @@ public final class CodingAgentSession implements AutoCloseable {
                     agent.updateSystemPrompt(prompt);
                     currentSystemPrompt = prompt;
                     projectContext = candidate;
+                    resources = combined;
                     usageObservation = null;
                     completed = candidate;
                     releaseReload(source);
@@ -1206,11 +1524,27 @@ public final class CodingAgentSession implements AutoCloseable {
 
     /** Preserve cancellation when it wins the failure/cleanup boundary, including close interruptions. */
     private Throwable releaseFailedReload(CancellationSource source, Throwable failure) {
+        return finishReloadOperation(source, failure, true);
+    }
+
+    private Throwable finishReloadOperation(
+            CancellationSource source,
+            Throwable failure,
+            boolean cancellationWins
+    ) {
+        boolean closeAfter;
         synchronized (lifecycleLock) {
             releaseReload(source);
-            return source.signal().isCancelled()
-                    ? new CancellationException("project context reload cancelled") : failure;
+            if (cancellationWins && source.signal().isCancelled()) {
+                failure = new CancellationException("project context reload cancelled");
+            }
+            closeAfter = closed && !running && !historyOperation;
         }
+        if (closeAfter) {
+            failure = closeRuntimeResources(failure, false);
+            failure = closeManager(failure);
+        }
+        return failure;
     }
 
     /** Release this operation's admission; the caller must hold the lifecycle lock. */
@@ -1459,14 +1793,17 @@ public final class CodingAgentSession implements AutoCloseable {
             if (runSource != null) {
                 runSource.cancel();
             }
+            if (commandSource != null) {
+                commandSource.cancel();
+            }
             if (running) {
                 agent.abort();
             }
-            deferRuntimeClose = historyOperation || summaryInProgress;
+            deferRuntimeClose = historyOperation || summaryInProgress || reloading;
         }
         if (deferRuntimeClose) {
             if (reloadExecutor != null) {
-                reloadExecutor.shutdown();
+                reloadExecutor.shutdownNow();
             }
             if (maintenanceExecutor != null) {
                 maintenanceExecutor.shutdown();
@@ -1476,7 +1813,7 @@ public final class CodingAgentSession implements AutoCloseable {
         Throwable failure = closeRuntimeResources(null, true);
         boolean closeManagerNow;
         synchronized (lifecycleLock) {
-            closeManagerNow = !running && !historyOperation;
+            closeManagerNow = !running && !historyOperation && !reloading;
         }
         if (closeManagerNow) {
             failure = closeManager(failure);
@@ -1493,6 +1830,16 @@ public final class CodingAgentSession implements AutoCloseable {
             agent.close();
         } catch (RuntimeException | Error closeFailure) {
             failure = combineFailures(failure, closeFailure);
+        }
+        if (extensionShutdown.compareAndSet(false, true)) {
+            try {
+                var shutdownCancellation = new CancellationSource();
+                extensionRunner.shutdown(
+                        id -> extensionContext(id, shutdownCancellation.signal()),
+                        this::emitExtensionDiagnostic).toCompletableFuture().join();
+            } catch (RuntimeException | Error shutdownFailure) {
+                failure = combineFailures(failure, unwrapCompletionFailure(shutdownFailure));
+            }
         }
         if (reloadExecutor != null) {
             reloadExecutor.shutdownNow();
@@ -1576,11 +1923,8 @@ public final class CodingAgentSession implements AutoCloseable {
             return CompletableFuture.completedFuture(null);
         }
         CodingAgentEvent productEvent = new CodingAgentEvent.RuntimeEvent(event);
-        var stage = eventSink.emit(productEvent);
-        if (stage == null) {
-            throw new IllegalStateException("coding event sink returned null stage");
-        }
-        return stage;
+        return extensionRunner.observe(productEvent, this::emitExtensionDiagnostic)
+                .thenCompose(ignored -> requireEventStage(eventSink.emit(productEvent)));
     }
 
     private static long usageTokens(Usage usage) {

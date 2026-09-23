@@ -1,6 +1,6 @@
 # coding-agent 模块知识库
 
-Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition root 所需的 `ai-providers`，提供 `CodingAgentSession`、显式设置/模型装配、Session 持久化、项目指令、编码工具、长会话压缩以及产品级 state/result/event。第六阶段已交付手动/阈值压缩、摘要检查点、单次溢出恢复和分支摘要；仍不包含 Extension 或 UI。
+Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition root 所需的 `ai-providers`，提供 `CodingAgentSession`、显式设置/模型装配、Session 持久化、项目指令、文本资源、显式 Java Extension、编码工具、长会话压缩以及产品级 state/result/event。仍不包含 UI、动态代码装载或应用启动入口。
 
 ## WHERE TO LOOK
 
@@ -18,6 +18,9 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 | 显式目录会话发现 | `SessionFiles.java` / `SessionListResult.java` / `SessionFileDiagnostic.java` |
 | System Prompt | `prompt/SystemPromptBuilder.java` |
 | 项目指令配置、加载与快照 | `context/ProjectContextConfig.java` / `context/ProjectContextLoader.java` / `context/ProjectContextSnapshot.java` |
+| Skill、模板、SYSTEM 与资源诊断 | `resource/` |
+| 显式 Java Extension 与命令 | `extension/` / `CustomizationConfig.java` |
+| 固定扩展消息及模型投影 | `message/CustomAgentMessage.java` / `message/ProductMessageProjector.java` |
 | 工具选择与授权 | `tool/CodingToolConfig.java` / `tool/CodingToolPolicy.java` |
 | 内置工具装配 | `BuiltInTools.java` / `CodingToolPolicyAdapter.java` |
 | 文件读取工具 | `tool/ReadTool.java` |
@@ -35,9 +38,11 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 | 第四阶段 Session 计划（已归档） | `../docs/plans/archived/coding-agent-phase-4-session-persistence.md` |
 | 第五阶段 Settings/Models/Credentials 计划（已归档） | `../docs/plans/archived/coding-agent-phase-5-settings-models-credentials.md` |
 | 第六阶段 Compaction 计划（已归档） | `../docs/plans/archived/coding-agent-phase-6-compaction.md` |
+| 第七阶段 Resource/Extension 计划（已归档） | `../docs/plans/archived/coding-agent-phase-7-resources-extensions.md` |
 
 ## PLANNING STATUS
 
+- 第七阶段 7A～7E 已完成：文本资源默认关闭，显式启用后按用户→已授权项目→显式路径稳定选择 Skill 与模板，并独立选择 SYSTEM/APPEND；`TEXT_RESOURCES` 授信不继承 legacy settings boolean。宿主显式注册的 Java Extension 固定贡献工具、命令、context transform 和观察/生命周期回调，不扫描或热替换 Java 代码。`custom` 与 `custom_message` 使用 Session version 1 的固定 JSON 信封，后者参与请求、分支与压缩，前者永不入模。`reloadResources()` 原子更新文本资源和完整 prompt，Java 实例及工具身份保持不变。
 - 第六阶段 6A～6E 已完成：Session version 1 增加 `compaction`/`branch_summary` Entry，请求视图按当前父链最后检查点重建；手动与阈值压缩使用无工具专用请求，结构化 `CONTEXT_OVERFLOW` 在一次产品操作内最多恢复一次；`branchWithSummary` 在生成成功后把摘要提交到目标节点。旧构造与默认设置保持自动压缩关闭，读取到既有摘要时仍应用其边界。
 
 - 第五阶段 5A～5D 已完成：用户配置目录始终显式；普通设置按内建/全局/授权项目/SDK 合并，项目授权精确绑定 real path；Provider 定义仅来自用户级文件或 SDK，凭证按 SDK/env/只读文件解析。新工厂区分 borrowed/owned Models；owned runtime 同时拥有并关闭 Provider 及其 `HttpClient`，borrowed Models 始终由调用方关闭。创建不猜目录首项，恢复仅在历史模型不可用时回退到不同的配置默认。model/thinking 切换复用 core idle admission，只有下一条真实完成消息才记录差异。Settings/trust 保存使用稳定旁路锁、短时 reservation、锁内重读与原子替换，不复用 Session 长期 writer。

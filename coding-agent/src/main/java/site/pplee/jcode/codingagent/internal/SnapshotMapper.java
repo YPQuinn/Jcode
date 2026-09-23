@@ -8,6 +8,7 @@ import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.codingagent.CodingAgentRunResult;
+import site.pplee.jcode.codingagent.message.CustomAgentMessage;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +27,11 @@ public final class SnapshotMapper {
         Objects.requireNonNull(message, "message must not be null");
         if (message instanceof StandardAgentMessage standard) {
             return StandardAgentMessage.of(message(standard.message()));
+        }
+        if (message instanceof CustomAgentMessage custom) {
+            return new CustomAgentMessage(
+                    custom.extensionId(), custom.customType(), custom.content(),
+                    custom.details(), custom.display(), custom.timestamp());
         }
         throw new IllegalArgumentException(
                 "unsupported product message type: " + message.getClass().getName());

@@ -85,11 +85,18 @@ public final class SessionEntries {
             case BranchSummaryEntry summary -> new BranchSummaryEntry(
                     summary.id(), summary.parentId(), summary.timestamp(), summary.fromId(),
                     summary.summary(), summary.summaryModel(), summary.usage(), summary.details());
+            case CustomEntry custom -> new CustomEntry(
+                    custom.id(), custom.parentId(), custom.timestamp(), custom.extensionId(),
+                    custom.customType(), custom.data());
+            case CustomMessageEntry custom -> new CustomMessageEntry(
+                    custom.id(), custom.parentId(), custom.timestamp(), custom.extensionId(),
+                    custom.customType(), custom.content(), custom.details(), custom.display());
         };
     }
 
     private static boolean isContextVisible(SessionEntry entry) {
-        return entry instanceof SessionMessageEntry || entry instanceof BranchSummaryEntry;
+        return entry instanceof SessionMessageEntry || entry instanceof CustomMessageEntry
+                || entry instanceof BranchSummaryEntry;
     }
 
     /** Return structural copies in source order. */

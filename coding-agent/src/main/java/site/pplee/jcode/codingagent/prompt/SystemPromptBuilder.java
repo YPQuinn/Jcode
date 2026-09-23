@@ -2,6 +2,7 @@ package site.pplee.jcode.codingagent.prompt;
 
 import site.pplee.jcode.ai.tool.ToolSpec;
 import site.pplee.jcode.codingagent.context.ProjectContextFile;
+import site.pplee.jcode.codingagent.resource.ResourceSnapshot;
 
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -87,6 +88,44 @@ public final class SystemPromptBuilder {
         return prompt.append("\n\nCurrent working directory: ")
                 .append(workingDirectory.toAbsolutePath().normalize())
                 .toString();
+    }
+
+    /** Build from one combined resource snapshot and the actual built-in reading capabilities. */
+    public static String build(
+            Path workingDirectory,
+            List<ToolSpec> tools,
+            ResourceSnapshot resources,
+            boolean readToolEnabled,
+            boolean bashToolEnabled
+    ) {
+        Objects.requireNonNull(resources, "resources must not be null");
+        String prompt = build(
+                workingDirectory,
+                tools,
+                resources.systemPrompt().orElse(null),
+                resources.appendSystemPrompt().orElse(null),
+                resources.projectContext().files());
+        var visible = resources.skills().stream()
+                .filter(skill -> !skill.disableModelInvocation())
+                .toList();
+        if (visible.isEmpty() || (!readToolEnabled && !bashToolEnabled)) {
+            return prompt;
+        }
+        var catalog = new StringBuilder("\n\n<available_skills>\n");
+        catalog.append(readToolEnabled
+                ? "Use the built-in read tool to load a skill body before following it.\n"
+                : "Use the built-in bash tool to read a skill body before following it.\n");
+        catalog.append("Resolve referenced relative paths from the skill base directory.\n");
+        for (var skill : visible) {
+            catalog.append("<skill name=\"").append(escapeAttribute(skill.name()))
+                    .append("\" description=\"").append(escapeAttribute(skill.description()))
+                    .append("\" location=\"").append(escapeAttribute(skill.filePath().toString()))
+                    .append("\" base_dir=\"").append(escapeAttribute(skill.baseDirectory().toString()))
+                    .append("\"/>\n");
+        }
+        catalog.append("</available_skills>");
+        int cwd = prompt.lastIndexOf("\n\nCurrent working directory:");
+        return cwd < 0 ? prompt + catalog : prompt.substring(0, cwd) + catalog + prompt.substring(cwd);
     }
 
     private static String escapeAttribute(String value) {

@@ -33,7 +33,13 @@ public final class ProjectTrustStore {
 
     /** Missing stores and missing keys produce UNSPECIFIED without creating files. */
     public LookupResult lookup(Path canonicalProject) {
+        return lookup(canonicalProject, ProjectTrustScope.SETTINGS);
+    }
+
+    /** Look up one independent scope; legacy booleans apply only to settings. */
+    public LookupResult lookup(Path canonicalProject, ProjectTrustScope scope) {
         Objects.requireNonNull(canonicalProject, "canonicalProject must not be null");
+        Objects.requireNonNull(scope, "scope must not be null");
         var project = realPathOrNormalized(canonicalProject);
         var diagnostics = new ArrayList<SettingsDiagnostic>();
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
@@ -67,21 +73,25 @@ public final class ProjectTrustStore {
                 throw new IOException("trust store must contain only an object field named projects");
             }
             var projects = root.get("projects");
-            var decisions = projects.elements();
-            while (decisions.hasNext()) {
-                if (!decisions.next().isBoolean()) {
-                    throw new IOException("project trust decision must be boolean");
-                }
-            }
+            validateProjects(projects);
             var value = projects.get(project.toString());
             if (value == null) {
                 return new LookupResult(ProjectTrustDecision.UNSPECIFIED, diagnostics);
             }
-            if (!value.isBoolean()) {
-                throw new IOException("project trust decision must be boolean");
+            if (value.isBoolean()) {
+                if (scope != ProjectTrustScope.SETTINGS) {
+                    return new LookupResult(ProjectTrustDecision.UNSPECIFIED, diagnostics);
+                }
+                return new LookupResult(
+                        value.booleanValue() ? ProjectTrustDecision.ALLOW : ProjectTrustDecision.DENY,
+                        diagnostics);
+            }
+            var scoped = value.get(scope.jsonField());
+            if (scoped == null) {
+                return new LookupResult(ProjectTrustDecision.UNSPECIFIED, diagnostics);
             }
             return new LookupResult(
-                    value.booleanValue() ? ProjectTrustDecision.ALLOW : ProjectTrustDecision.DENY,
+                    scoped.booleanValue() ? ProjectTrustDecision.ALLOW : ProjectTrustDecision.DENY,
                     diagnostics);
         } catch (IOException | RuntimeException failure) {
             diagnostics.add(SettingsDiagnostic.of(
@@ -97,22 +107,46 @@ public final class ProjectTrustStore {
             Path projectDirectory,
             ProjectTrustDecision decision
     ) throws IOException {
+        return remember(projectDirectory, ProjectTrustScope.SETTINGS, decision);
+    }
+
+    /** Persist one scope while preserving every other decision for the project. */
+    public SettingsSaveResult remember(
+            Path projectDirectory,
+            ProjectTrustScope scope,
+            ProjectTrustDecision decision
+    ) throws IOException {
         if (decision == null || decision == ProjectTrustDecision.UNSPECIFIED) {
             throw new IllegalArgumentException("remember requires ALLOW or DENY");
         }
+        Objects.requireNonNull(scope, "scope must not be null");
         Path project = Objects.requireNonNull(
                 projectDirectory, "projectDirectory must not be null").toRealPath();
         requireOutsideProject(project);
         requireSafeExistingStore();
         ConfigFileUpdater.update(file, objectMapper, true, root -> {
             var projects = projectsObject(root);
-            projects.put(project.toString(), decision == ProjectTrustDecision.ALLOW);
+            var existing = projects.get(project.toString());
+            var scoped = objectMapper.createObjectNode();
+            if (existing != null && existing.isBoolean()) {
+                scoped.put(ProjectTrustScope.SETTINGS.jsonField(), existing.booleanValue());
+            } else if (existing != null) {
+                existing.fields().forEachRemaining(field -> scoped.set(field.getKey(), field.getValue()));
+            }
+            scoped.put(scope.jsonField(), decision == ProjectTrustDecision.ALLOW);
+            projects.set(project.toString(), scoped);
         });
         return new SettingsSaveResult(file, true);
     }
 
     /** Remove the exact project's saved decision. */
     public SettingsSaveResult remove(Path projectDirectory) throws IOException {
+        return remove(projectDirectory, ProjectTrustScope.SETTINGS);
+    }
+
+    /** Remove one scope without discarding another saved scope. */
+    public SettingsSaveResult remove(Path projectDirectory, ProjectTrustScope scope) throws IOException {
+        Objects.requireNonNull(scope, "scope must not be null");
         Path project = Objects.requireNonNull(
                 projectDirectory, "projectDirectory must not be null").toRealPath();
         requireOutsideProject(project);
@@ -120,8 +154,24 @@ public final class ProjectTrustStore {
             return new SettingsSaveResult(file, false);
         }
         requireSafeExistingStore();
-        ConfigFileUpdater.update(file, objectMapper, true, root ->
-                projectsObject(root).remove(project.toString()));
+        ConfigFileUpdater.update(file, objectMapper, true, root -> {
+            var projects = projectsObject(root);
+            var existing = projects.get(project.toString());
+            if (existing == null) {
+                return;
+            }
+            if (existing.isBoolean()) {
+                if (scope == ProjectTrustScope.SETTINGS) {
+                    projects.remove(project.toString());
+                }
+                return;
+            }
+            var scoped = (com.fasterxml.jackson.databind.node.ObjectNode) existing;
+            scoped.remove(scope.jsonField());
+            if (scoped.isEmpty()) {
+                projects.remove(project.toString());
+            }
+        });
         return new SettingsSaveResult(file, true);
     }
 
@@ -135,14 +185,30 @@ public final class ProjectTrustStore {
                 instanceof com.fasterxml.jackson.databind.node.ObjectNode projects)) {
             throw new IOException("trust store must contain only an object field named projects");
         }
+        validateProjects(projects);
+        return projects;
+    }
+
+    private static void validateProjects(JsonNode projects) throws IOException {
         var fields = projects.fields();
         while (fields.hasNext()) {
-            var entry = fields.next();
-            if (!entry.getValue().isBoolean()) {
-                throw new IOException("project trust decision must be boolean");
+            var value = fields.next().getValue();
+            if (value.isBoolean()) {
+                continue;
+            }
+            if (!value.isObject()) {
+                throw new IOException("project trust decision must be boolean or scoped object");
+            }
+            var scopes = value.fields();
+            while (scopes.hasNext()) {
+                var scope = scopes.next();
+                if (!(scope.getKey().equals(ProjectTrustScope.SETTINGS.jsonField())
+                        || scope.getKey().equals(ProjectTrustScope.TEXT_RESOURCES.jsonField()))
+                        || !scope.getValue().isBoolean()) {
+                    throw new IOException("project trust scope must be a known boolean field");
+                }
             }
         }
-        return projects;
     }
 
     private void requireOutsideProject(Path project) throws IOException {
