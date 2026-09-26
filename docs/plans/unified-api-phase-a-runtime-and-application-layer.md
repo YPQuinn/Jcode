@@ -5,7 +5,7 @@
 | 依据 | [总体架构 v0.1](unified-api-and-multi-end-architecture-design_v0.1.md)，重点为 §4.4、§5、§7、§9、§13、§14 |
 | 代码基线 | `YPQuinn/Jcode@6db4fd35a3a6cf5b7780fde036f4e80ef82a933c` |
 | 日期 | 2026-09-26 |
-| 状态 | 实施计划；本文不表示 Java 改造或测试已经完成 |
+| 状态 | A1、A2 已实现并通过全仓校验；A3 待实施 |
 | 本轮约束 | 不过度设计，不引入复杂安全机制；优先复用现有代码 |
 
 ## 1. 本阶段只解决什么
@@ -177,7 +177,7 @@ A1 通过后再新增 `jcode-protocol` 和 `jcode-app`；暂不建立 `jcode-ser
 
 以产品 stage 的最终结算为应用终态输入，同时检查 result.stopReason 和异常。内部 RunCompleted 不再单独发布另一份 run.finished。cancelRequested 只记录请求，不能覆盖实际完成或错误。
 
-在 ManagedSession 的同一状态提交中更新输入结果、Run 结果、应用占用和最终事件，再接纳下一命令。外部回调一律锁外执行，避免回调同步发起下一操作而自锁。
+在 ManagedSession 的同一状态提交中确认内核输入结算、更新 Run 结果并释放应用占用，再接纳下一命令。A2 的终态观察由 `settled(runId)` 返回；A3 接入订阅时，最终事件也必须在这一状态边界登记。外部回调一律锁外执行，避免回调同步发起下一操作而自锁。
 
 可先实现创建/打开会话、启动/查询 Run、提交/查询输入、指定 Run 取消、空闲关闭。分支、模型、资源等管理接口不在本批次铺开；其已有内核能力保留，A1 的分支回归仍需通过。
 
@@ -257,7 +257,7 @@ mvn verify
 
 - [x] 编制本阶段实施计划，明确最小范围和验收边界。
 - [x] A1：完成严格输入内核闭环及 K01–K08 中的内核测试。
-- [ ] A2：完成最小应用服务和 P01–P02。
+- [x] A2：完成最小应用服务和 P01–P02。
 - [ ] A3：完成进程内恢复、订阅与审批，验证 P03–P04。
 - [ ] 阶段 B：独立服务与两个客户端进程的真实退出/接管演练。
 
@@ -266,6 +266,8 @@ mvn verify
 ## 9. 核验依据
 
 本计划最初基于静态源码核对编制。A1 完成后，严格模式的 8 项测试与旧兼容测试均通过，已运行全仓 `mvn verify`。总体设计的目标状态与现有兼容行为应继续分开标注。
+
+A2 新增 `jcode-protocol` 与 `jcode-app`，使用进程内命令占位、固定容量回执和产品 stage 终态结算；协议 JSON 往返、并发重试、冷文件并发打开、取消与结果映射由模块测试覆盖。A2 不发布订阅事件；`settled(runId)` 提供单次终态观察，A3 再为订阅增加有界事件信封和重放。A2 完成后已运行全仓 `mvn verify`。
 
 - [总体架构设计](https://github.com/YPQuinn/Jcode/blob/6db4fd35a3a6cf5b7780fde036f4e80ef82a933c/docs/plans/unified-api-and-multi-end-architecture-design_v0.1.md)：§4.4、§5、§7、§9、§13、§14。
 - [CodingAgentSession.java](https://github.com/YPQuinn/Jcode/blob/6db4fd35a3a6cf5b7780fde036f4e80ef82a933c/coding-agent/src/main/java/site/pplee/jcode/codingagent/CodingAgentSession.java)：startRun、finishRun、finishRunFinal、emitProductEvent、branch/resetLeaf。

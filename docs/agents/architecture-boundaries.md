@@ -8,6 +8,8 @@ Maven Enforcer 保护以下边界：
 - `ai-providers` 仅依赖 `ai`。
 - `agent-core` 仅依赖 `ai`，不得依赖 provider 或产品/UI 模块。
 - `coding-agent` 依赖 `ai`、`agent-core` 与 `ai-providers`；具体 Provider 依赖只用于产品 composition root，wire/adaptor 逻辑仍留在 `ai-providers`。
+- `jcode-protocol` 不依赖 Jcode 运行时模块或传输框架；只定义稳定的首批命令与查询值类型。
+- `jcode-app` 依赖 `jcode-protocol`、`coding-agent` 与 provider-neutral `ai`；不直接依赖 `agent-core` 或 `ai-providers`，也不拥有模型循环与历史写入。
 - 依赖必须无环，并从产品层指向内核层。
 
 `message`、`event`、`tool`、`queue`、`concurrent` 是源码包，不是 Maven 模块。不要创建泛化的 `common` 或 `shared` 模块，也不要维护相互竞争的 `Message`、`Content` 或 `StopReason` 定义。

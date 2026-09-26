@@ -29,4 +29,6 @@ Jcode 是一个 Java 21 多模块 Maven monorepo，包含 provider-neutral 模�
 - [`ai-providers`](ai-providers/AGENTS.md)
 - [`agent-core`](agent-core/AGENTS.md)
 - [`coding-agent`](coding-agent/AGENTS.md)
+- [`jcode-protocol`](jcode-protocol/AGENTS.md)
+- [`jcode-app`](jcode-app/AGENTS.md)
 - [架构文档写作](docs/architecture/AGENTS.md)

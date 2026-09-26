@@ -13,6 +13,8 @@
         <module>ai-providers</module>
         <module>agent-core</module>
         <module>coding-agent</module>
+        <module>jcode-protocol</module>
+        <module>jcode-app</module>
     </modules>
 
     <properties>
@@ -31,6 +33,7 @@
         <jcode.ai-providers.version>${project.version}</jcode.ai-providers.version>
         <jcode.agent-core.version>${project.version}</jcode.agent-core.version>
         <jcode.coding-agent.version>${project.version}</jcode.coding-agent.version>
+        <jcode.protocol.version>${project.version}</jcode.protocol.version>
     </properties>
 
     <dependencyManagement>
@@ -59,6 +62,11 @@
                 <groupId>site.pplee</groupId>
                 <artifactId>coding-agent</artifactId>
                 <version>${jcode.coding-agent.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>site.pplee</groupId>
+                <artifactId>jcode-protocol</artifactId>
+                <version>${jcode.protocol.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.projectlombok</groupId>
