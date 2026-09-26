@@ -214,7 +214,8 @@ public final class CodingAgentSessionFactory {
                 options.projectContext(),
                 settings.settings().compaction(),
                 runtime.profiles(),
-                options.customization());
+                options.customization(),
+                options.inputDeliveryMode());
     }
 
     private static void closeTools(BuiltInTools.ToolSet tools, Throwable failure) {

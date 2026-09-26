@@ -25,6 +25,7 @@
 - 宿主 sink 或 writer 导致 run 基础设施失败时，下一次产品操作前必须用已接纳分支重新对齐 Agent transcript。writer 失败不接纳该消息，并封锁同一 owner 的后续追加；后续 `prompt()`、`continueRun()` 和元信息修改必须在调用 provider 或生成新 Entry id 前拒绝。
 - `continueRun()` 只允许当前分支非空且 leaf 是 user/tool-result 时调用，复用 core continuation，不伪造 user 消息。open 使用调用方当前模型、工具和配置；历史 model/thinking 仅描述历史，并在下一条完成消息前按需追加当前配置元信息。
 - `branch()`、`resetLeaf()`、`setName()` 与 `setLabel()` 是 idle-only 历史操作，与 run、reload 和 close 互斥。branch/reset 只移动当前 leaf 并替换 Agent transcript，不删除旧 Entry、不执行工具、不回滚工作区，且保留 steering/follow-up 队列。
+- 上述队列保留仅描述旧嵌入模式。严格模式的每条补充输入绑定一个产品 runId，Session 保存输入记录，core 只用显式来源领取；领取不代表应用，`MessageCompleted` 的 inputId 在正式历史追加成功后才与 entryId 一起确认。目标 Run 最终结束前关闭接纳，剩余输入结算为未应用或待核对，不跨 Run 注入。内部上下文溢出恢复仍属同一产品 Run。取消指定 runId 只作用于该范围，取消请求可与正常完成并存。
 - 取消调用方拿到的观察 Future 不取消或释放已接纳运行。close 时若运行或历史追加仍在途，Session writer、文件锁及 Session 自建 Provider 必须保留到对应完成回调结束。
 - model/thinking 切换是 idle-only 产品操作，与 run、reload、历史操作和 close 互斥；core 在接纳 run 时原子捕获该对参数。切换本身不写历史或默认设置，下一条真实完成消息前按实际 run 参数追加必要差异。
 - Compaction 与 branch summary 只追加专用 Entry，不删除或改写原消息。raw transcript 不包含 synthetic summary；每次请求视图按当前父链最后一个适用检查点、保留边界和后续内容重建。

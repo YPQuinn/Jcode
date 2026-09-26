@@ -36,7 +36,8 @@ public record CodingAgentConfig(
         ProjectContextConfig projectContext,
         CompactionSettings compaction,
         Map<ModelRef, ModelProfile> modelProfiles,
-        CustomizationConfig customization
+        CustomizationConfig customization,
+        InputDeliveryMode inputDeliveryMode
 ) {
     public CodingAgentConfig {
         Objects.requireNonNull(workingDirectory, "workingDirectory must not be null");
@@ -58,6 +59,34 @@ public record CodingAgentConfig(
         compaction = compaction == null ? CompactionSettings.disabled() : compaction;
         modelProfiles = Map.copyOf(modelProfiles == null ? Map.of() : modelProfiles);
         customization = customization == null ? CustomizationConfig.none() : customization;
+        inputDeliveryMode = inputDeliveryMode == null
+                ? InputDeliveryMode.LEGACY_SESSION_QUEUE : inputDeliveryMode;
+    }
+
+    /** Compatibility constructor preserving the original session-queue semantics. */
+    public CodingAgentConfig(
+            Path workingDirectory,
+            ModelRef model,
+            ModelClient modelClient,
+            ObjectMapper objectMapper,
+            ThinkingLevel thinkingLevel,
+            ModelRequestOptions requestOptions,
+            QueueMode steeringMode,
+            QueueMode followUpMode,
+            String customSystemPrompt,
+            String appendSystemPrompt,
+            CodingAgentEventSink eventSink,
+            Clock clock,
+            CodingToolConfig tools,
+            ProjectContextConfig projectContext,
+            CompactionSettings compaction,
+            Map<ModelRef, ModelProfile> modelProfiles,
+            CustomizationConfig customization
+    ) {
+        this(workingDirectory, model, modelClient, objectMapper, thinkingLevel, requestOptions,
+                steeringMode, followUpMode, customSystemPrompt, appendSystemPrompt, eventSink,
+                clock, tools, projectContext, compaction, modelProfiles, customization,
+                InputDeliveryMode.LEGACY_SESSION_QUEUE);
     }
 
     /** Compatibility constructor retaining the pre-customization configuration shape. */
@@ -168,6 +197,7 @@ public record CodingAgentConfig(
                 + ", projectContext=" + projectContext
                 + ", compaction=" + compaction
                 + ", modelProfiles=" + modelProfiles.size()
-                + ", customization=" + customization + ']';
+                + ", customization=" + customization
+                + ", inputDeliveryMode=" + inputDeliveryMode + ']';
     }
 }

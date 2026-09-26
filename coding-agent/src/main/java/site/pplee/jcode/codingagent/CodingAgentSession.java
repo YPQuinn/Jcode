@@ -14,6 +14,7 @@ import site.pplee.jcode.ai.tool.ToolSpec;
 import site.pplee.jcode.agentcore.Agent;
 import site.pplee.jcode.agentcore.AgentConfig;
 import site.pplee.jcode.agentcore.AgentContext;
+import site.pplee.jcode.agentcore.LoopResult;
 import site.pplee.jcode.agentcore.concurrent.CancellationSource;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
@@ -107,6 +108,8 @@ public final class CodingAgentSession implements AutoCloseable {
     private final site.pplee.jcode.ai.client.ModelClient modelClient;
     private final ModelRequestOptions requestOptions;
     private final CodingAgentEventSink productEventSink;
+    private final InputDeliveryMode inputDeliveryMode;
+    private final RunInputState runInputs;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
     private final AutoCloseable ownedResource;
     private final AtomicBoolean ownedResourceClosed = new AtomicBoolean();
@@ -135,6 +138,7 @@ public final class CodingAgentSession implements AutoCloseable {
     private CancellationSource reloadSource;
     private CancellationSource summarySource;
     private CancellationSource runSource;
+    private CompletionStage<LoopResult> currentCoreStage;
     private CancellationSource commandSource;
     private UsageObservation usageObservation;
     private volatile Throwable pendingInfrastructureFailure;
@@ -220,6 +224,10 @@ public final class CodingAgentSession implements AutoCloseable {
         this.modelClient = config.modelClient();
         this.requestOptions = config.requestOptions();
         this.productEventSink = config.eventSink();
+        this.inputDeliveryMode = config.inputDeliveryMode();
+        this.runInputs = inputDeliveryMode == InputDeliveryMode.RUN_SCOPED
+                ? new RunInputState(lifecycleLock, config.steeringMode(), config.followUpMode())
+                : null;
         this.objectMapper = config.objectMapper();
         this.ownedResource = ownedResource;
         this.currentSelection = initialSelection == null
@@ -340,8 +348,17 @@ public final class CodingAgentSession implements AutoCloseable {
      * Cancelling the returned observation stage does not cancel the accepted run.
      */
     public CompletionStage<CodingAgentRunResult> prompt(String text) {
+        requireLegacyInputs();
         Message.User message = userMessage(text);
-        return startRun(() -> agent.prompt(message));
+        return startRun(null, () -> agent.prompt(message));
+    }
+
+    /** Start one strict product run with a caller-chosen identity. */
+    public CompletionStage<CodingAgentRunResult> prompt(String runId, String text) {
+        requireRunScopedInputs();
+        Message.User message = userMessage(text);
+        return startRun(runId, () -> agent.prompt(
+                message, runInputs.steeringSource(), runInputs.followUpSource()));
     }
 
     /**
@@ -349,7 +366,15 @@ public final class CodingAgentSession implements AutoCloseable {
      * Cancelling the returned observation stage does not cancel the accepted run.
      */
     public CompletionStage<CodingAgentRunResult> continueRun() {
-        return startRun(agent::continueRun);
+        requireLegacyInputs();
+        return startRun(null, agent::continueRun);
+    }
+
+    /** Continue from the current leaf within a new strict product run. */
+    public CompletionStage<CodingAgentRunResult> continueRun(String runId) {
+        requireRunScopedInputs();
+        return startRun(runId, () -> agent.continueRun(
+                runInputs.steeringSource(), runInputs.followUpSource()));
     }
 
     /** Execute one explicitly named extension command without implicitly invoking the model. */
@@ -1117,9 +1142,10 @@ public final class CodingAgentSession implements AutoCloseable {
     }
 
     private CompletionStage<CodingAgentRunResult> startRun(
-            java.util.function.Supplier<CompletionStage<site.pplee.jcode.agentcore.LoopResult>> starter
+            String runId,
+            java.util.function.Supplier<CompletionStage<LoopResult>> starter
     ) {
-        CompletionStage<site.pplee.jcode.agentcore.LoopResult> runtimeStage;
+        CompletionStage<LoopResult> runtimeStage;
         synchronized (lifecycleLock) {
             ensureOpen();
             if (running || reloading || historyOperation) {
@@ -1130,13 +1156,20 @@ public final class CodingAgentSession implements AutoCloseable {
             } catch (IOException failure) {
                 return CompletableFuture.failedFuture(failure);
             }
+            if (runInputs != null) {
+                runInputs.start(runId);
+            }
             running = true;
             runSource = new CancellationSource();
             attemptResults.clear();
             pendingInfrastructureFailure = null;
             try {
                 runtimeStage = starter.get();
+                currentCoreStage = runtimeStage;
             } catch (RuntimeException | Error failure) {
+                if (runInputs != null) {
+                    runInputs.finish("start_failed");
+                }
                 running = false;
                 runSource = null;
                 throw failure;
@@ -1195,7 +1228,10 @@ public final class CodingAgentSession implements AutoCloseable {
                     throw new CancellationException("coding-agent operation cancelled");
                 }
                 skipAutomaticCompactionOnce = true;
-                secondStage = agent.continueAfterFailure();
+                secondStage = runInputs == null ? agent.continueAfterFailure()
+                        : agent.continueAfterFailure(
+                                runInputs.steeringSource(), runInputs.followUpSource());
+                currentCoreStage = secondStage;
             }
             secondStage.whenComplete((second, secondFailure) -> {
                 if (secondFailure != null) {
@@ -1239,6 +1275,9 @@ public final class CodingAgentSession implements AutoCloseable {
         Throwable completionFailure = pendingInfrastructureFailure != null
                 ? pendingInfrastructureFailure
                 : directInfrastructureFailure != null ? directInfrastructureFailure : failure;
+        if (runInputs != null) {
+            runInputs.finish(completionFailure == null ? "run_finished" : "run_failed");
+        }
         if (completionFailure == null) {
             try {
                 emitEvent(new CodingAgentEvent.RunCompleted(productResult));
@@ -1259,6 +1298,7 @@ public final class CodingAgentSession implements AutoCloseable {
             running = false;
             summarySource = null;
             runSource = null;
+            currentCoreStage = null;
             closeManager = closed;
         }
         if (closeManager) {
@@ -1290,6 +1330,7 @@ public final class CodingAgentSession implements AutoCloseable {
 
     /** Queue a steering message while this session run is admitted. */
     public void steer(String text) {
+        requireLegacyInputs();
         Message.User message = userMessage(text);
         synchronized (lifecycleLock) {
             ensureMessageQueueOpen();
@@ -1299,6 +1340,7 @@ public final class CodingAgentSession implements AutoCloseable {
 
     /** Queue a follow-up message while this session run is admitted. */
     public void followUp(String text) {
+        requireLegacyInputs();
         Message.User message = userMessage(text);
         synchronized (lifecycleLock) {
             ensureMessageQueueOpen();
@@ -1306,10 +1348,63 @@ public final class CodingAgentSession implements AutoCloseable {
         }
     }
 
+    /** Admit one identified supplemental input to the active strict run. */
+    public InputRecord submitInput(InputRequest request) {
+        requireRunScopedInputs();
+        Objects.requireNonNull(request, "request must not be null");
+        Message.User message = userMessage(request.text());
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            return runInputs.submit(request, message);
+        }
+    }
+
+    /** Look up one strict input, including its history entry after application. */
+    public Optional<InputRecord> input(String inputId) {
+        requireRunScopedInputs();
+        return runInputs.input(inputId);
+    }
+
+    /** List strict inputs retained for a product run in admission order. */
+    public List<InputRecord> inputs(String runId) {
+        requireRunScopedInputs();
+        return runInputs.inputs(runId);
+    }
+
+    /** Cancel only the named active product run. */
+    public void abort(String runId) {
+        requireRunScopedInputs();
+        Objects.requireNonNull(runId, "runId must not be null");
+        CancellationSource capturedRun;
+        CancellationSource capturedSummary;
+        CompletionStage<LoopResult> capturedCore;
+        synchronized (lifecycleLock) {
+            if (!runInputs.isActive(runId)) {
+                return;
+            }
+            runInputs.closeAdmission(runId);
+            capturedRun = runSource;
+            capturedSummary = summarySource;
+            capturedCore = currentCoreStage;
+        }
+        if (capturedRun != null) {
+            capturedRun.cancel();
+        }
+        if (capturedSummary != null) {
+            capturedSummary.cancel();
+        }
+        if (capturedCore != null) {
+            agent.abort(capturedCore);
+        }
+    }
+
     /** Request cancellation of the current run or reload operation, if any. */
     public void abort() {
         synchronized (lifecycleLock) {
             if (running) {
+                if (runInputs != null) {
+                    runInputs.closeAdmission();
+                }
                 if (runSource != null) {
                     runSource.cancel();
                 }
@@ -1797,6 +1892,9 @@ public final class CodingAgentSession implements AutoCloseable {
             if (runSource != null) {
                 runSource.cancel();
             }
+            if (runInputs != null) {
+                runInputs.closeAdmission();
+            }
             if (commandSource != null) {
                 commandSource.cancel();
             }
@@ -1919,6 +2017,9 @@ public final class CodingAgentSession implements AutoCloseable {
                 var selection = currentSelection;
                 var entry = sessionManager.appendCompletedMessage(
                         standard, selection.selected(), selection.thinkingLevel());
+                if (completed.inputId() != null) {
+                    runInputs.applied(completed.inputId(), entry.id());
+                }
                 if (standard.message() instanceof Message.Assistant assistant) {
                     long usageTokens = usageTokens(assistant.usage());
                     if (!assistant.stopReason().isTerminalFailure() && usageTokens > 0) {
@@ -2081,6 +2182,18 @@ public final class CodingAgentSession implements AutoCloseable {
         ensureOpen();
         if (!running) {
             throw new IllegalStateException("coding-agent session is not running");
+        }
+    }
+
+    private void requireLegacyInputs() {
+        if (inputDeliveryMode != InputDeliveryMode.LEGACY_SESSION_QUEUE) {
+            throw new IllegalStateException("this session requires run-scoped input methods");
+        }
+    }
+
+    private void requireRunScopedInputs() {
+        if (inputDeliveryMode != InputDeliveryMode.RUN_SCOPED) {
+            throw new IllegalStateException("this session uses the legacy input queue");
         }
     }
 }

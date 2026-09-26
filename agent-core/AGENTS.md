@@ -24,7 +24,7 @@
 | Schema 校验 | `ToolSchemaValidator.java`（pkg-private，最小 type/required/properties） |
 | 事件投递 | `RunEventEmitter.java`（pkg-private per-run adapter：`void emit(AgentEvent)` 等待 sink 的 `CompletionStage` 完成后再返回；loop 和 `LoopToolUpdateSink` 唯一的事件投递出口） |
 | 生命周期事件 | `event/AgentEvent.java`（sealed，10 个 record：AgentStarted/TurnStarted/MessageStarted/MessageUpdated/MessageCompleted/ToolStarted/ToolUpdate/ToolCompleted/TurnCompleted/AgentCompleted） |
-| steering/follow-up | `queue/PendingMessageQueue.java`（ConcurrentLinkedQueue，`QueueMode` volatile） |
+| steering/follow-up | 旧接口使用 `queue/PendingMessageQueue.java`（ConcurrentLinkedQueue，`QueueMode` volatile）；显式来源可通过 `PendingMessageSource` 携带输入 ID 和应用回调 |
 | 取消 | `concurrent/CancellationSource.java`（`signal()` 返回私有 `SignalView`，不可 cast 回；`onCancellation` 在 `cancel()` 线程同步通知，listener 失败隔离） |
 | 消息桥接 | `message/StandardAgentMessage.java`（包装 `ai.Message` 进开放 `AgentMessage`） |
 | Context 投影 | `message/ContextTransformer.java`（异步 transform seam，默认 identity）→ `message/MessageProjector.java`（同步 project seam，默认 standard） |
@@ -43,6 +43,7 @@
 - `Agent` 持有 `Executors.newVirtualThreadPerTaskExecutor()`，实现 `AutoCloseable`；公开 API 返回 `CompletionStage`，内部 loop 在虚拟线程上顺序控制流。
 - 每个 `Agent` 同时最多一个 active run；run 接纳、`updateSystemPrompt()`、`updateModel()` 和 close 通过 admission lock 线性化，`close()` 协作式 abort + drain executor。`updateModel(model, thinking)` 仅在 idle 原子替换该对参数；run 接纳时在同一锁内捕获一次，worker 不再读取可变当前选择。
 - `updateSystemPrompt()` 与 `replaceMessages()` 仅在 idle 接纳，busy/closed 同步拒绝，并同步更新 `AgentContext` 与公开 `AgentState.context`。前者只替换 system prompt；后者防御性复制并原子替换完整消息列表。两者均保留 tools、pending queues 和错误快照，不调用模型、工具、hook、投影或事件 sink。
+- 显式 `PendingMessageSource` 只在传入它的 core run 内领取消息，core 不拥有产品 Run 身份。领取不等于应用；应用资格在 `MessageStarted` 前确认，`MessageCompleted` 携带可空输入 ID 供产品历史写入确认。开始事件失败时报告未开始，追加或完成事件失败时报告结果待核对。旧队列及旧方法仍保留跨 run 行为。
 - 阶段三 idle prompt 更新接入验收：本模块 204 个测试、全仓 762 个测试通过；`AgentTest` 与产品 reload/加载边界回归连续三轮通过。产品加载/取消/close 的资源生命周期仍由 `coding-agent` 持有，不扩展到 core。
 - 事件归约：`Agent` 内部包装用户 `AgentEventSink` 为归约 sink。归约器先 `reduceState(event)` 以 `AtomicReference<AgentState>` CAS 更新 `AgentState`，再委托用户 sink。用户 sink 看到事件时状态已完成归约。`AgentCompleted` 事件的 sink 完成前 loop 不返回（`emit().join()` 保证）。归约原子化不锁用户 sink；并行工具下 `ToolUpdate` 与生命周期事件可并发归约。
 - 流式消费：`AgentLoop.consumeStream()` 消费 `AssistantMessageStream`，在 `Start` 事件发 `MessageStarted`，在 delta 事件发 `MessageUpdated`，在 `Done`/`Error` 返回最终 `Message.Assistant`。partial 不进入 context；final 才 append。

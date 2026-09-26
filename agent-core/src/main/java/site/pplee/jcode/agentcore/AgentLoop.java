@@ -6,6 +6,7 @@ import site.pplee.jcode.agentcore.message.ContextTransformer;
 import site.pplee.jcode.agentcore.message.MessageProjector;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageSource;
+import site.pplee.jcode.agentcore.queue.PendingMessage;
 import site.pplee.jcode.agentcore.tool.AgentTool;
 import site.pplee.jcode.agentcore.tool.ToolExecutionResult;
 import site.pplee.jcode.agentcore.turn.NextTurnUpdate;
@@ -219,14 +220,28 @@ final class AgentLoop {
      * steering messages. Returns the new {@code firstTurn} (always false).
      */
     private boolean prepareTurn(LoopState state, RunEventEmitter events,
-                                 List<AgentMessage> pending, boolean firstTurn) {
+                                 List<ClaimedMessage> pending, boolean firstTurn) {
         if (!firstTurn) {
             events.emit(new AgentEvent.TurnStarted());
         }
-        for (var m : pending) {
-            events.emit(new AgentEvent.MessageStarted(m));
-            state.append(m);
-            events.emit(new AgentEvent.MessageCompleted(m));
+        for (var claim : pending) {
+            var message = claim.pending().message();
+            if (!claim.source().beginApply(claim.pending().inputId())) {
+                continue;
+            }
+            try {
+                events.emit(new AgentEvent.MessageStarted(message));
+            } catch (RuntimeException | Error failure) {
+                claim.source().applyNotStarted(claim.pending().inputId(), failure);
+                throw failure;
+            }
+            try {
+                state.append(message);
+                events.emit(new AgentEvent.MessageCompleted(message, claim.pending().inputId()));
+            } catch (RuntimeException | Error failure) {
+                claim.source().applyFailed(claim.pending().inputId(), failure);
+                throw failure;
+            }
         }
         return false;
     }
@@ -473,11 +488,11 @@ final class AgentLoop {
         return !outcomes.isEmpty() && !ToolCallExecutor.allTerminated(outcomes);
     }
 
-    private static List<AgentMessage> drainSteering(AgentLoopConfig config) {
+    private static List<ClaimedMessage> drainSteering(AgentLoopConfig config) {
         return drain(config.steeringMessages());
     }
 
-    private static List<AgentMessage> drainFollowUp(AgentLoopConfig config) {
+    private static List<ClaimedMessage> drainFollowUp(AgentLoopConfig config) {
         return drain(config.followUpMessages());
     }
 
@@ -523,9 +538,14 @@ final class AgentLoop {
                 .toList();
     }
 
-    private static List<AgentMessage> drain(PendingMessageSource source) {
-        var drained = source.drain();
-        return drained == null ? List.of() : drained;
+    private static List<ClaimedMessage> drain(PendingMessageSource source) {
+        var drained = source.drainPending();
+        return drained == null ? List.of() : drained.stream()
+                .map(message -> new ClaimedMessage(source, message))
+                .toList();
+    }
+
+    private record ClaimedMessage(PendingMessageSource source, PendingMessage pending) {
     }
 
     private static Message.Assistant abortedAssistant(String msg) {

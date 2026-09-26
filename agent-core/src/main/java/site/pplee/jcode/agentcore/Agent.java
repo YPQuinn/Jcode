@@ -6,6 +6,7 @@ import site.pplee.jcode.agentcore.event.AgentEventSink;
 import site.pplee.jcode.agentcore.message.AgentMessage;
 import site.pplee.jcode.agentcore.message.StandardAgentMessage;
 import site.pplee.jcode.agentcore.queue.PendingMessageQueue;
+import site.pplee.jcode.agentcore.queue.PendingMessageSource;
 import site.pplee.jcode.agentcore.queue.QueueMode;
 
 import site.pplee.jcode.ai.concurrent.CancellationSignal;
@@ -79,12 +80,30 @@ public final class Agent implements AutoCloseable {
     /** Start a new run with a user message; fails if a run is already active. */
     public CompletionStage<LoopResult> prompt(Message.User message) {
         Objects.requireNonNull(message, "message must not be null");
-        return submit(message, ContinueMode.NONE);
+        return submit(message, ContinueMode.NONE, steeringQueue, followUpQueue);
+    }
+
+    /** Start a run using explicitly supplied pending-message sources. */
+    public CompletionStage<LoopResult> prompt(
+            Message.User message,
+            PendingMessageSource steering,
+            PendingMessageSource followUp
+    ) {
+        Objects.requireNonNull(message, "message must not be null");
+        return submit(message, ContinueMode.NONE, steering, followUp);
     }
 
     /** Resume the loop from the current context; fails if the last message is an assistant. */
     public CompletionStage<LoopResult> continueRun() {
-        return submit(null, ContinueMode.NORMAL);
+        return submit(null, ContinueMode.NORMAL, steeringQueue, followUpQueue);
+    }
+
+    /** Continue using explicitly supplied pending-message sources. */
+    public CompletionStage<LoopResult> continueRun(
+            PendingMessageSource steering,
+            PendingMessageSource followUp
+    ) {
+        return submit(null, ContinueMode.NORMAL, steering, followUp);
     }
 
     /**
@@ -94,7 +113,15 @@ public final class Agent implements AutoCloseable {
      * classified failure is recoverable.
      */
     public CompletionStage<LoopResult> continueAfterFailure() {
-        return submit(null, ContinueMode.AFTER_FAILURE);
+        return submit(null, ContinueMode.AFTER_FAILURE, steeringQueue, followUpQueue);
+    }
+
+    /** Continue a failed attempt with the same product-owned pending-message sources. */
+    public CompletionStage<LoopResult> continueAfterFailure(
+            PendingMessageSource steering,
+            PendingMessageSource followUp
+    ) {
+        return submit(null, ContinueMode.AFTER_FAILURE, steering, followUp);
     }
 
     /** Enqueue a steering message injected before the next model call of the active run. */
@@ -111,6 +138,15 @@ public final class Agent implements AutoCloseable {
     public void abort() {
         var run = activeRun.get();
         if (run != null) {
+            run.source().cancel();
+        }
+    }
+
+    /** Cancel only the specified admitted core run; a later run is unaffected. */
+    public void abort(CompletionStage<LoopResult> admittedRun) {
+        Objects.requireNonNull(admittedRun, "admittedRun must not be null");
+        var run = activeRun.get();
+        if (run != null && run.future() == admittedRun) {
             run.source().cancel();
         }
     }
@@ -244,7 +280,14 @@ public final class Agent implements AutoCloseable {
         }
     }
 
-    private CompletableFuture<LoopResult> submit(Message.User message, ContinueMode continueMode) {
+    private CompletableFuture<LoopResult> submit(
+            Message.User message,
+            ContinueMode continueMode,
+            PendingMessageSource steering,
+            PendingMessageSource followUp
+    ) {
+        Objects.requireNonNull(steering, "steering must not be null");
+        Objects.requireNonNull(followUp, "followUp must not be null");
         var source = new CancellationSource();
         var future = new CompletableFuture<LoopResult>();
         var run = new ActiveRun(source, future);
@@ -259,7 +302,7 @@ public final class Agent implements AutoCloseable {
                 return future;
             }
             snapshot = context;
-            loopConfig = getLoopConfig();
+            loopConfig = getLoopConfig(steering, followUp);
         }
         if (continueMode != ContinueMode.NONE) {
             if (snapshot.messages().isEmpty()) {
@@ -360,7 +403,10 @@ public final class Agent implements AutoCloseable {
         }
     }
 
-    private AgentLoopConfig getLoopConfig() {
+    private AgentLoopConfig getLoopConfig(
+            PendingMessageSource steering,
+            PendingMessageSource followUp
+    ) {
         var reducerSink = new AgentEventSink() {
             @Override
             public CompletionStage<Void> emit(AgentEvent event) {
@@ -377,8 +423,8 @@ public final class Agent implements AutoCloseable {
                 config.toolExecution(),
                 config.beforeToolCall(),
                 config.afterToolCall(),
-                steeringQueue,
-                followUpQueue,
+                steering,
+                followUp,
                 new RunEventEmitter(reducerSink),
                 thinkingLevel,
                 config.prepareNextTurn(),

@@ -63,10 +63,14 @@ public sealed interface AgentEvent
         }
     }
 
-    /** A message was appended to the context. */
-    record MessageCompleted(AgentMessage message) implements AgentEvent {
+    /** A message was appended to the context; inputId is an optional source identity. */
+    record MessageCompleted(AgentMessage message, String inputId) implements AgentEvent {
         public MessageCompleted {
             Objects.requireNonNull(message, "message must not be null");
+        }
+
+        public MessageCompleted(AgentMessage message) {
+            this(message, null);
         }
     }
 

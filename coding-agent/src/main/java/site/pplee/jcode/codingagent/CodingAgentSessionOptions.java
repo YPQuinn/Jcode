@@ -45,6 +45,7 @@ public final class CodingAgentSessionOptions {
     private final boolean toolsExplicitlyConfigured;
     private final ProjectContextConfig projectContext;
     private final CustomizationConfig customization;
+    private final InputDeliveryMode inputDeliveryMode;
 
     private CodingAgentSessionOptions(Builder builder) {
         workingDirectory = builder.workingDirectory.toAbsolutePath().normalize();
@@ -73,6 +74,7 @@ public final class CodingAgentSessionOptions {
         customization = new CustomizationConfig(
                 configuredCustomization.resources().withUserConfigDirectory(userConfigDirectory),
                 configuredCustomization.extensions());
+        inputDeliveryMode = builder.inputDeliveryMode;
         if (borrowedModels != null
                 && (!providerDefinitions.isEmpty() || !credentials.isEmpty())) {
             throw new IllegalArgumentException(
@@ -160,6 +162,10 @@ public final class CodingAgentSessionOptions {
         return customization;
     }
 
+    public InputDeliveryMode inputDeliveryMode() {
+        return inputDeliveryMode;
+    }
+
     /** Builder that keeps every discovery source disabled until explicitly supplied. */
     public static final class Builder {
         private final Path workingDirectory;
@@ -181,6 +187,7 @@ public final class CodingAgentSessionOptions {
         private boolean toolsExplicitlyConfigured;
         private ProjectContextConfig projectContext = ProjectContextConfig.disabled();
         private CustomizationConfig customization = CustomizationConfig.none();
+        private InputDeliveryMode inputDeliveryMode = InputDeliveryMode.LEGACY_SESSION_QUEUE;
 
         private Builder(Path workingDirectory) {
             this.workingDirectory = Objects.requireNonNull(
@@ -271,6 +278,12 @@ public final class CodingAgentSessionOptions {
 
         public Builder customization(CustomizationConfig value) {
             customization = Objects.requireNonNull(value, "customization must not be null");
+            return this;
+        }
+
+        /** Select run-scoped input delivery for a session created by the factory. */
+        public Builder inputDeliveryMode(InputDeliveryMode value) {
+            inputDeliveryMode = Objects.requireNonNull(value, "inputDeliveryMode must not be null");
             return this;
         }
 

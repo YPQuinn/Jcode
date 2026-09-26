@@ -131,7 +131,8 @@ public final class SnapshotMapper {
                     new AgentEvent.MessageUpdated(
                             agentMessage(updated.message()), assistantEvent(updated.delta()));
             case AgentEvent.MessageCompleted completed ->
-                    new AgentEvent.MessageCompleted(agentMessage(completed.message()));
+                    new AgentEvent.MessageCompleted(
+                            agentMessage(completed.message()), completed.inputId());
             case AgentEvent.ToolStarted started ->
                     new AgentEvent.ToolStarted(toolCall(started.call()));
             case AgentEvent.ToolUpdate update ->
