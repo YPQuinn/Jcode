@@ -87,7 +87,7 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 - 事件 sink 保留 core backpressure；失败属于基础设施失败，不归一为 tool/model error。流式 sink 失败或返回 null stage 时，产品 stage 异常完成、状态清理、不发送成功完成事件，Session 可接受后续 prompt；底层负责取消在途 provider。
 - Session 的 admission lock 线性化 prompt/continue、project-context reload、branch/reset/name/label 与 close 接纳；文件发现和 Prompt 渲染必须在锁外，锁内仅复核并提交 core 操作与产品 snapshot。历史操作只允许 idle；取消调用方的观察 Future 不取消真实运行；close 不得在在途终结消息或元数据追加接纳前释放 writer。
 - `InputDeliveryMode.LEGACY_SESSION_QUEUE` 保留原嵌入接口：branch/reset 保留旧 steering/follow-up 队列，未 drain 消息可进入下一 run。`RUN_SCOPED` 使用带 runId 的 prompt/continue、带 inputId 的提交和指定 runId 的 abort；两套输入方法在同一 Session 中不可混用。严格模式的记录由 `RunInputState` 管理，同一 ID 的相同请求返回原记录，不同请求拒绝；最终产品 Run 结束前关闭接纳并结算未应用记录，内部溢出恢复沿用同一范围。
-- 严格输入仅在 `SessionManager.appendCompletedMessage` 成功返回后连同真实 entryId 标记已应用；历史结果不明时保留 `RECONCILIATION_REQUIRED`，历史已接纳后的观察失败不撤销应用。取消先于应用资格时不得开始提交，指定 runId 的取消不得影响后继运行。Run 完成 sink 背压期间不得接纳新的输入。
+- 严格输入仅在 `SessionManager.appendCompletedMessage` 成功返回后连同真实 entryId 标记已应用；历史结果不明时保留 `RECONCILIATION_REQUIRED`，历史已接纳后的观察失败不撤销应用。取消先于应用资格时不得开始提交，指定 runId 的取消不得影响后继运行。指定 Run 的取消意图与输入接纳关闭须在同一生命周期锁内登记，内部恢复启动前检查该意图；取消信号通知在锁外执行。Run 完成 sink 背压期间不得接纳新的输入。
 - Javadoc 使用英文；生产代码、POM 和配置中不得提及参考项目名称。
 
 ## ANTI-PATTERNS

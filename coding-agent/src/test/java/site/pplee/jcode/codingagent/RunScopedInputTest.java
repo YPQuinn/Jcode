@@ -18,13 +18,17 @@ import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.agentcore.event.AgentEvent;
 import site.pplee.jcode.codingagent.event.CodingAgentEvent;
 import site.pplee.jcode.codingagent.event.CodingAgentEventSink;
+import site.pplee.jcode.codingagent.compaction.SummaryCause;
 import site.pplee.jcode.codingagent.session.SessionMessageEntry;
 import site.pplee.jcode.codingagent.settings.CompactionSettings;
 import site.pplee.jcode.codingagent.model.ModelProfile;
 import site.pplee.jcode.codingagent.support.ScriptedModelClient;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
@@ -295,11 +299,171 @@ class RunScopedInputTest {
         }
     }
 
+    @Test
+    void cancellationMarkedBeforeDeliveryPreventsStartingOverflowRecovery() throws Exception {
+        var summaryReached = new CountDownLatch(1);
+        var summaryGate = new CompletableFuture<Void>();
+        var overflow = new Message.Assistant(
+                List.of(), StopReason.ERROR, "context exceeded", Usage.zero(), Instant.EPOCH,
+                MODEL, ResponseMetadata.of(null, null, null, ModelFailureKind.CONTEXT_OVERFLOW));
+        var client = new ScriptedModelClient(
+                request -> assistant(StopReason.STOP),
+                request -> overflow,
+                request -> assistant(StopReason.STOP),
+                request -> {
+                    throw new AssertionError("recovery must not start after cancellation was admitted");
+                });
+        var sink = (CodingAgentEventSink) event -> {
+            if (event instanceof CodingAgentEvent.SummaryCompleted completed
+                    && completed.cause() == SummaryCause.OVERFLOW) {
+                summaryReached.countDown();
+                return summaryGate;
+            }
+            return CompletableFuture.completedStage(null);
+        };
+        var config = new CodingAgentConfig(
+                directory, MODEL, client, new ObjectMapper(), null, null, null, null,
+                null, null, sink, null, null, null,
+                new CompactionSettings(true, 1_000, 10),
+                Map.of(MODEL, new ModelProfile(OptionalInt.of(10_000), OptionalInt.of(2_000))),
+                null, InputDeliveryMode.RUN_SCOPED);
+        try (var session = new CodingAgentSession(config)) {
+            session.prompt("run-a", "establish context ".repeat(80)).toCompletableFuture().join();
+            var run = session.prompt("run-b", "overflow now");
+            assertTrue(summaryReached.await(5, TimeUnit.SECONDS));
+
+            // Hold signal delivery after the real cancellation admission path captured the old stage.
+            Runnable deliverCancellation = session.requestRunCancellation("run-b");
+            assertThrows(IllegalStateException.class, () -> session.submitInput(
+                    new InputRequest("late", "run-b", InputMode.FOLLOW_UP, "too late")));
+            summaryGate.complete(null);
+            assertThrows(CompletionException.class, () -> run.toCompletableFuture()
+                    .orTimeout(5, TimeUnit.SECONDS).join());
+            deliverCancellation.run();
+            assertEquals(3, client.requests().size());
+            assertFalse(session.isRunning());
+        }
+    }
+
+    @Test
+    void fileBackedStrictInputKeepsConfirmedEntryAfterReopen() throws Exception {
+        var client = new ControlledClient();
+        var config = strictConfig(client, CodingAgentEventSink.noop());
+        Path file;
+        String appliedEntryId;
+        try (var session = CodingAgentSession.create(config, directory.resolve("sessions"))) {
+            file = session.sessionFile().orElseThrow();
+            var run = session.prompt("run-a", "first");
+            assertTrue(client.started.await(5, TimeUnit.SECONDS));
+            session.submitInput(new InputRequest("follow", "run-a", InputMode.FOLLOW_UP, "persist me"));
+            client.complete(StopReason.STOP);
+            run.toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join();
+            var record = session.input("follow").orElseThrow();
+            assertEquals(InputStatus.APPLIED_TO_CONTEXT, record.status());
+            appliedEntryId = record.entryId();
+            assertEquals("persist me", storedUserText(session, appliedEntryId));
+        }
+        try (var reopened = CodingAgentSession.open(config, file)) {
+            assertEquals("persist me", storedUserText(reopened, appliedEntryId));
+        }
+    }
+
+    @Test
+    void failedFileAppendLeavesInputForReconciliationWithoutRedelivery() throws Exception {
+        var client = new ControlledClient();
+        var config = strictConfig(client, CodingAgentEventSink.noop());
+        Path file;
+        try (var created = CodingAgentSession.create(config, directory.resolve("sessions"))) {
+            file = created.sessionFile().orElseThrow();
+        }
+        var manager = SessionManager.openFileBacked(file, Clock.systemUTC(),
+                () -> java.util.UUID.randomUUID().toString(), channel -> source -> {
+                    if (remainingText(source).contains("writer failure input")) {
+                        var prefix = source.duplicate();
+                        prefix.limit(prefix.position() + Math.min(8, prefix.remaining()));
+                        channel.write(prefix);
+                        throw new IOException("injected append failure");
+                    }
+                    return channel.write(source);
+                });
+        try (var session = new CodingAgentSession(
+                config, site.pplee.jcode.codingagent.context.ProjectContextLoader::load, manager)) {
+            var run = session.prompt("run-a", "first");
+            assertTrue(client.started.await(5, TimeUnit.SECONDS));
+            session.submitInput(new InputRequest(
+                    "failed", "run-a", InputMode.FOLLOW_UP, "writer failure input"));
+            client.complete(StopReason.STOP);
+            assertThrows(CompletionException.class, () -> run.toCompletableFuture()
+                    .orTimeout(5, TimeUnit.SECONDS).join());
+            var record = session.input("failed").orElseThrow();
+            assertEquals(InputStatus.RECONCILIATION_REQUIRED, record.status());
+            assertNull(record.entryId());
+            assertTrue(session.inputs("run-a").stream()
+                    .noneMatch(input -> input.status() == InputStatus.PENDING));
+            assertEquals(1, client.requests.size());
+            assertThrows(CompletionException.class, () -> session.prompt("run-b", "second")
+                    .toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join());
+            assertEquals(1, client.requests.size());
+        }
+    }
+
+    @Test
+    void cancellationDuringFileCommitKeepsSuccessfullyWrittenInputApplied() throws Exception {
+        var client = new ControlledClient();
+        var config = strictConfig(client, CodingAgentEventSink.noop());
+        Path file;
+        try (var created = CodingAgentSession.create(config, directory.resolve("sessions"))) {
+            file = created.sessionFile().orElseThrow();
+        }
+        var commitReached = new CountDownLatch(1);
+        var commitGate = new CountDownLatch(1);
+        var manager = SessionManager.openFileBacked(file, Clock.systemUTC(),
+                () -> java.util.UUID.randomUUID().toString(), channel -> source -> {
+                    if (remainingText(source).contains("commit gate input")) {
+                        commitReached.countDown();
+                        await(commitGate);
+                    }
+                    return channel.write(source);
+                });
+        try (var session = new CodingAgentSession(
+                config, site.pplee.jcode.codingagent.context.ProjectContextLoader::load, manager)) {
+            var run = session.prompt("run-a", "first");
+            assertTrue(client.started.await(5, TimeUnit.SECONDS));
+            session.submitInput(new InputRequest(
+                    "committing", "run-a", InputMode.FOLLOW_UP, "commit gate input"));
+            client.complete(StopReason.STOP);
+            assertTrue(commitReached.await(5, TimeUnit.SECONDS));
+            assertEquals(InputStatus.PENDING, session.input("committing").orElseThrow().status());
+            session.abort("run-a");
+            commitGate.countDown();
+            run.toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join();
+            var record = session.input("committing").orElseThrow();
+            assertEquals(InputStatus.APPLIED_TO_CONTEXT, record.status());
+            assertEquals("commit gate input", storedUserText(session, record.entryId()));
+        } finally {
+            commitGate.countDown();
+        }
+    }
+
     private CodingAgentSession strictSession(ModelClient client, CodingAgentEventSink sink) {
-        return new CodingAgentSession(new CodingAgentConfig(
+        return new CodingAgentSession(strictConfig(client, sink));
+    }
+
+    private CodingAgentConfig strictConfig(ModelClient client, CodingAgentEventSink sink) {
+        return new CodingAgentConfig(
                 directory, MODEL, client, new ObjectMapper(), null, null, null, null,
                 null, null, sink, null, null, null, null, Map.of(), null,
-                InputDeliveryMode.RUN_SCOPED));
+                InputDeliveryMode.RUN_SCOPED);
+    }
+
+    private static String storedUserText(CodingAgentSession session, String entryId) {
+        var entry = assertInstanceOf(SessionMessageEntry.class,
+                session.history().entry(entryId).orElseThrow());
+        return text(assertInstanceOf(Message.User.class, entry.message().message()));
+    }
+
+    private static String remainingText(java.nio.ByteBuffer source) {
+        return StandardCharsets.UTF_8.decode(source.asReadOnlyBuffer()).toString();
     }
 
     private static String lastUserText(ModelRequest request) {

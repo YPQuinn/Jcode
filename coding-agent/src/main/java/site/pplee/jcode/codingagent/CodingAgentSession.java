@@ -145,6 +145,7 @@ public final class CodingAgentSession implements AutoCloseable {
     private boolean skipAutomaticCompactionOnce;
     private final List<CodingAgentRunResult> attemptResults = new ArrayList<>();
     private boolean running;
+    private boolean runCancellationRequested;
     private boolean reloading;
     private boolean historyOperation;
     private boolean summaryInProgress;
@@ -1160,6 +1161,7 @@ public final class CodingAgentSession implements AutoCloseable {
                 runInputs.start(runId);
             }
             running = true;
+            runCancellationRequested = false;
             runSource = new CancellationSource();
             attemptResults.clear();
             pendingInfrastructureFailure = null;
@@ -1171,6 +1173,7 @@ public final class CodingAgentSession implements AutoCloseable {
                     runInputs.finish("start_failed");
                 }
                 running = false;
+                runCancellationRequested = false;
                 runSource = null;
                 throw failure;
             }
@@ -1208,7 +1211,7 @@ public final class CodingAgentSession implements AutoCloseable {
         boolean cancelled;
         synchronized (lifecycleLock) {
             operationSource = runSource;
-            cancelled = operationSource == null
+            cancelled = runCancellationRequested || operationSource == null
                     || operationSource.signal().isCancelled() || closed;
             if (!cancelled) {
                 summarySource = operationSource;
@@ -1224,7 +1227,7 @@ public final class CodingAgentSession implements AutoCloseable {
             synchronized (lifecycleLock) {
                 operationSource.signal().throwIfCancelled();
                 ensureOpen();
-                if (runSource != operationSource) {
+                if (runCancellationRequested || runSource != operationSource) {
                     throw new CancellationException("coding-agent operation cancelled");
                 }
                 skipAutomaticCompactionOnce = true;
@@ -1256,13 +1259,19 @@ public final class CodingAgentSession implements AutoCloseable {
             if (infrastructure == null) {
                 infrastructure = infrastructureFailure(reportedFailure);
             }
-            if (operationSource.signal().isCancelled()) {
+            if (isRunCancellationRequested(operationSource)) {
                 finishRunFinal(null, new CancellationException("overflow recovery cancelled"), productStage);
             } else if (infrastructure != null) {
                 finishRunFinal(null, infrastructure, productStage);
             } else {
                 finishRunFinal(first, null, productStage);
             }
+        }
+    }
+
+    private boolean isRunCancellationRequested(CancellationSource source) {
+        synchronized (lifecycleLock) {
+            return runCancellationRequested || source.signal().isCancelled() || closed;
         }
     }
 
@@ -1373,6 +1382,11 @@ public final class CodingAgentSession implements AutoCloseable {
 
     /** Cancel only the named active product run. */
     public void abort(String runId) {
+        requestRunCancellation(runId).run();
+    }
+
+    /** Split admission from signal delivery so no listener runs under the lifecycle lock. */
+    Runnable requestRunCancellation(String runId) {
         requireRunScopedInputs();
         Objects.requireNonNull(runId, "runId must not be null");
         CancellationSource capturedRun;
@@ -1380,28 +1394,32 @@ public final class CodingAgentSession implements AutoCloseable {
         CompletionStage<LoopResult> capturedCore;
         synchronized (lifecycleLock) {
             if (!runInputs.isActive(runId)) {
-                return;
+                return () -> { };
             }
             runInputs.closeAdmission(runId);
+            runCancellationRequested = true;
             capturedRun = runSource;
             capturedSummary = summarySource;
             capturedCore = currentCoreStage;
         }
-        if (capturedRun != null) {
-            capturedRun.cancel();
-        }
-        if (capturedSummary != null) {
-            capturedSummary.cancel();
-        }
-        if (capturedCore != null) {
-            agent.abort(capturedCore);
-        }
+        return () -> {
+            if (capturedRun != null) {
+                capturedRun.cancel();
+            }
+            if (capturedSummary != null) {
+                capturedSummary.cancel();
+            }
+            if (capturedCore != null) {
+                agent.abort(capturedCore);
+            }
+        };
     }
 
     /** Request cancellation of the current run or reload operation, if any. */
     public void abort() {
         synchronized (lifecycleLock) {
             if (running) {
+                runCancellationRequested = true;
                 if (runInputs != null) {
                     runInputs.closeAdmission();
                 }
