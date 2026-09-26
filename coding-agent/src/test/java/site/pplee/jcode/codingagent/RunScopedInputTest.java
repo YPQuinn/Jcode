@@ -32,6 +32,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
@@ -337,8 +338,9 @@ class RunScopedInputTest {
             assertThrows(IllegalStateException.class, () -> session.submitInput(
                     new InputRequest("late", "run-b", InputMode.FOLLOW_UP, "too late")));
             summaryGate.complete(null);
-            assertThrows(CompletionException.class, () -> run.toCompletableFuture()
+            var failure = assertThrows(CompletionException.class, () -> run.toCompletableFuture()
                     .orTimeout(5, TimeUnit.SECONDS).join());
+            assertInstanceOf(CancellationException.class, failure.getCause());
             deliverCancellation.run();
             assertEquals(3, client.requests().size());
             assertFalse(session.isRunning());
