@@ -22,6 +22,16 @@ public final class SessionRegistry {
     private final Map<String, ManagedSession> byId = new LinkedHashMap<>();
     private final Map<Path, CompletableFuture<ManagedSession>> byFile = new LinkedHashMap<>();
     private final Map<String, Path> pathById = new LinkedHashMap<>();
+    private final Runnable beforeCloseCleanup;
+
+    public SessionRegistry() {
+        this(() -> { });
+    }
+
+    /** Package-private handoff point for deterministic close/open interleaving tests. */
+    SessionRegistry(Runnable beforeCloseCleanup) {
+        this.beforeCloseCleanup = Objects.requireNonNull(beforeCloseCleanup);
+    }
 
     /** Create a file-backed strict Session and register its long-lived writer. */
     public ManagedSession create(CodingAgentConfig config, Path sessionDirectory) throws IOException {
@@ -69,6 +79,9 @@ public final class SessionRegistry {
         if (!owner) {
             try {
                 var managed = opening.join();
+                if (managed.isClosed()) {
+                    throw new ApiException(ErrorCode.SESSION_CLOSED, "session is closing");
+                }
                 if (!managed.workingDirectory().equals(config.workingDirectory())) {
                     throw new ApiException(ErrorCode.STATE_CONFLICT,
                             "managed session uses a different working directory");
@@ -131,12 +144,25 @@ public final class SessionRegistry {
                 throw new ApiException(ErrorCode.NOT_FOUND, "session is not managed");
             }
         }
-        session.closeIdle();
-        synchronized (lock) {
-            byId.remove(sessionId, session);
-            var file = pathById.remove(sessionId);
-            if (file != null) {
-                byFile.remove(file);
+        boolean closeAccepted = true;
+        try {
+            session.closeIdle();
+        } catch (ApiException rejection) {
+            if (rejection.error().code() == ErrorCode.SESSION_BUSY) {
+                closeAccepted = false;
+            }
+            throw rejection;
+        } finally {
+            if (closeAccepted && session.isClosed()) {
+                beforeCloseCleanup.run();
+                synchronized (lock) {
+                    if (byId.remove(sessionId, session)) {
+                        var file = pathById.remove(sessionId);
+                        if (file != null) {
+                            byFile.remove(file);
+                        }
+                    }
+                }
             }
         }
     }

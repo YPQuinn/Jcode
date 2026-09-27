@@ -14,7 +14,11 @@ import site.pplee.jcode.ai.model.ModelRef;
 import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.codingagent.CodingAgentConfig;
+import site.pplee.jcode.codingagent.CustomizationConfig;
 import site.pplee.jcode.codingagent.InputDeliveryMode;
+import site.pplee.jcode.codingagent.extension.CodingExtension;
+import site.pplee.jcode.codingagent.extension.ExtensionContext;
+import site.pplee.jcode.codingagent.resource.ResourceConfig;
 import site.pplee.jcode.protocol.ErrorCode;
 import site.pplee.jcode.protocol.RunCommand;
 import site.pplee.jcode.protocol.RunKind;
@@ -24,8 +28,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -89,10 +95,95 @@ class SessionRegistryTest {
         }
     }
 
+    @Test
+    void lateCloseCleanupDoesNotRemoveAReopenedSession() throws Exception {
+        var cleanupCalls = new AtomicInteger();
+        var firstCleanup = new CountDownLatch(1);
+        var secondCleanup = new CountDownLatch(1);
+        var releaseFirst = new CountDownLatch(1);
+        var releaseSecond = new CountDownLatch(1);
+        var registry = new SessionRegistry(() -> {
+            if (cleanupCalls.incrementAndGet() == 1) {
+                firstCleanup.countDown();
+                await(releaseFirst);
+            } else {
+                secondCleanup.countDown();
+                await(releaseSecond);
+            }
+        });
+        var config = config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED);
+        var original = registry.create(config, directory.resolve("sessions"));
+        String id = original.sessionId();
+        Path file = original.sessionFile().orElseThrow();
+        var firstClose = CompletableFuture.runAsync(() -> registry.close(id));
+        try {
+            await(firstCleanup);
+            var lateClose = CompletableFuture.runAsync(() -> registry.close(id));
+            await(secondCleanup);
+            assertEquals(ErrorCode.SESSION_CLOSED, assertThrows(ApiException.class,
+                    () -> registry.open(config, file)).error().code());
+            releaseFirst.countDown();
+            firstClose.orTimeout(5, TimeUnit.SECONDS).join();
+
+            var reopened = registry.open(config, file);
+            assertNotSame(original, reopened);
+            releaseSecond.countDown();
+            lateClose.orTimeout(5, TimeUnit.SECONDS).join();
+
+            assertSame(reopened, registry.find(id).orElseThrow());
+            assertSame(reopened, registry.open(config, file));
+            registry.close(id);
+        } finally {
+            releaseFirst.countDown();
+            releaseSecond.countDown();
+            firstClose.orTimeout(5, TimeUnit.SECONDS).join();
+        }
+    }
+
+    @Test
+    void failedCloseReportsFailureAndDoesNotCacheClosedSession() throws Exception {
+        var closeFailure = new IllegalStateException("injected shutdown failure");
+        CodingExtension extension = new CodingExtension() {
+            @Override
+            public String id() {
+                return "failing-shutdown";
+            }
+
+            @Override
+            public CompletionStage<Void> onSessionShutdown(ExtensionContext context) {
+                return CompletableFuture.failedStage(closeFailure);
+            }
+        };
+        var customization = new CustomizationConfig(ResourceConfig.disabled(), List.of(extension));
+        var registry = new SessionRegistry();
+        var original = registry.create(
+                config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED, customization),
+                directory.resolve("sessions"));
+        String id = original.sessionId();
+        Path file = original.sessionFile().orElseThrow();
+
+        var reported = assertThrows(IllegalStateException.class, () -> registry.close(id));
+        assertSame(closeFailure, reported);
+        assertTrue(registry.find(id).isEmpty());
+        var reopened = registry.open(config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED), file);
+        assertNotSame(original, reopened);
+        assertSame(reopened, registry.open(
+                config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED), file));
+        registry.close(id);
+    }
+
     private CodingAgentConfig config(ModelClient client, InputDeliveryMode mode) {
+        return config(client, mode, null);
+    }
+
+    private CodingAgentConfig config(
+            ModelClient client,
+            InputDeliveryMode mode,
+            CustomizationConfig customization
+    ) {
         return new CodingAgentConfig(directory, MODEL, client, new ObjectMapper(),
                 null, null, null, null, null, null, null, null,
-                null, null, null, Map.of(), null, mode);
+                null, null, null, Map.of(), customization, mode);
     }
 
     private static ManagedSession open(SessionRegistry registry, CodingAgentConfig config, Path file) {
