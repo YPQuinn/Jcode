@@ -24,6 +24,7 @@ import site.pplee.jcode.protocol.RunCommand;
 import site.pplee.jcode.protocol.RunKind;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -149,6 +150,91 @@ class SessionRegistryTest {
     void busyErrorFromShutdownStillRemovesClosedSession() throws Exception {
         assertFailedCloseDoesNotCache(new ApiException(
                 ErrorCode.SESSION_BUSY, "injected shutdown failure"));
+    }
+
+    @Test
+    void creationFinishingAfterShutdownClosesItsWriterWithoutRegistration() throws Exception {
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var registry = new SessionRegistry(() -> { }, () -> {
+            entered.countDown();
+            await(release);
+        });
+        var config = config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED);
+        Path sessions = directory.resolve("sessions");
+        var creation = CompletableFuture.supplyAsync(() -> {
+            try {
+                registry.create(config, sessions);
+                return null;
+            } catch (Exception failure) {
+                return failure;
+            }
+        });
+        try {
+            await(entered);
+            Path file;
+            try (var files = Files.list(sessions)) {
+                file = files.filter(path -> path.toString().endsWith(".jsonl"))
+                        .findFirst().orElseThrow();
+            }
+            registry.beginShutdown();
+            assertTrue(registry.managedSessions().isEmpty());
+            release.countDown();
+            assertEquals(ErrorCode.SESSION_CLOSED, assertInstanceOf(ApiException.class,
+                    creation.orTimeout(5, TimeUnit.SECONDS).join()).error().code());
+            assertTrue(registry.managedSessions().isEmpty());
+
+            var fresh = new SessionRegistry();
+            var reopened = fresh.open(config, file);
+            fresh.close(reopened.sessionId());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void openingFinishingAfterShutdownClosesItsWriterAndWakesWaiters() throws Exception {
+        var config = config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED);
+        var seed = new SessionRegistry();
+        var original = seed.create(config, directory.resolve("sessions"));
+        Path file = original.sessionFile().orElseThrow();
+        seed.close(original.sessionId());
+
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var registry = new SessionRegistry(() -> { }, () -> {
+            entered.countDown();
+            await(release);
+        });
+        var opening = CompletableFuture.supplyAsync(() -> openFailure(registry, config, file));
+        try {
+            await(entered);
+            var waiter = CompletableFuture.supplyAsync(() -> openFailure(registry, config, file));
+            registry.beginShutdown();
+            assertTrue(registry.managedSessions().isEmpty());
+            release.countDown();
+            assertEquals(ErrorCode.SESSION_CLOSED, assertInstanceOf(ApiException.class,
+                    opening.orTimeout(5, TimeUnit.SECONDS).join()).error().code());
+            assertEquals(ErrorCode.SESSION_CLOSED, assertInstanceOf(ApiException.class,
+                    waiter.orTimeout(5, TimeUnit.SECONDS).join()).error().code());
+            assertTrue(registry.managedSessions().isEmpty());
+
+            var fresh = new SessionRegistry();
+            var reopened = fresh.open(config, file);
+            fresh.close(reopened.sessionId());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    private static Throwable openFailure(
+            SessionRegistry registry, CodingAgentConfig config, Path file) {
+        try {
+            registry.open(config, file);
+            return null;
+        } catch (Exception failure) {
+            return failure;
+        }
     }
 
     private void assertFailedCloseDoesNotCache(RuntimeException closeFailure) throws Exception {

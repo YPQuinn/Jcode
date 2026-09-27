@@ -148,6 +148,34 @@ class ServerProcessIT {
         }
     }
 
+    @Test
+    void failedSameJvmStartDoesNotReleaseTheOwnersProcessLock() throws Exception {
+        Path workspace = Files.createDirectory(directory.resolve("workspace"));
+        Path data = directory.resolve("data");
+        Path configFile = writeConfig("owner.json", data, workspace, 0);
+        var config = ServerConfig.load(configFile, new ObjectMapper());
+        try (var owner = JcodeServer.start(config)) {
+            assertThrows(IOException.class, () -> JcodeServer.start(config));
+            Process competitor = launch(configFile);
+            try {
+                assertTrue(competitor.waitFor(5, TimeUnit.SECONDS));
+                assertNotEquals(0, competitor.exitValue());
+            } finally {
+                destroy(competitor);
+            }
+        }
+
+        Process successor = launch(configFile);
+        try {
+            var ready = ready(successor);
+            assertEquals(202, stop(ready.endpoint(),
+                    Files.readString(data.resolve("service.token")).strip()).statusCode());
+            assertTrue(successor.waitFor(5, TimeUnit.SECONDS));
+        } finally {
+            destroy(successor);
+        }
+    }
+
     private Path writeConfig(String name, Path data, Path workspace, int port)
             throws IOException {
         Path file = directory.resolve(name);

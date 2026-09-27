@@ -29,16 +29,23 @@ public final class SessionRegistry {
     private final Map<Path, CompletableFuture<ManagedSession>> byFile = new LinkedHashMap<>();
     private final Map<String, Path> pathById = new LinkedHashMap<>();
     private final Runnable beforeCloseCleanup;
+    private final Runnable beforeRegistration;
     private int pendingCreations;
     private volatile boolean stopping;
 
     public SessionRegistry() {
-        this(() -> { });
+        this(() -> { }, () -> { });
     }
 
     /** Package-private handoff point for deterministic close/open interleaving tests. */
     SessionRegistry(Runnable beforeCloseCleanup) {
+        this(beforeCloseCleanup, () -> { });
+    }
+
+    /** Package-private construction boundary for stop/register interleaving tests. */
+    SessionRegistry(Runnable beforeCloseCleanup, Runnable beforeRegistration) {
         this.beforeCloseCleanup = Objects.requireNonNull(beforeCloseCleanup);
+        this.beforeRegistration = Objects.requireNonNull(beforeRegistration);
     }
 
     /** Create a file-backed strict Session and register its long-lived writer. */
@@ -96,7 +103,9 @@ public final class SessionRegistry {
                     admissionLock, () -> stopping);
             holder.set(managed);
             Path file = core.sessionFile().orElseThrow().toRealPath();
+            beforeRegistration.run();
             synchronized (lock) {
+                requireAccepting();
                 if (byId.putIfAbsent(managed.sessionId(), managed) != null) {
                     throw new ApiException(ErrorCode.STATE_CONFLICT,
                             "session identity is already managed");
@@ -200,7 +209,9 @@ public final class SessionRegistry {
             var managed = new ManagedSession(core, approvals,
                     admissionLock, () -> stopping);
             holder.set(managed);
+            beforeRegistration.run();
             synchronized (lock) {
+                requireAccepting();
                 var existing = byId.putIfAbsent(managed.sessionId(), managed);
                 if (existing != null) {
                     throw new ApiException(ErrorCode.STATE_CONFLICT, "session identity is already managed");

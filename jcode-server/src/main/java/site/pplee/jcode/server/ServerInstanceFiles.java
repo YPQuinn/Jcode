@@ -16,6 +16,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 
@@ -23,6 +24,7 @@ import java.util.UUID;
 final class ServerInstanceFiles implements AutoCloseable {
     private static final Set<PosixFilePermission> OWNER_ONLY = Set.of(
             PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
+    private static final Set<Path> OWNED_DIRECTORIES = new HashSet<>();
 
     private final ObjectMapper mapper;
     private final Path directory;
@@ -45,6 +47,21 @@ final class ServerInstanceFiles implements AutoCloseable {
             throws IOException {
         Files.createDirectories(requestedDirectory);
         Path directory = requestedDirectory.toRealPath();
+        synchronized (OWNED_DIRECTORIES) {
+            if (!OWNED_DIRECTORIES.add(directory)) {
+                throw new IOException("another server owns this data directory");
+            }
+        }
+        try {
+            return acquireReserved(directory, mapper);
+        } catch (IOException | RuntimeException | Error failure) {
+            releaseDirectory(directory);
+            throw failure;
+        }
+    }
+
+    private static ServerInstanceFiles acquireReserved(Path directory, ObjectMapper mapper)
+            throws IOException {
         var channel = FileChannel.open(directory.resolve("server.lock"),
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE);
         FileLock lock;
@@ -119,39 +136,49 @@ final class ServerInstanceFiles implements AutoCloseable {
             return;
         }
         closed = true;
-        IOException failure = null;
         try {
-            Path runtime = runtimeFile();
-            if (Files.isRegularFile(runtime, LinkOption.NOFOLLOW_LINKS)
-                    && Files.size(runtime) <= 4_096
-                    && instanceId.equals(mapper.readTree(runtime.toFile())
-                            .path("instanceId").asText())) {
-                Files.delete(runtime);
+            IOException failure = null;
+            try {
+                Path runtime = runtimeFile();
+                if (Files.isRegularFile(runtime, LinkOption.NOFOLLOW_LINKS)
+                        && Files.size(runtime) <= 4_096
+                        && instanceId.equals(mapper.readTree(runtime.toFile())
+                                .path("instanceId").asText())) {
+                    Files.delete(runtime);
+                }
+            } catch (IOException | RuntimeException problem) {
+                failure = problem instanceof IOException io
+                        ? io : new IOException("runtime descriptor cleanup failed", problem);
             }
-        } catch (IOException | RuntimeException problem) {
-            failure = problem instanceof IOException io
-                    ? io : new IOException("runtime descriptor cleanup failed", problem);
-        }
-        try {
-            lock.release();
-        } catch (IOException problem) {
-            if (failure == null) {
-                failure = problem;
-            } else {
-                failure.addSuppressed(problem);
+            try {
+                lock.release();
+            } catch (IOException problem) {
+                if (failure == null) {
+                    failure = problem;
+                } else {
+                    failure.addSuppressed(problem);
+                }
             }
-        }
-        try {
-            lockChannel.close();
-        } catch (IOException problem) {
-            if (failure == null) {
-                failure = problem;
-            } else {
-                failure.addSuppressed(problem);
+            try {
+                lockChannel.close();
+            } catch (IOException problem) {
+                if (failure == null) {
+                    failure = problem;
+                } else {
+                    failure.addSuppressed(problem);
+                }
             }
+            if (failure != null) {
+                throw failure;
+            }
+        } finally {
+            releaseDirectory(directory);
         }
-        if (failure != null) {
-            throw failure;
+    }
+
+    private static void releaseDirectory(Path directory) {
+        synchronized (OWNED_DIRECTORIES) {
+            OWNED_DIRECTORIES.remove(directory);
         }
     }
 

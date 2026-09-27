@@ -28,6 +28,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -42,18 +43,21 @@ public final class JcodeServer implements AutoCloseable {
     private final ExecutorService requests;
     private final ObjectMapper mapper;
     private final URI endpoint;
+    private final Consumer<HttpExchange> beforeStopResponse;
     private final AtomicBoolean closing = new AtomicBoolean();
     private final CountDownLatch terminated = new CountDownLatch(1);
 
     private JcodeServer(ServerConfig config, SessionRegistry sessions,
             ServerInstanceFiles instance, HttpServer http,
-            ExecutorService requests, ObjectMapper mapper) {
+            ExecutorService requests, ObjectMapper mapper,
+            Consumer<HttpExchange> beforeStopResponse) {
         this.config = config;
         this.sessions = sessions;
         this.instance = instance;
         this.http = http;
         this.requests = requests;
         this.mapper = mapper;
+        this.beforeStopResponse = beforeStopResponse;
         this.endpoint = URI.create("http://127.0.0.1:" + http.getAddress().getPort());
     }
 
@@ -63,8 +67,15 @@ public final class JcodeServer implements AutoCloseable {
 
     /** Testable host entry with an explicitly owned application registry. */
     static JcodeServer start(ServerConfig config, SessionRegistry sessions) throws IOException {
+        return start(config, sessions, exchange -> { });
+    }
+
+    /** Package-private response boundary for deterministic disconnect tests. */
+    static JcodeServer start(ServerConfig config, SessionRegistry sessions,
+            Consumer<HttpExchange> beforeStopResponse) throws IOException {
         Objects.requireNonNull(config);
         Objects.requireNonNull(sessions);
+        Objects.requireNonNull(beforeStopResponse);
         var mapper = new ObjectMapper();
         var instance = ServerInstanceFiles.acquire(config.dataDirectory(), mapper);
         HttpServer http = null;
@@ -74,7 +85,8 @@ public final class JcodeServer implements AutoCloseable {
                     InetAddress.getByName("127.0.0.1"), config.port()), 0);
             requests = Executors.newVirtualThreadPerTaskExecutor();
             http.setExecutor(requests);
-            var server = new JcodeServer(config, sessions, instance, http, requests, mapper);
+            var server = new JcodeServer(config, sessions, instance, http, requests, mapper,
+                    beforeStopResponse);
             http.createContext("/", server::handle);
             http.start();
             instance.publish(server.endpoint.toString());
@@ -291,8 +303,9 @@ public final class JcodeServer implements AutoCloseable {
                             "server has active work or is already stopping"));
                     return;
                 }
-                json(exchange, 202, new StopAccepted("stopping"));
                 stopAccepted = true;
+                beforeStopResponse.accept(exchange);
+                json(exchange, 202, new StopAccepted("stopping"));
                 return;
             }
             json(exchange, 404, new ApiError(ErrorCode.NOT_FOUND, "route was not found"));

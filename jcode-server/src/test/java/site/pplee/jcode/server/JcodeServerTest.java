@@ -15,6 +15,7 @@ import site.pplee.jcode.ai.stream.AssistantMessageEvent;
 import site.pplee.jcode.ai.stream.AssistantMessageStream;
 import site.pplee.jcode.codingagent.CodingAgentConfig;
 import site.pplee.jcode.codingagent.InputDeliveryMode;
+import site.pplee.jcode.app.SessionRegistry;
 import site.pplee.jcode.protocol.RunCommand;
 import site.pplee.jcode.protocol.RunKind;
 
@@ -127,6 +128,22 @@ class JcodeServerTest {
             assertEquals(202, request(server.endpoint(), "POST", "/v1/server/stop",
                     token, null).statusCode());
             awaitStop(server);
+        }
+    }
+
+    @Test
+    void acceptedStopClosesServerEvenWhenResponseCannotBeWritten() throws Exception {
+        var config = config(directory.resolve("data"), 0);
+        try (var server = JcodeServer.start(config, new SessionRegistry(), exchange ->
+                exchange.close())) {
+            String token = Files.readString(server.tokenFile()).strip();
+            assertThrows(IOException.class, () -> request(server.endpoint(), "POST",
+                    "/v1/server/stop", token, null));
+            awaitStop(server);
+            assertFalse(Files.exists(config.dataDirectory().resolve("runtime.json")));
+        }
+        try (var restarted = JcodeServer.start(config)) {
+            assertTrue(Files.exists(config.dataDirectory().resolve("runtime.json")));
         }
     }
 
