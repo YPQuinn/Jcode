@@ -1,17 +1,34 @@
 package site.pplee.jcode.app;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import site.pplee.jcode.ai.concurrent.CancellationSignal;
 import site.pplee.jcode.ai.message.Content;
+import site.pplee.jcode.codingagent.CodingAgentConfig;
 import site.pplee.jcode.codingagent.CodingAgentRunResult;
 import site.pplee.jcode.codingagent.CodingAgentSession;
 import site.pplee.jcode.codingagent.InputRecord;
 import site.pplee.jcode.codingagent.InputRequest;
+import site.pplee.jcode.codingagent.event.CodingAgentDisplayEvent;
+import site.pplee.jcode.codingagent.event.CodingAgentEvent;
+import site.pplee.jcode.codingagent.event.CodingAgentEventSink;
+import site.pplee.jcode.codingagent.tool.CodingToolConfig;
+import site.pplee.jcode.codingagent.tool.CodingToolPolicy;
+import site.pplee.jcode.codingagent.tool.CodingToolRequest;
+import site.pplee.jcode.protocol.ApprovalCommand;
+import site.pplee.jcode.protocol.ApprovalView;
 import site.pplee.jcode.protocol.ErrorCode;
+import site.pplee.jcode.protocol.EventCursor;
+import site.pplee.jcode.protocol.HistoryView;
 import site.pplee.jcode.protocol.InputCommand;
 import site.pplee.jcode.protocol.InputView;
+import site.pplee.jcode.protocol.MessageView;
 import site.pplee.jcode.protocol.RunCommand;
 import site.pplee.jcode.protocol.RunKind;
 import site.pplee.jcode.protocol.RunStatus;
 import site.pplee.jcode.protocol.RunView;
+import site.pplee.jcode.protocol.SessionSnapshot;
+import site.pplee.jcode.protocol.ToolStatus;
+import site.pplee.jcode.protocol.ToolView;
 
 import java.nio.file.Path;
 import java.util.Iterator;
@@ -20,31 +37,82 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** In-process owner of one strict Session's command identities and run results. */
 public final class ManagedSession {
     /** Maximum retained command receipts per managed session. Terminal receipts expire oldest first. */
     public static final int MAX_RETAINED_COMMANDS = 1_024;
     private static final int MAX_RESULT_TEXT_CHARS = 16_384;
+    private static final int MAX_TOOL_OUTPUT_CHARS = 8_192;
 
     private final Object lock = new Object();
     private final CodingAgentSession core;
     private final String sessionId;
+    private final SessionFeed feed;
+    private final ApprovalCoordinator approvals;
     private final Map<CommandKey, CommandEntry> commands = new LinkedHashMap<>();
     private final Map<String, RunEntry> runs = new LinkedHashMap<>();
     private final Map<String, InputEntry> inputs = new LinkedHashMap<>();
     private RunEntry activeRun;
+    private String currentMessageId;
     private int pendingInputAdmissions;
     private CompletableFuture<Void> closing;
     private boolean closed;
 
-    ManagedSession(CodingAgentSession core) {
+    ManagedSession(CodingAgentSession core, ApprovalSettings approvalSettings) {
         this.core = Objects.requireNonNull(core, "core must not be null");
         this.sessionId = core.history().header().id().toString();
+        this.feed = new SessionFeed(lock, new ObjectMapper());
+        feed.attach(sessionId, core.history().currentEntryId().orElse(null));
+        this.approvals = new ApprovalCoordinator(lock, feed, sessionId, approvalSettings);
+    }
+
+    static CodingAgentConfig instrument(
+            CodingAgentConfig config,
+            AtomicReference<ManagedSession> holder,
+            ApprovalSettings approvals
+    ) {
+        CodingAgentEventSink sink = event -> {
+            var managed = holder.get();
+            if (managed != null) {
+                managed.onCoreEvent(event);
+            }
+            return config.eventSink().emit(event);
+        };
+        CodingToolPolicy policy = (request, cancellation) -> {
+            var previous = config.tools().policy().evaluate(request, cancellation);
+            if (previous == null) {
+                return null;
+            }
+            return previous.thenCompose(decision -> {
+                if (!(decision instanceof CodingToolPolicy.Decision.Allow)
+                        || !approvals.requires(request.toolName())) {
+                    return CompletableFuture.completedStage(decision);
+                }
+                var managed = holder.get();
+                if (managed == null) {
+                    return CompletableFuture.failedStage(
+                            new IllegalStateException("approval owner is not ready"));
+                }
+                return managed.requestApproval(request, cancellation);
+            });
+        };
+        var tools = config.tools();
+        var wrappedTools = new CodingToolConfig(
+                tools.enabledTools(), tools.bash(), tools.search(), policy);
+        return new CodingAgentConfig(
+                config.workingDirectory(), config.model(), config.modelClient(),
+                config.objectMapper(), config.thinkingLevel(), config.requestOptions(),
+                config.steeringMode(), config.followUpMode(), config.customSystemPrompt(),
+                config.appendSystemPrompt(), sink, config.clock(), wrappedTools,
+                config.projectContext(), config.compaction(), config.modelProfiles(),
+                config.customization(), config.inputDeliveryMode());
     }
 
     public String sessionId() {
@@ -96,6 +164,7 @@ public final class ManagedSession {
             commands.put(key, entry);
             runs.put(command.runId(), entry);
             activeRun = entry;
+            feed.publish(entry.view);
         }
 
         CompletionStage<CodingAgentRunResult> stage;
@@ -112,6 +181,7 @@ public final class ManagedSession {
             if (entry.view.status() == RunStatus.ACCEPTED) {
                 entry.view = new RunView(sessionId, command.commandId(), command.runId(),
                         RunStatus.RUNNING, false, null, null, false, null);
+                feed.publish(entry.view);
             }
         }
         stage.whenComplete((result, failure) -> finish(entry, result, failure));
@@ -168,15 +238,24 @@ public final class ManagedSession {
             }
             return inputView(entry);
         }
+        InputRecord accepted = null;
         try {
             entry.targetRun.started.join();
-            var record = core.submitInput(new InputRequest(
+            accepted = core.submitInput(new InputRequest(
                     command.inputId(), command.targetRunId(),
                     site.pplee.jcode.codingagent.InputMode.valueOf(command.mode().name()),
                     command.text()));
+            var view = toInputView(entry.command, accepted);
+            feed.publish(view);
             entry.admitted.complete(null);
-            return toInputView(entry.command, record);
+            return view;
         } catch (RuntimeException failure) {
+            if (accepted != null) {
+                var infrastructure = new ApiException(ErrorCode.INTERNAL_ERROR,
+                        "input was accepted but its view could not be published", failure);
+                entry.admitted.completeExceptionally(infrastructure);
+                throw infrastructure;
+            }
             var rejection = inputRejection(failure);
             synchronized (lock) {
                 commands.remove(new CommandKey(Operation.INPUT, command.commandId()), entry);
@@ -223,11 +302,45 @@ public final class ManagedSession {
         return core.input(inputId).map(record -> toInputView(command, record));
     }
 
+    /** Capture projection and cursor at the same event-commit boundary. */
+    public SessionSnapshot snapshot() {
+        return feed.snapshot();
+    }
+
+    /** Atomically replay retained events and register for subsequent changes. */
+    public SessionSubscription subscribe(EventCursor after) {
+        return feed.subscribe(after);
+    }
+
+    /** Decide one immutable prepared request; identical decisions are safe to retry. */
+    public ApprovalView resolve(ApprovalCommand command) {
+        return approvals.resolve(command);
+    }
+
+    /** Query a retained approval without depending on the original subscriber. */
+    public Optional<ApprovalView> approval(String approvalId) {
+        return approvals.view(approvalId);
+    }
+
+    private CompletionStage<CodingToolPolicy.Decision> requestApproval(
+            CodingToolRequest request,
+            CancellationSignal cancellation
+    ) {
+        return approvals.request(request, cancellation, () -> {
+            if (activeRun == null || activeRun.view.cancelRequested()
+                    || activeRun.view.status().terminal() || closed) {
+                return null;
+            }
+            return activeRun.command.runId();
+        });
+    }
+
     /** Record cancellation without allowing it to overwrite the actual final result. */
     public RunView cancel(String runId) {
         Objects.requireNonNull(runId, "runId must not be null");
         RunEntry entry;
         boolean signalCore;
+        List<Runnable> cancelledApprovals;
         synchronized (lock) {
             entry = runs.get(runId);
             if (entry == null) {
@@ -238,8 +351,11 @@ public final class ManagedSession {
             }
             entry.view = new RunView(sessionId, entry.command.commandId(), runId,
                     RunStatus.CANCELLING, true, null, null, false, null);
+            feed.publish(entry.view);
+            cancelledApprovals = approvals.markCancelled(runId);
             signalCore = entry.started.isDone() && !entry.started.isCompletedExceptionally();
         }
+        cancelledApprovals.forEach(Runnable::run);
         if (signalCore) {
             core.abort(runId);
         }
@@ -270,8 +386,10 @@ public final class ManagedSession {
         }
         try {
             core.close();
+            feed.close();
             completion.complete(null);
         } catch (RuntimeException | Error failure) {
+            feed.close();
             completion.completeExceptionally(failure);
             throw failure;
         }
@@ -287,6 +405,86 @@ public final class ManagedSession {
         synchronized (lock) {
             return closing != null && closing.isDone();
         }
+    }
+
+    private void onCoreEvent(CodingAgentEvent event) {
+        if (event instanceof CodingAgentEvent.SummaryCompleted summary) {
+            feed.publish(new HistoryView(summary.entryId()));
+            return;
+        }
+        var display = CodingAgentDisplayEvent.from(event);
+        if (display.isEmpty()) {
+            return;
+        }
+        String runId;
+        synchronized (lock) {
+            runId = activeRun == null ? null : activeRun.command.runId();
+        }
+        if (runId == null) {
+            throw new IllegalStateException("runtime progress has no active product run");
+        }
+        switch (display.orElseThrow()) {
+            case CodingAgentDisplayEvent.RunStarted ignored -> {
+                synchronized (lock) {
+                    if (activeRun != null && activeRun.view.status() == RunStatus.ACCEPTED) {
+                        activeRun.view = new RunView(sessionId, activeRun.command.commandId(),
+                                runId, RunStatus.RUNNING, false, null, null, false, null);
+                        feed.publish(activeRun.view);
+                    }
+                }
+            }
+            case CodingAgentDisplayEvent.MessageChange change -> {
+                String entryId = change.phase() == CodingAgentDisplayEvent.Phase.COMPLETED
+                        ? core.history().currentEntryId().orElse(null) : null;
+                InputView applied = null;
+                if (change.inputId() != null) {
+                    InputCommand command;
+                    synchronized (lock) {
+                        var input = inputs.get(change.inputId());
+                        command = input == null ? null : input.command;
+                    }
+                    var record = core.input(change.inputId()).orElseThrow();
+                    applied = toInputView(command, record);
+                }
+                synchronized (lock) {
+                    if (currentMessageId == null || change.phase() == CodingAgentDisplayEvent.Phase.STARTED) {
+                        currentMessageId = "msg_" + UUID.randomUUID();
+                    }
+                    var bounded = boundedText(change.text(), MAX_RESULT_TEXT_CHARS, false);
+                    feed.publish(new MessageView(currentMessageId, runId, change.role(),
+                            bounded.text(), bounded.truncated(),
+                            change.phase() == CodingAgentDisplayEvent.Phase.COMPLETED, entryId));
+                    if (applied != null) {
+                        feed.publish(applied);
+                    }
+                    if (change.phase() == CodingAgentDisplayEvent.Phase.COMPLETED) {
+                        currentMessageId = null;
+                    }
+                }
+            }
+            case CodingAgentDisplayEvent.ToolChange change -> {
+                var bounded = boundedText(change.text(), MAX_TOOL_OUTPUT_CHARS, true);
+                feed.publish(new ToolView(change.toolCallId(), runId, change.toolName(),
+                        change.phase() == CodingAgentDisplayEvent.Phase.COMPLETED
+                                ? ToolStatus.COMPLETED : ToolStatus.PREPARING,
+                        bounded.text(), bounded.truncated(), change.error()));
+            }
+        }
+    }
+
+    private static TextSummary boundedText(String source, int maxChars, boolean tail) {
+        if (source.length() <= maxChars) {
+            return new TextSummary(source, false);
+        }
+        int boundary = tail ? source.length() - maxChars : maxChars;
+        if (tail && Character.isLowSurrogate(source.charAt(boundary))
+                && Character.isHighSurrogate(source.charAt(boundary - 1))) {
+            boundary++;
+        } else if (!tail && Character.isHighSurrogate(source.charAt(boundary - 1))
+                && Character.isLowSurrogate(source.charAt(boundary))) {
+            boundary--;
+        }
+        return new TextSummary(tail ? source.substring(boundary) : source.substring(0, boundary), true);
     }
 
     private InputView inputView(InputEntry entry) {
@@ -333,6 +531,7 @@ public final class ManagedSession {
             };
         }
         RunView finalView;
+        List<Runnable> cancelledApprovals;
         synchronized (lock) {
             if (entry.view.status().terminal()) {
                 return;
@@ -344,13 +543,17 @@ public final class ManagedSession {
                 var related = inputs.get(input.inputId());
                 if (related != null) {
                     related.terminal = input.status() != site.pplee.jcode.codingagent.InputStatus.PENDING;
+                    feed.publish(toInputView(related.command, input));
                 }
             }
             if (activeRun == entry) {
                 activeRun = null;
             }
+            cancelledApprovals = approvals.markCancelled(entry.command.runId());
             finalView = entry.view;
+            feed.publish(finalView);
         }
+        cancelledApprovals.forEach(Runnable::run);
         entry.finished.complete(finalView);
     }
 
@@ -472,4 +675,5 @@ public final class ManagedSession {
             return admitted.isDone() && terminal;
         }
     }
+
 }

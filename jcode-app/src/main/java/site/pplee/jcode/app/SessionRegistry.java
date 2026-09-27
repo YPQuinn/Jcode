@@ -13,6 +13,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Owns managed sessions and opens each historical file at most once per process. */
 public final class SessionRegistry {
@@ -35,14 +36,27 @@ public final class SessionRegistry {
 
     /** Create a file-backed strict Session and register its long-lived writer. */
     public ManagedSession create(CodingAgentConfig config, Path sessionDirectory) throws IOException {
+        return create(config, sessionDirectory, ApprovalSettings.none());
+    }
+
+    /** Create a managed Session with explicit per-tool approval settings. */
+    public ManagedSession create(
+            CodingAgentConfig config,
+            Path sessionDirectory,
+            ApprovalSettings approvals
+    ) throws IOException {
         requireStrict(config);
         Objects.requireNonNull(sessionDirectory, "sessionDirectory must not be null");
+        Objects.requireNonNull(approvals, "approvals must not be null");
         synchronized (lock) {
             requireCapacity();
         }
-        var core = CodingAgentSession.create(config, sessionDirectory);
-        var managed = new ManagedSession(core);
+        var holder = new AtomicReference<ManagedSession>();
+        var core = CodingAgentSession.create(
+                ManagedSession.instrument(config, holder, approvals), sessionDirectory);
         try {
+            var managed = new ManagedSession(core, approvals);
+            holder.set(managed);
             Path file = core.sessionFile().orElseThrow().toRealPath();
             synchronized (lock) {
                 requireCapacity();
@@ -63,7 +77,17 @@ public final class SessionRegistry {
 
     /** Reuse an existing owner or open a file once even under concurrent callers. */
     public ManagedSession open(CodingAgentConfig config, Path sessionFile) throws IOException {
+        return open(config, sessionFile, ApprovalSettings.none());
+    }
+
+    /** Reuse an owner or open with approval settings for newly loaded sessions. */
+    public ManagedSession open(
+            CodingAgentConfig config,
+            Path sessionFile,
+            ApprovalSettings approvals
+    ) throws IOException {
         requireStrict(config);
+        Objects.requireNonNull(approvals, "approvals must not be null");
         Path file = Objects.requireNonNull(sessionFile, "sessionFile must not be null").toRealPath();
         CompletableFuture<ManagedSession> opening;
         boolean owner;
@@ -100,8 +124,10 @@ public final class SessionRegistry {
 
         CodingAgentSession core = null;
         try {
-            core = CodingAgentSession.open(config, file);
-            var managed = new ManagedSession(core);
+            var holder = new AtomicReference<ManagedSession>();
+            core = CodingAgentSession.open(ManagedSession.instrument(config, holder, approvals), file);
+            var managed = new ManagedSession(core, approvals);
+            holder.set(managed);
             synchronized (lock) {
                 var existing = byId.putIfAbsent(managed.sessionId(), managed);
                 if (existing != null) {

@@ -8,7 +8,7 @@ Maven Enforcer 保护以下边界：
 - `ai-providers` 仅依赖 `ai`。
 - `agent-core` 仅依赖 `ai`，不得依赖 provider 或产品/UI 模块。
 - `coding-agent` 依赖 `ai`、`agent-core` 与 `ai-providers`；具体 Provider 依赖只用于产品 composition root，wire/adaptor 逻辑仍留在 `ai-providers`。
-- `jcode-protocol` 不依赖 Jcode 运行时模块或传输框架；只定义稳定的首批命令与查询值类型。
+- `jcode-protocol` 不依赖 Jcode 运行时模块或传输框架；定义命令、查询、事件游标与审批值类型。事件 JSON 使用防御性复制的 Jackson 树。
 - `jcode-app` 依赖 `jcode-protocol`、`coding-agent` 与 provider-neutral `ai`；不直接依赖 `agent-core` 或 `ai-providers`，也不拥有模型循环与历史写入。
 - 依赖必须无环，并从产品层指向内核层。
 
@@ -21,6 +21,7 @@ Maven Enforcer 保护以下边界：
 - 公开值类型必须不可变。Core 单次 run 的可变状态只能存在于 package-private `LoopState`。
 - `coding-agent` 对含可变 Jackson `JsonNode` 的 state、result 和 event，必须在构造与暴露时都递归快照。
 - Provider 特有 transcript 与 wire-format 逻辑留在 `ai-providers`，不得泄漏到 `ai` 或 `agent-core`。
+- `coding-agent` 将 runtime 进度映射为窄的产品展示事件；`jcode-app` 不直接依赖 `agent-core` 的事件类型。
 
 ## 产品边界
 

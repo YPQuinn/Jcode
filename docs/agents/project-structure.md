@@ -8,8 +8,8 @@
 | `ai-providers` | 具体 provider adapter；当前包含 OpenAI Responses adapter | `ai` |
 | `agent-core` | 通用 Agent Runtime、事件循环、队列、hook、取消所有权与工具执行 | `ai` |
 | `coding-agent` | Headless 编码产品内核、设置/模型装配、Session、项目上下文、文本资源、显式 Java Extension、coding prompt 与本地编码工具 | `ai`、`agent-core`、`ai-providers` |
-| `jcode-protocol` | 与传输无关的最小命令、回执、状态与错误类型 | 无 |
-| `jcode-app` | 进程内 Session 托管、命令幂等、Run 终态与输入查询 | `jcode-protocol`、`coding-agent`、`ai` |
+| `jcode-protocol` | 与传输无关的命令、状态、快照、事件游标与审批类型 | 无 |
+| `jcode-app` | 进程内 Session 托管、命令幂等、Run 结算、有界订阅与一次性审批 | `jcode-protocol`、`coding-agent`、`ai` |
 
 依赖方向是产品层 → runtime/protocol 层。所有模块都是库，没有应用启动入口。
 
