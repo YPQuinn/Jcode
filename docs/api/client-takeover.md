@@ -15,6 +15,12 @@
 
 轻量页面位于 [takeover.html](../../jcode-server/src/test/resources/browser/takeover.html)。它读取快照、用 Fetch 解析完整 SSE 帧，并可批准或拒绝一次待处理工具调用。页面不把 Token 放在 URL 或浏览器持久存储中。
 
+页面按完整事件更新本地快照；网络中断后用最后成功应用的游标重连，游标过期时重新读取快照。可运行独立脚本回归：
+
+```bash
+node --test jcode-server/src/test/resources/browser/takeover.test.cjs
+```
+
 从仓库根目录启动静态页面服务：
 
 ```bash
@@ -25,3 +31,5 @@ python3 -m http.server 8768 --bind 127.0.0.1 \
 在 `server.json` 的 `allowedOrigins` 中加入 `http://127.0.0.1:8768`，重启 Jcode 服务后，在浏览器打开 `http://127.0.0.1:8768/takeover.html`。填写 Jcode endpoint 和 Session ID，并选择该**测试服务**数据目录的 `service.token` 文件。页面会从文件读取 Token 到内存中的密码输入框。使用该页面时，只从自己启动的本地静态服务加载它。
 
 **手工冒烟记录（2026-09-27，macOS Chrome Guest）：**页面从独立 Jcode 测试服务取得快照，跨域请求带 `Authorization` 和 `Last-Event-ID` 成功订阅 SSE；服务在原客户端退出后产生的待审批工具显示在页面中。点击“允许一次”后，同一 Run 在页面上更新为 `COMPLETED`。这验证了实际 Chrome 的请求路径；自动化三进程测试另外验证输入 `entryId`、工具只执行一次，以及服务重启后只恢复文件历史。
+
+**断线重连冒烟（2026-09-27，macOS Chrome Guest）：**本地受控 HTTP 流在首次连接后异常断开，页面自动携带原游标发起第二次订阅；第二次连接发送完整 `COMPLETED` 事件和 `SESSION_CLOSED` 控制帧。Chrome 页面最终显示 `COMPLETED` 与“会话事件流已关闭”。该冒烟使用模拟服务，验证真实浏览器的 Fetch 断线处理；游标过期等分支由上述脚本回归覆盖。

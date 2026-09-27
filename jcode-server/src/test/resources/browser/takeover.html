@@ -43,24 +43,33 @@
       const file = event.target.files?.[0];
       if (file) fields.token.value = (await file.text()).trim();
     });
-    let controller;
-    let lastAppliedId;
+    let activeConnection;
 
-    function base() {
-      return fields.endpoint.value.replace(/\/$/, '')
-        + '/v1/sessions/' + encodeURIComponent(fields.session.value);
+    function isCurrent(connection) {
+      return activeConnection === connection && !connection.controller.signal.aborted;
     }
 
-    async function api(path, options = {}) {
+    async function responseError(response, label) {
+      const body = await response.text();
+      let code;
+      try { code = JSON.parse(body).code; } catch { /* An HTTP error need not be JSON. */ }
+      const error = new Error(`${label} ${response.status}: ${body}`);
+      error.status = response.status;
+      error.code = code;
+      return error;
+    }
+
+    async function api(connection, path, options = {}) {
       const response = await fetch(path, {
         ...options,
+        signal: connection.controller.signal,
         headers: {
-          Authorization: 'Bearer ' + fields.token.value,
+          Authorization: 'Bearer ' + connection.token,
           ...options.headers
         }
       });
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        throw await responseError(response, 'HTTP');
       }
       return response.json();
     }
@@ -69,13 +78,14 @@
       return `${value.epoch}:${value.seq}`;
     }
 
-    async function refresh() {
-      const snapshot = await api(base() + '/snapshot');
+    function render(connection, snapshot) {
+      if (!isCurrent(connection)) return;
       fields.snapshot.textContent = JSON.stringify({
         sessionId: snapshot.sessionId,
         cursor: snapshot.cursor,
         runs: snapshot.runs,
         inputs: snapshot.inputs,
+        approvals: snapshot.approvals,
         tools: snapshot.tools
       }, null, 2);
       fields.approvals.replaceChildren();
@@ -90,7 +100,7 @@
           button.textContent = decision === 'ALLOW' ? '允许一次' : '拒绝';
           button.addEventListener('click', async () => {
             try {
-              await api(base() + '/approvals/' + encodeURIComponent(approval.approvalId)
+              await api(connection, connection.base + '/approvals/' + encodeURIComponent(approval.approvalId)
                 + '/resolve', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -101,93 +111,208 @@
                   decision
                 })
               });
-              await refresh();
             } catch (error) {
-              fields.status.textContent = error.message;
+              if (isCurrent(connection)) fields.status.textContent = error.message;
             }
           });
           card.append(button);
         }
         fields.approvals.append(card);
       }
-      return snapshot;
     }
 
-    async function applyFrame(frame) {
+    async function refresh(connection) {
+      const snapshot = await api(connection, connection.base + '/snapshot');
+      if (!isCurrent(connection)) return;
+      if (snapshot.schemaVersion !== 1 || snapshot.sessionId !== connection.sessionId) {
+        throw new Error('快照不属于当前会话或版本不受支持');
+      }
+      render(connection, snapshot);
+      connection.snapshot = snapshot;
+      connection.cursor = cursor(snapshot.cursor);
+    }
+
+    function upsert(items, next, identity, limit, evictable = () => true) {
+      const updated = [...items];
+      const index = updated.findIndex(item => identity(item) === identity(next));
+      if (index >= 0) updated[index] = next;
+      else updated.push(next);
+      if (updated.length > limit) {
+        const oldest = updated.findIndex(evictable);
+        if (oldest < 0) throw new Error('投影保留数量超限');
+        updated.splice(oldest, 1);
+      }
+      return updated;
+    }
+
+    function applyEvent(connection, event, id) {
+      const snapshot = connection.snapshot;
+      if (event.schemaVersion !== 1 || event.sessionId !== connection.sessionId
+          || event.cursor.epoch !== snapshot.cursor.epoch || cursor(event.cursor) !== id) {
+        throw new Error('事件不属于当前会话流');
+      }
+      if (event.cursor.seq <= snapshot.cursor.seq) return;
+      if (event.cursor.seq !== snapshot.cursor.seq + 1) {
+        const error = new Error('事件序号存在缺口');
+        error.resync = true;
+        throw error;
+      }
+      const next = { ...snapshot, cursor: event.cursor };
+      const data = event.data;
+      switch (event.type) {
+        case 'RUN_CHANGED':
+          next.runs = upsert(snapshot.runs, data, item => item.runId, 1024); break;
+        case 'INPUT_CHANGED':
+          next.inputs = upsert(snapshot.inputs, data, item => item.inputId, 1024); break;
+        case 'APPROVAL_CHANGED':
+          next.approvals = upsert(snapshot.approvals, data, item => item.approvalId, 256,
+            item => item.status !== 'PENDING'); break;
+        case 'MESSAGE_CHANGED':
+          next.messages = upsert(snapshot.messages, data, item => item.messageId, 256);
+          if (data.entryId != null) next.leafId = data.entryId;
+          break;
+        case 'TOOL_CHANGED':
+          next.tools = upsert(snapshot.tools, data,
+            item => JSON.stringify([item.runId, item.toolCallId]), 256); break;
+        case 'HISTORY_CHANGED':
+          next.leafId = data.leafId; break;
+        default:
+          throw new Error(`不支持的事件类型：${event.type}`);
+      }
+      render(connection, next);
+      connection.snapshot = next;
+      connection.cursor = id;
+    }
+
+    async function applyFrame(connection, frame) {
+      if (!isCurrent(connection)) return;
       const lines = frame.split('\n');
       const name = lines.find(line => line.startsWith('event: '))?.slice(7);
       const id = lines.find(line => line.startsWith('id: '))?.slice(4);
+      const data = lines.find(line => line.startsWith('data: '))?.slice(6);
       if (name === 'stream.control') {
-        const data = lines.find(line => line.startsWith('data: '))?.slice(6);
         const control = JSON.parse(data);
         if (control.action === 'stop') {
           fields.status.textContent = '会话事件流已关闭';
-          controller.abort();
+          connection.controller.abort();
         } else {
-          const snapshot = await refresh();
-          lastAppliedId = cursor(snapshot.cursor);
+          const error = new Error('事件流要求重新同步');
+          error.resync = true;
+          throw error;
         }
       } else if (name === 'session.event' && id) {
-        const data = lines.find(line => line.startsWith('data: '))?.slice(6);
-        JSON.parse(data);
-        const snapshot = await refresh();
-        lastAppliedId = cursor(snapshot.cursor);
+        applyEvent(connection, JSON.parse(data), id);
       }
     }
 
-    async function subscribe(signal) {
-      while (!signal.aborted) {
-        const decoder = new TextDecoder();
-        const response = await fetch(base() + '/events?after='
-          + encodeURIComponent(lastAppliedId), {
-          headers: {
-            Authorization: 'Bearer ' + fields.token.value,
-            'Last-Event-ID': lastAppliedId
-          },
-          signal
-        });
-        if (!response.ok) {
-          throw new Error(`SSE HTTP ${response.status}: ${await response.text()}`);
+    function retryDelay(connection) {
+      return new Promise(resolve => {
+        if (!isCurrent(connection)) return resolve();
+        const signal = connection.controller.signal;
+        const timer = setTimeout(done, 300);
+        function done() {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', done);
+          resolve();
         }
-        fields.status.textContent = '已订阅事件流';
-        const reader = response.body.getReader();
-        let pending = '';
+        signal.addEventListener('abort', done, { once: true });
+      });
+    }
+
+    async function subscribe(connection) {
+      while (isCurrent(connection)) {
+        let reader;
         try {
-          while (!signal.aborted) {
+          const response = await apiStream(connection);
+          if (!isCurrent(connection)) return;
+          fields.status.textContent = '已订阅事件流';
+          reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let pending = '';
+          while (isCurrent(connection)) {
             const { value, done } = await reader.read();
             if (done) break;
-            pending += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+            pending += decoder.decode(value, { stream: true });
+            pending = pending.replace(/\r\n/g, '\n');
             let boundary;
             while ((boundary = pending.indexOf('\n\n')) >= 0) {
               const completeFrame = pending.slice(0, boundary);
               pending = pending.slice(boundary + 2);
-              await applyFrame(completeFrame);
+              await applyFrame(connection, completeFrame);
+              if (!isCurrent(connection)) return;
             }
           }
+          if (isCurrent(connection)) fields.status.textContent = '连接中断，正在重连';
+        } catch (error) {
+          if (!isCurrent(connection)) return;
+          if (error.resync || error.code === 'CURSOR_EXPIRED'
+              || error.code === 'EPOCH_CHANGED') {
+            try {
+              await refresh(connection);
+              continue;
+            } catch (failure) {
+              error = failure;
+            }
+          }
+          if (!isCurrent(connection)) return;
+          if (error.status && error.status !== 408 && error.status !== 429
+              && (error.status < 500 || error.status > 504)) {
+            fields.status.textContent = error.message;
+            return;
+          }
+          fields.status.textContent = `${error.message}；正在重连`;
         } finally {
-          reader.releaseLock();
+          if (reader) {
+            try { await reader.cancel(); } catch { /* The stream may already have failed. */ }
+            reader.releaseLock();
+          }
         }
-        if (!signal.aborted) fields.status.textContent = '连接中断，按最后完整事件重连';
+        await retryDelay(connection);
       }
     }
 
+    async function apiStream(connection) {
+      const response = await fetch(connection.base + '/events?after='
+        + encodeURIComponent(connection.cursor), {
+        headers: {
+          Authorization: 'Bearer ' + connection.token,
+          'Last-Event-ID': connection.cursor
+        },
+        signal: connection.controller.signal
+      });
+      if (!response.ok) {
+        throw await responseError(response, 'SSE HTTP');
+      }
+      return response;
+    }
+
     document.getElementById('connect').addEventListener('click', async () => {
-      controller?.abort();
-      const connection = new AbortController();
-      controller = connection;
+      activeConnection?.controller.abort();
+      const sessionId = fields.session.value;
+      const connection = {
+        base: fields.endpoint.value.replace(/\/$/, '')
+          + '/v1/sessions/' + encodeURIComponent(sessionId),
+        sessionId,
+        token: fields.token.value,
+        controller: new AbortController(),
+        cursor: undefined,
+        snapshot: undefined
+      };
+      activeConnection = connection;
       try {
-        const snapshot = await refresh();
-        lastAppliedId = cursor(snapshot.cursor);
+        await refresh(connection);
+        if (!isCurrent(connection)) return;
         fields.status.textContent = '快照已读取，正在订阅';
-        subscribe(connection.signal).catch(error => {
-          if (!connection.signal.aborted) fields.status.textContent = error.message;
+        subscribe(connection).catch(error => {
+          if (isCurrent(connection)) fields.status.textContent = error.message;
         });
       } catch (error) {
-        fields.status.textContent = error.message;
+        if (isCurrent(connection)) fields.status.textContent = error.message;
       }
     });
     document.getElementById('disconnect').addEventListener('click', () => {
-      controller?.abort();
+      activeConnection?.controller.abort();
+      activeConnection = undefined;
       fields.status.textContent = '本页面已断开';
     });
   </script>
