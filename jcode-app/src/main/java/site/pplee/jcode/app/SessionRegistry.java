@@ -2,12 +2,16 @@ package site.pplee.jcode.app;
 
 import site.pplee.jcode.codingagent.CodingAgentConfig;
 import site.pplee.jcode.codingagent.CodingAgentSession;
+import site.pplee.jcode.codingagent.CodingAgentSessionFactory;
+import site.pplee.jcode.codingagent.CodingAgentSessionOptions;
 import site.pplee.jcode.codingagent.InputDeliveryMode;
+import site.pplee.jcode.codingagent.SessionAssemblyException;
 import site.pplee.jcode.protocol.ErrorCode;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -20,10 +24,13 @@ public final class SessionRegistry {
     public static final int MAX_MANAGED_SESSIONS = 64;
 
     private final Object lock = new Object();
+    private final Object admissionLock = new Object();
     private final Map<String, ManagedSession> byId = new LinkedHashMap<>();
     private final Map<Path, CompletableFuture<ManagedSession>> byFile = new LinkedHashMap<>();
     private final Map<String, Path> pathById = new LinkedHashMap<>();
     private final Runnable beforeCloseCleanup;
+    private int pendingCreations;
+    private volatile boolean stopping;
 
     public SessionRegistry() {
         this(() -> { });
@@ -48,19 +55,52 @@ public final class SessionRegistry {
         requireStrict(config);
         Objects.requireNonNull(sessionDirectory, "sessionDirectory must not be null");
         Objects.requireNonNull(approvals, "approvals must not be null");
-        synchronized (lock) {
-            requireCapacity();
-        }
-        var holder = new AtomicReference<ManagedSession>();
-        var core = CodingAgentSession.create(
-                ManagedSession.instrument(config, holder, approvals), sessionDirectory);
+        beginCreation();
         try {
-            var managed = new ManagedSession(core, approvals);
+            var holder = new AtomicReference<ManagedSession>();
+            var core = CodingAgentSession.create(
+                    ManagedSession.instrument(config, holder, approvals), sessionDirectory);
+            return registerCreated(core, holder, approvals);
+        } finally {
+            endCreation();
+        }
+    }
+
+    /** Create through settings-driven assembly while retaining application observation. */
+    public ManagedSession create(
+            CodingAgentSessionOptions options,
+            Path sessionDirectory,
+            ApprovalSettings approvals
+    ) throws IOException, SessionAssemblyException {
+        requireStrict(options);
+        Objects.requireNonNull(sessionDirectory, "sessionDirectory must not be null");
+        Objects.requireNonNull(approvals, "approvals must not be null");
+        beginCreation();
+        try {
+            var holder = new AtomicReference<ManagedSession>();
+            var core = CodingAgentSessionFactory.create(options, sessionDirectory,
+                    config -> ManagedSession.instrument(config, holder, approvals)).session();
+            return registerCreated(core, holder, approvals);
+        } finally {
+            endCreation();
+        }
+    }
+
+    private ManagedSession registerCreated(
+            CodingAgentSession core,
+            AtomicReference<ManagedSession> holder,
+            ApprovalSettings approvals
+    ) throws IOException {
+        try {
+            var managed = new ManagedSession(core, approvals,
+                    admissionLock, () -> stopping);
             holder.set(managed);
             Path file = core.sessionFile().orElseThrow().toRealPath();
             synchronized (lock) {
-                requireCapacity();
-                byId.put(managed.sessionId(), managed);
+                if (byId.putIfAbsent(managed.sessionId(), managed) != null) {
+                    throw new ApiException(ErrorCode.STATE_CONFLICT,
+                            "session identity is already managed");
+                }
                 byFile.put(file, CompletableFuture.completedFuture(managed));
                 pathById.put(managed.sessionId(), file);
             }
@@ -87,11 +127,39 @@ public final class SessionRegistry {
             ApprovalSettings approvals
     ) throws IOException {
         requireStrict(config);
+        try {
+            return openPrepared(config.workingDirectory(), sessionFile, approvals,
+                    (file, holder) -> CodingAgentSession.open(
+                            ManagedSession.instrument(config, holder, approvals), file));
+        } catch (SessionAssemblyException assembly) {
+            throw new IOException("settings-driven open of the same file failed", assembly);
+        }
+    }
+
+    /** Open through settings-driven assembly without changing the file reuse contract. */
+    public ManagedSession open(
+            CodingAgentSessionOptions options,
+            Path sessionFile,
+            ApprovalSettings approvals
+    ) throws IOException, SessionAssemblyException {
+        requireStrict(options);
+        return openPrepared(options.workingDirectory(), sessionFile, approvals,
+                (file, holder) -> CodingAgentSessionFactory.open(options, file,
+                        config -> ManagedSession.instrument(config, holder, approvals)).session());
+    }
+
+    private ManagedSession openPrepared(
+            Path workingDirectory,
+            Path sessionFile,
+            ApprovalSettings approvals,
+            CoreOpener opener
+    ) throws IOException, SessionAssemblyException {
         Objects.requireNonNull(approvals, "approvals must not be null");
         Path file = Objects.requireNonNull(sessionFile, "sessionFile must not be null").toRealPath();
         CompletableFuture<ManagedSession> opening;
         boolean owner;
         synchronized (lock) {
+            requireAccepting();
             opening = byFile.get(file);
             owner = opening == null;
             if (owner) {
@@ -106,7 +174,7 @@ public final class SessionRegistry {
                 if (managed.isClosed()) {
                     throw new ApiException(ErrorCode.SESSION_CLOSED, "session is closing");
                 }
-                if (!managed.workingDirectory().equals(config.workingDirectory())) {
+                if (!managed.workingDirectory().equals(workingDirectory)) {
                     throw new ApiException(ErrorCode.STATE_CONFLICT,
                             "managed session uses a different working directory");
                 }
@@ -114,6 +182,9 @@ public final class SessionRegistry {
             } catch (CompletionException failure) {
                 if (failure.getCause() instanceof IOException io) {
                     throw io;
+                }
+                if (failure.getCause() instanceof SessionAssemblyException assembly) {
+                    throw assembly;
                 }
                 if (failure.getCause() instanceof RuntimeException runtime) {
                     throw runtime;
@@ -125,8 +196,9 @@ public final class SessionRegistry {
         CodingAgentSession core = null;
         try {
             var holder = new AtomicReference<ManagedSession>();
-            core = CodingAgentSession.open(ManagedSession.instrument(config, holder, approvals), file);
-            var managed = new ManagedSession(core, approvals);
+            core = opener.open(file, holder);
+            var managed = new ManagedSession(core, approvals,
+                    admissionLock, () -> stopping);
             holder.set(managed);
             synchronized (lock) {
                 var existing = byId.putIfAbsent(managed.sessionId(), managed);
@@ -137,7 +209,7 @@ public final class SessionRegistry {
             }
             opening.complete(managed);
             return managed;
-        } catch (IOException | RuntimeException | Error failure) {
+        } catch (IOException | SessionAssemblyException | RuntimeException | Error failure) {
             if (core != null) {
                 try {
                     core.close();
@@ -153,10 +225,47 @@ public final class SessionRegistry {
         }
     }
 
+    @FunctionalInterface
+    private interface CoreOpener {
+        CodingAgentSession open(Path file, AtomicReference<ManagedSession> holder)
+                throws IOException, SessionAssemblyException;
+    }
+
     public Optional<ManagedSession> find(String sessionId) {
         Objects.requireNonNull(sessionId, "sessionId must not be null");
         synchronized (lock) {
             return Optional.ofNullable(byId.get(sessionId));
+        }
+    }
+
+    /** Snapshot current owners without acquiring their lifecycle locks during I/O. */
+    public List<ManagedSession> managedSessions() {
+        synchronized (lock) {
+            return List.copyOf(byId.values());
+        }
+    }
+
+    /** Atomically reject new create/open work once every managed owner is idle. */
+    public boolean beginShutdownIfIdle() {
+        synchronized (admissionLock) {
+            synchronized (lock) {
+                if (stopping || pendingCreations != 0
+                        || byFile.values().stream().anyMatch(future -> !future.isDone())
+                        || byId.values().stream().anyMatch(session -> !session.isIdle())) {
+                    return false;
+                }
+                stopping = true;
+                return true;
+            }
+        }
+    }
+
+    /** Reject new file ownership while a process shutdown cancels active work. */
+    public void beginShutdown() {
+        synchronized (admissionLock) {
+            synchronized (lock) {
+                stopping = true;
+            }
         }
     }
 
@@ -188,15 +297,43 @@ public final class SessionRegistry {
     }
 
     private void requireCapacity() {
-        if (byId.size() + byFile.values().stream().filter(future -> !future.isDone()).count()
+        if (byId.size() + pendingCreations
+                + byFile.values().stream().filter(future -> !future.isDone()).count()
                 >= MAX_MANAGED_SESSIONS) {
             throw new ApiException(ErrorCode.CAPACITY_EXCEEDED, "managed session limit reached");
+        }
+    }
+
+    private void beginCreation() {
+        synchronized (lock) {
+            requireAccepting();
+            requireCapacity();
+            pendingCreations++;
+        }
+    }
+
+    private void endCreation() {
+        synchronized (lock) {
+            pendingCreations--;
+        }
+    }
+
+    private void requireAccepting() {
+        if (stopping) {
+            throw new ApiException(ErrorCode.SESSION_CLOSED, "session registry is stopping");
         }
     }
 
     private static void requireStrict(CodingAgentConfig config) {
         Objects.requireNonNull(config, "config must not be null");
         if (config.inputDeliveryMode() != InputDeliveryMode.RUN_SCOPED) {
+            throw new IllegalArgumentException("managed sessions require RUN_SCOPED input delivery");
+        }
+    }
+
+    private static void requireStrict(CodingAgentSessionOptions options) {
+        Objects.requireNonNull(options, "options must not be null");
+        if (options.inputDeliveryMode() != InputDeliveryMode.RUN_SCOPED) {
             throw new IllegalArgumentException("managed sessions require RUN_SCOPED input delivery");
         }
     }

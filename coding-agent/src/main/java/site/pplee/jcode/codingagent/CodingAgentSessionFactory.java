@@ -21,8 +21,10 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.UnaryOperator;
 
 /** Settings-driven, one-shot assembly for in-memory, new, or restored sessions. */
 public final class CodingAgentSessionFactory {
@@ -31,7 +33,7 @@ public final class CodingAgentSessionFactory {
 
     public static SessionCreationResult inMemory(CodingAgentSessionOptions options)
             throws IOException, SessionAssemblyException {
-        return assemble(options, null, null);
+        return assemble(options, null, null, UnaryOperator.identity());
     }
 
     public static SessionCreationResult create(
@@ -41,7 +43,19 @@ public final class CodingAgentSessionFactory {
         if (sessionDirectory == null) {
             throw new NullPointerException("sessionDirectory must not be null");
         }
-        return assemble(options, sessionDirectory, null);
+        return create(options, sessionDirectory, UnaryOperator.identity());
+    }
+
+    /** Decorate the resolved configuration before tool and Session construction. */
+    public static SessionCreationResult create(
+            CodingAgentSessionOptions options,
+            Path sessionDirectory,
+            UnaryOperator<CodingAgentConfig> configDecorator
+    ) throws IOException, SessionAssemblyException {
+        if (sessionDirectory == null) {
+            throw new NullPointerException("sessionDirectory must not be null");
+        }
+        return assemble(options, sessionDirectory, null, configDecorator);
     }
 
     public static SessionCreationResult open(
@@ -51,16 +65,32 @@ public final class CodingAgentSessionFactory {
         if (sessionFile == null) {
             throw new NullPointerException("sessionFile must not be null");
         }
-        return assemble(options, null, sessionFile);
+        return open(options, sessionFile, UnaryOperator.identity());
+    }
+
+    /** Decorate the resolved configuration before opening the runtime Session. */
+    public static SessionCreationResult open(
+            CodingAgentSessionOptions options,
+            Path sessionFile,
+            UnaryOperator<CodingAgentConfig> configDecorator
+    ) throws IOException, SessionAssemblyException {
+        if (sessionFile == null) {
+            throw new NullPointerException("sessionFile must not be null");
+        }
+        return assemble(options, null, sessionFile, configDecorator);
     }
 
     private static SessionCreationResult assemble(
             CodingAgentSessionOptions options,
             Path createDirectory,
-            Path openFile
+            Path openFile,
+            UnaryOperator<CodingAgentConfig> configDecorator
     ) throws IOException, SessionAssemblyException {
         if (options == null) {
             throw new NullPointerException("options must not be null");
+        }
+        if (configDecorator == null) {
+            throw new NullPointerException("configDecorator must not be null");
         }
         var settings = SettingsLoader.load(new SettingsLoadRequest(
                 options.workingDirectory(),
@@ -89,7 +119,9 @@ public final class CodingAgentSessionFactory {
                         failure.getMessage(), settings.diagnostics(), diagnostics);
             }
 
-            var config = createConfig(options, settings, runtime, selection);
+            var config = Objects.requireNonNull(
+                    configDecorator.apply(createConfig(options, settings, runtime, selection)),
+                    "configDecorator must return a configuration");
             preparedTools = BuiltInTools.create(options.workingDirectory(), config.tools());
             if (manager == null) {
                 var header = new SessionHeader(

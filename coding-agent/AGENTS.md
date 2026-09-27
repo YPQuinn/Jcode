@@ -82,6 +82,7 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 - 配置保存只修改显式目标层和字段，保留未知字段；同 JVM reservation 和 `.lock` 原生锁只覆盖单次读—改—原子替换，不覆盖不同目标 I/O，不删除锁文件，也不复用 `SessionFileAccess`。
 - `AgentCompleted` 必须投影为产品 `RunCompleted`，不能通过 public event 暴露 `LoopResult` 中的工具实例。
 - `CodingAgentDisplayEvent` 只映射用于客户端进度展示的消息与工具快照；它不改变 runtime 事件、正式历史或工具授权结果，也不向应用层暴露 `AgentEvent` 类型。
+- 设置驱动工厂的配置装饰接缝位于最终配置生成之后、工具和 Session 构造之前；宿主可在此组合事件 sink 与工具 policy，不得改写工厂的模型选择或 owned/borrowed 资源所有权。
 - 内置工具使用强类型参数和 JSON Schema；运行时边界不能只依赖 core 的最小 schema validator。
 - 文件路径以 Session working directory 解析，但 working directory 不是 sandbox。工具路径参数不得在交给文件系统前通过 lexical normalize 折叠 `..`；必须保留符号链接及中间路径不存在/非目录时的平台解析语义。
 - 文件读取必须有界；禁止对不受信任文件使用无界 `readLine()`、`readString()` 或 `readAllBytes()`。`OutputTruncator` 完整跳过 offset 前置行但不缓冲内容，目标页按剩余 UTF-8 字节预算读取，确定超限即停止，不扫描超长行余下部分；仍保留完整行、CR/LF/CRLF 归一化及取消检查。

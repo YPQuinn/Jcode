@@ -10,8 +10,9 @@
 | `coding-agent` | Headless 编码产品内核、设置/模型装配、Session、项目上下文、文本资源、显式 Java Extension、coding prompt 与本地编码工具 | `ai`、`agent-core`、`ai-providers` |
 | `jcode-protocol` | 与传输无关的命令、状态、快照、事件游标与审批类型 | 无 |
 | `jcode-app` | 进程内 Session 托管、命令幂等、Run 结算、有界订阅与一次性审批 | `jcode-protocol`、`coding-agent`、`ai` |
+| `jcode-server` | 本机独立服务宿主、实例锁、凭证和 HTTP 接入 | `jcode-app`、`jcode-protocol`、`coding-agent`、`ai` |
 
-依赖方向是产品层 → runtime/protocol 层。所有模块都是库，没有应用启动入口。
+依赖方向是产品层 → runtime/protocol 层。`jcode-server` 提供唯一的应用启动入口，其余模块保持库形式。
 
 ## 包布局
 
@@ -25,6 +26,7 @@ Java 包名使用 `site.pplee.jcode.<module>`。Maven 模块名中的连字符�
 - [`coding-agent/AGENTS.md`](../../coding-agent/AGENTS.md)
 - [`jcode-protocol/AGENTS.md`](../../jcode-protocol/AGENTS.md)
 - [`jcode-app/AGENTS.md`](../../jcode-app/AGENTS.md)
+- [`jcode-server/AGENTS.md`](../../jcode-server/AGENTS.md)
 
 ## 仓库文档
 

@@ -43,6 +43,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 /** In-process owner of one strict Session's command identities and run results. */
 public final class ManagedSession {
@@ -52,6 +53,8 @@ public final class ManagedSession {
     private static final int MAX_TOOL_OUTPUT_CHARS = 8_192;
 
     private final Object lock = new Object();
+    private final Object admissionLock;
+    private final BooleanSupplier stopping;
     private final CodingAgentSession core;
     private final String sessionId;
     private final SessionFeed feed;
@@ -65,8 +68,11 @@ public final class ManagedSession {
     private CompletableFuture<Void> closing;
     private boolean closed;
 
-    ManagedSession(CodingAgentSession core, ApprovalSettings approvalSettings) {
+    ManagedSession(CodingAgentSession core, ApprovalSettings approvalSettings,
+            Object admissionLock, BooleanSupplier stopping) {
         this.core = Objects.requireNonNull(core, "core must not be null");
+        this.admissionLock = Objects.requireNonNull(admissionLock);
+        this.stopping = Objects.requireNonNull(stopping);
         this.sessionId = core.history().header().id().toString();
         this.feed = new SessionFeed(lock, new ObjectMapper());
         feed.attach(sessionId, core.history().currentEntryId().orElse(null));
@@ -135,36 +141,41 @@ public final class ManagedSession {
     public RunView start(RunCommand command) {
         Objects.requireNonNull(command, "command must not be null");
         RunEntry entry;
-        synchronized (lock) {
-            var key = new CommandKey(Operation.RUN, command.commandId());
-            var previous = commands.get(key);
-            if (previous != null) {
-                var existing = (RunEntry) previous;
-                if (!existing.command.equals(command)) {
-                    throw error(ErrorCode.IDEMPOTENCY_CONFLICT, "commandId belongs to a different run request");
+        synchronized (admissionLock) {
+            synchronized (lock) {
+                var key = new CommandKey(Operation.RUN, command.commandId());
+                var previous = commands.get(key);
+                if (previous != null) {
+                    var existing = (RunEntry) previous;
+                    if (!existing.command.equals(command)) {
+                        throw error(ErrorCode.IDEMPOTENCY_CONFLICT, "commandId belongs to a different run request");
+                    }
+                    return existing.view;
                 }
-                return existing.view;
+                if (stopping.getAsBoolean()) {
+                    throw error(ErrorCode.SESSION_CLOSED, "session registry is stopping");
+                }
+                requireOpen();
+                if (runs.containsKey(command.runId())) {
+                    throw error(ErrorCode.IDEMPOTENCY_CONFLICT, "runId belongs to another command");
+                }
+                if (activeRun != null) {
+                    throw error(ErrorCode.SESSION_BUSY, "session already has an active run");
+                }
+                String actualLeaf = core.history().currentEntryId().orElse(null);
+                if (command.expectedLeafId() != null
+                        && !command.expectedLeafId().equals(actualLeaf)) {
+                    throw error(ErrorCode.STATE_CONFLICT, "session leaf has changed");
+                }
+                makeRoom();
+                entry = new RunEntry(command, new RunView(
+                        sessionId, command.commandId(), command.runId(), RunStatus.ACCEPTED,
+                        false, null, null, false, null));
+                commands.put(key, entry);
+                runs.put(command.runId(), entry);
+                activeRun = entry;
+                feed.publish(entry.view);
             }
-            requireOpen();
-            if (runs.containsKey(command.runId())) {
-                throw error(ErrorCode.IDEMPOTENCY_CONFLICT, "runId belongs to another command");
-            }
-            if (activeRun != null) {
-                throw error(ErrorCode.SESSION_BUSY, "session already has an active run");
-            }
-            String actualLeaf = core.history().currentEntryId().orElse(null);
-            if (command.expectedLeafId() != null
-                    && !command.expectedLeafId().equals(actualLeaf)) {
-                throw error(ErrorCode.STATE_CONFLICT, "session leaf has changed");
-            }
-            makeRoom();
-            entry = new RunEntry(command, new RunView(
-                    sessionId, command.commandId(), command.runId(), RunStatus.ACCEPTED,
-                    false, null, null, false, null));
-            commands.put(key, entry);
-            runs.put(command.runId(), entry);
-            activeRun = entry;
-            feed.publish(entry.view);
         }
 
         CompletionStage<CodingAgentRunResult> stage;
@@ -398,6 +409,13 @@ public final class ManagedSession {
     public boolean isClosed() {
         synchronized (lock) {
             return closed;
+        }
+    }
+
+    boolean isIdle() {
+        synchronized (lock) {
+            return activeRun == null && pendingInputAdmissions == 0
+                    && (closing == null || closing.isDone());
         }
     }
 

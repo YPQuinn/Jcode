@@ -25,6 +25,11 @@ class ProtocolJsonTest {
         assertEquals(runView, roundTrip(runView, RunView.class));
         assertEquals(inputView, roundTrip(inputView, InputView.class));
         assertEquals(error, roundTrip(error, ApiError.class));
+        for (var code : List.of(ErrorCode.UNAUTHORIZED, ErrorCode.ORIGIN_FORBIDDEN,
+                ErrorCode.METHOD_NOT_ALLOWED, ErrorCode.SERVER_STOPPING)) {
+            var hostError = new ApiError(code, "service rejection");
+            assertEquals(hostError, roundTrip(hostError, ApiError.class));
+        }
         assertFalse(run.toString().contains("hello"));
         assertFalse(input.toString().contains("later"));
     }

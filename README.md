@@ -38,14 +38,16 @@ Jcode 是一个最小、可组合、可测试的 Java Agent 基础设施。它�
 
 ```mermaid
 flowchart TD
-    App[宿主应用 / future CLI or Server]
+    Server[jcode-server<br/>独立本机宿主]
+    App[jcode-app<br/>进程内会话托管]
     Coding[coding-agent<br/>Headless 编码产品内核]
     Core[agent-core<br/>通用 Agent Runtime]
     Providers[ai-providers<br/>具体 Provider 适配]
     AI[ai<br/>Provider-neutral 协议]
 
+    Server --> App
     App --> Coding
-    App --> Providers
+    App --> AI
     Coding --> Core
     Coding --> Providers
     Coding --> AI
@@ -61,6 +63,9 @@ flowchart TD
 | [`ai-providers`](ai-providers/) | 具体 Provider adapter；当前提供 OpenAI Responses API | `ai` |
 | [`agent-core`](agent-core/) | Agent Loop、状态、事件、队列、hook 与工具执行管道 | `ai` |
 | [`coding-agent`](coding-agent/) | 编码产品门面、设置/模型装配、Session、项目上下文、system prompt 与本地工具 | `ai`、`agent-core`、`ai-providers` |
+| [`jcode-protocol`](jcode-protocol/) | 与传输无关的命令、状态、快照与事件类型 | 无 |
+| [`jcode-app`](jcode-app/) | 托管 Session、命令幂等、进程内订阅与审批 | `jcode-protocol`、`coding-agent`、`ai` |
+| [`jcode-server`](jcode-server/) | 本机 HTTP 服务入口、实例锁与最低认证 | `jcode-app`、`jcode-protocol`、`coding-agent`、`ai` |
 
 Maven Enforcer 会在构建阶段检查这些依赖边界。
 
@@ -92,6 +97,31 @@ mvn verify
 # 只测试指定模块及其依赖
 mvn -pl coding-agent -am test
 ```
+
+### 启动本机服务（阶段 B1）
+
+服务目前提供受认证的 `GET /v1/capabilities` 和空闲停止 `POST /v1/server/stop`。Session 命令与 SSE 路由将在 B2 加入。
+
+```json
+{
+  "port": 8787,
+  "dataDirectory": "/absolute/path/to/jcode-data",
+  "userConfigDirectory": "/absolute/path/to/jcode-config",
+  "workspaces": {"project": "/absolute/path/to/project"},
+  "allowedOrigins": [],
+  "approvalTools": [],
+  "approvalTimeoutSeconds": 300
+}
+```
+
+将配置保存为绝对路径的 `server.json`，然后运行：
+
+```bash
+mvn -pl jcode-server -am package
+java --add-modules jdk.httpserver -jar jcode-server/target/jcode-server-1.0-SNAPSHOT.jar --config /absolute/path/to/server.json
+```
+
+服务固定监听 `127.0.0.1`。首次启动在数据目录创建仅供本地读取的 `service.token`；客户端使用 `Authorization: Bearer <token>`。就绪输出和 `runtime.json` 只包含 endpoint、实例 ID 等非凭证信息。同一数据目录只能有一个运行中的服务实例。
 
 ## 嵌入应用
 
@@ -241,6 +271,9 @@ Jcode/
 ├── ai-providers/       # Provider adapters
 ├── agent-core/         # 通用 Agent Runtime
 ├── coding-agent/       # Headless 编码产品内核
+├── jcode-protocol/     # 传输无关的 API 值类型
+├── jcode-app/          # 进程内托管服务
+├── jcode-server/       # 独立 HTTP 服务入口
 ├── docs/
 │   ├── architecture/   # 架构解读
 │   ├── agents/         # 仓库开发约定

@@ -6,7 +6,7 @@ Jcode 是一个 Java 21 多模块 Maven monorepo，包含 provider-neutral 模�
 
 - 构建与依赖管理使用系统安装的 Maven（`mvn`）；仓库没有 Maven Wrapper。
 - 全仓最终校验运行 `mvn verify`。
-- 仓库中的模块都是库模块，没有 `main` 或 Spring Boot 启动类。
+- `jcode-server` 是独立 Java 21 服务入口；其余模块保持可嵌入库。仓库没有 Spring Boot 启动类。
 - 修改某个目录前，先读取作用域更近的 `AGENTS.md`；更具体的规则优先于本文件链接的通用规则。
 
 ## Guides by task
@@ -31,4 +31,5 @@ Jcode 是一个 Java 21 多模块 Maven monorepo，包含 provider-neutral 模�
 - [`coding-agent`](coding-agent/AGENTS.md)
 - [`jcode-protocol`](jcode-protocol/AGENTS.md)
 - [`jcode-app`](jcode-app/AGENTS.md)
+- [`jcode-server`](jcode-server/AGENTS.md)
 - [架构文档写作](docs/architecture/AGENTS.md)
