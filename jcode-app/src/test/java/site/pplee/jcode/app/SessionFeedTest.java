@@ -98,6 +98,84 @@ class SessionFeedTest {
     }
 
     @Test
+    void serverCloseDrainsAcceptedEventsBeforeReportingClosure() throws Exception {
+        var feed = new SessionFeed(new Object(), mapper);
+        feed.attach("session-1", null);
+        var subscriber = feed.subscribe(feed.snapshot().cursor());
+        try {
+            feed.publish(run("run-1"));
+            feed.publish(new RunView("session-1", "command-run-1", "run-1",
+                    RunStatus.COMPLETED, false, "STOP", "done", false, null));
+            feed.close();
+
+            assertEquals(RunStatus.ACCEPTED, mapper.treeToValue(
+                    subscriber.next(Duration.ZERO).orElseThrow().data(), RunView.class).status());
+            assertEquals(RunStatus.COMPLETED, mapper.treeToValue(
+                    subscriber.next(Duration.ZERO).orElseThrow().data(), RunView.class).status());
+            assertEquals(ErrorCode.SESSION_CLOSED, assertThrows(ApiException.class,
+                    () -> subscriber.next(Duration.ZERO)).error().code());
+        } finally {
+            subscriber.close();
+        }
+
+        var other = new SessionFeed(new Object(), mapper);
+        other.attach("session-2", null);
+        var clientClosed = other.subscribe(other.snapshot().cursor());
+        other.publish(run("run-2"));
+        clientClosed.close();
+        assertTrue(clientClosed.next(Duration.ZERO).isEmpty());
+    }
+
+    @Test
+    void serverCloseDrainsAFullSubscriberQueueWithoutNeedingAClosingMarker() throws Exception {
+        var feed = new SessionFeed(new Object(), mapper);
+        feed.attach("session-1", null);
+        try (var subscriber = feed.subscribe(feed.snapshot().cursor())) {
+            for (int index = 0; index < SessionSubscription.CAPACITY; index++) {
+                feed.publish(run("run-" + index));
+            }
+            feed.close();
+            for (int index = 0; index < SessionSubscription.CAPACITY; index++) {
+                assertEquals("run-" + index, mapper.treeToValue(
+                        subscriber.next(Duration.ZERO).orElseThrow().data(), RunView.class).runId());
+            }
+            assertEquals(ErrorCode.SESSION_CLOSED, assertThrows(ApiException.class,
+                    () -> subscriber.next(Duration.ZERO)).error().code());
+        }
+    }
+
+    @Test
+    void toolIdentityUsesBothOpaqueIdsForLiveAndReplayedClients() throws Exception {
+        var feed = new SessionFeed(new Object(), mapper);
+        feed.attach("session-1", null);
+        var before = feed.snapshot();
+        try (var live = feed.subscribe(before.cursor())) {
+            feed.publish(new ToolView("b", "run:a", "read", ToolStatus.COMPLETED,
+                    "first", false, false));
+            feed.publish(new ToolView("a:b", "run", "bash", ToolStatus.PREPARING,
+                    "second", false, false));
+
+            var liveView = SessionReducer.apply(before,
+                    live.next(Duration.ZERO).orElseThrow(), mapper);
+            liveView = SessionReducer.apply(liveView,
+                    live.next(Duration.ZERO).orElseThrow(), mapper);
+            assertEquals(2, liveView.tools().size());
+            assertEquals(feed.snapshot(), liveView);
+            assertEquals("first", feed.tool("run:a", "b").outputTail());
+            assertEquals("second", feed.tool("run", "a:b").outputTail());
+        }
+
+        try (var replayed = feed.subscribe(before.cursor())) {
+            var replayView = before;
+            for (int index = 0; index < 2; index++) {
+                replayView = SessionReducer.apply(replayView,
+                        replayed.next(Duration.ZERO).orElseThrow(), mapper);
+            }
+            assertEquals(feed.snapshot(), replayView);
+        }
+    }
+
+    @Test
     void projectionRetentionKeepsPendingApprovalWhileOldDecisionsExpire() throws Exception {
         var feed = new SessionFeed(new Object(), mapper);
         feed.attach("session-1", null);

@@ -40,7 +40,7 @@ final class SessionFeed {
     private final Map<String, InputView> inputs = new LinkedHashMap<>();
     private final Map<String, ApprovalView> approvals = new LinkedHashMap<>();
     private final Map<String, MessageView> messages = new LinkedHashMap<>();
-    private final Map<String, ToolView> tools = new LinkedHashMap<>();
+    private final Map<ToolKey, ToolView> tools = new LinkedHashMap<>();
     private String sessionId;
     private String leafId;
     private long seq;
@@ -115,7 +115,7 @@ final class SessionFeed {
                 return;
             }
             closed = true;
-            subscribers.forEach(SessionSubscription::finish);
+            subscribers.forEach(SessionSubscription::finishFromServer);
             subscribers.clear();
         }
     }
@@ -146,7 +146,7 @@ final class SessionFeed {
 
     ToolView tool(String runId, String toolCallId) {
         synchronized (lock) {
-            return tools.get(runId + ':' + toolCallId);
+            return tools.get(new ToolKey(runId, toolCallId));
         }
     }
 
@@ -179,7 +179,7 @@ final class SessionFeed {
                 }
             }
             if (view instanceof ToolView tool) {
-                var previous = tools.get(tool.runId() + ':' + tool.toolCallId());
+                var previous = tools.get(new ToolKey(tool.runId(), tool.toolCallId()));
                 if (tool.equals(previous) || (previous != null
                         && previous.status() == site.pplee.jcode.protocol.ToolStatus.COMPLETED)) {
                     return;
@@ -208,7 +208,7 @@ final class SessionFeed {
                     }
                 }
                 case ToolView tool -> {
-                    tools.put(tool.runId() + ':' + tool.toolCallId(), tool);
+                    tools.put(new ToolKey(tool.runId(), tool.toolCallId()), tool);
                     trim(tools, SessionReducer.MAX_TOOLS, ignored -> true);
                 }
                 case HistoryView history -> leafId = history.leafId();
@@ -233,7 +233,7 @@ final class SessionFeed {
         return new EventCursor(epoch, seq);
     }
 
-    private static <T> void trim(Map<String, T> entries, int limit, Predicate<T> evictable) {
+    private static <K, T> void trim(Map<K, T> entries, int limit, Predicate<T> evictable) {
         if (entries.size() <= limit) {
             return;
         }
@@ -249,4 +249,6 @@ final class SessionFeed {
     private static int estimatedBytes(SessionEvent event) {
         return 96 + event.data().toString().getBytes(StandardCharsets.UTF_8).length;
     }
+
+    private record ToolKey(String runId, String toolCallId) { }
 }

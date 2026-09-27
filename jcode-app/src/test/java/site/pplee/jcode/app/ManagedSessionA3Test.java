@@ -27,6 +27,7 @@ import site.pplee.jcode.protocol.InputStatus;
 import site.pplee.jcode.protocol.RunCommand;
 import site.pplee.jcode.protocol.RunKind;
 import site.pplee.jcode.protocol.RunStatus;
+import site.pplee.jcode.protocol.RunView;
 import site.pplee.jcode.protocol.SessionReducer;
 import site.pplee.jcode.protocol.SessionSnapshot;
 
@@ -50,6 +51,38 @@ class ManagedSessionA3Test {
 
     @TempDir
     Path directory;
+
+    @Test
+    void closingIdleSessionPreservesUnreadRunCompletion() throws Exception {
+        var mapper = new ObjectMapper();
+        var registry = new SessionRegistry();
+        var session = registry.create(config(new ReadThenStopClient(mapper), mapper),
+                directory.resolve("sessions"));
+        try (var subscription = session.subscribe(session.snapshot().cursor())) {
+            session.start(new RunCommand("command-1", "run-1", RunKind.PROMPT, "read it", null));
+            assertEquals(RunStatus.COMPLETED, session.settled("run-1")
+                    .toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join().status());
+            registry.close(session.sessionId());
+
+            boolean sawCompletion = false;
+            for (int index = 0; index < 32; index++) {
+                var event = subscription.next(Duration.ZERO);
+                if (event.isEmpty()) {
+                    fail("accepted events must be available after server close");
+                }
+                if (event.orElseThrow().type() == EventType.RUN_CHANGED) {
+                    var run = mapper.treeToValue(event.orElseThrow().data(), RunView.class);
+                    sawCompletion |= run.status() == RunStatus.COMPLETED;
+                }
+                if (sawCompletion) {
+                    break;
+                }
+            }
+            assertTrue(sawCompletion);
+            assertEquals(ErrorCode.SESSION_CLOSED, assertThrows(ApiException.class,
+                    () -> drainUntilClosed(subscription)).error().code());
+        }
+    }
 
     @Test
     void anotherSubscriberRecoversApprovalAndInputWithoutStoppingTheRun() throws Exception {
@@ -229,6 +262,13 @@ class ManagedSessionA3Test {
             Thread.currentThread().interrupt();
             throw new AssertionError(interrupted);
         }
+    }
+
+    private static void drainUntilClosed(SessionSubscription subscription) throws InterruptedException {
+        for (int index = 0; index < SessionSubscription.CAPACITY; index++) {
+            subscription.next(Duration.ZERO);
+        }
+        fail("server close was not reported after draining accepted events");
     }
 
     private ApprovalView waitForApproval(SessionSubscription subscription, ObjectMapper mapper)

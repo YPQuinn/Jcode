@@ -28,6 +28,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -36,18 +38,26 @@ final class ApprovalCoordinator {
     private static final int MAX_PENDING = 64;
     private static final int MAX_RETAINED = 256;
     private static final int MAX_DESCRIPTION_CHARS = 2_048;
+    private static final ScheduledThreadPoolExecutor DEFAULT_TIMEOUTS = newTimeoutExecutor();
 
     private final Object lock;
     private final SessionFeed feed;
     private final String sessionId;
     private final ApprovalSettings settings;
+    private final ScheduledThreadPoolExecutor timeouts;
     private final Map<String, PendingApproval> approvals = new LinkedHashMap<>();
 
     ApprovalCoordinator(Object lock, SessionFeed feed, String sessionId, ApprovalSettings settings) {
+        this(lock, feed, sessionId, settings, DEFAULT_TIMEOUTS);
+    }
+
+    ApprovalCoordinator(Object lock, SessionFeed feed, String sessionId,
+            ApprovalSettings settings, ScheduledThreadPoolExecutor timeouts) {
         this.lock = Objects.requireNonNull(lock);
         this.feed = Objects.requireNonNull(feed);
         this.sessionId = Objects.requireNonNull(sessionId);
         this.settings = Objects.requireNonNull(settings);
+        this.timeouts = Objects.requireNonNull(timeouts);
     }
 
     ApprovalView resolve(ApprovalCommand command) {
@@ -77,6 +87,7 @@ final class ApprovalCoordinator {
                     : new CodingToolPolicy.Decision.Deny("tool request denied by user");
         }
         approval.closeCancellationRegistration();
+        approval.cancelTimeout();
         approval.result.complete(result);
         return approval.view;
     }
@@ -135,8 +146,15 @@ final class ApprovalCoordinator {
         if (approval.view.status().terminal()) {
             registration.close();
         }
-        CompletableFuture.delayedExecutor(settings.timeout().toMillis(), TimeUnit.MILLISECONDS)
-                .execute(() -> settle(approval, ApprovalStatus.EXPIRED, "tool approval timed out"));
+        var timeout = timeouts.schedule(
+                () -> settle(approval, ApprovalStatus.EXPIRED, "tool approval timed out"),
+                settings.timeout().toMillis(), TimeUnit.MILLISECONDS);
+        synchronized (lock) {
+            approval.timeout = timeout;
+            if (approval.view.status().terminal()) {
+                timeout.cancel(false);
+            }
+        }
         return approval.result.copy();
     }
 
@@ -149,6 +167,7 @@ final class ApprovalCoordinator {
                 change(approval, ApprovalStatus.CANCELLED);
                 completions.add(() -> {
                     approval.closeCancellationRegistration();
+                    approval.cancelTimeout();
                     approval.result.complete(new CodingToolPolicy.Decision.Deny("run was cancelled"));
                 });
             }
@@ -164,6 +183,7 @@ final class ApprovalCoordinator {
             change(approval, status);
         }
         approval.closeCancellationRegistration();
+        approval.cancelTimeout();
         approval.result.complete(new CodingToolPolicy.Decision.Deny(reason));
     }
 
@@ -228,10 +248,21 @@ final class ApprovalCoordinator {
         return new ApiException(code, message);
     }
 
+    private static ScheduledThreadPoolExecutor newTimeoutExecutor() {
+        var executor = new ScheduledThreadPoolExecutor(1, task -> {
+            var thread = new Thread(task, "jcode-approval-timeouts");
+            thread.setDaemon(true);
+            return thread;
+        });
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
+    }
+
     private static final class PendingApproval {
         private final CompletableFuture<CodingToolPolicy.Decision> result = new CompletableFuture<>();
         private volatile ApprovalView view;
         private volatile CancellationRegistration registration;
+        private volatile ScheduledFuture<?> timeout;
 
         private PendingApproval(ApprovalView view) {
             this.view = view;
@@ -241,6 +272,13 @@ final class ApprovalCoordinator {
             var current = registration;
             if (current != null) {
                 current.close();
+            }
+        }
+
+        private void cancelTimeout() {
+            var current = timeout;
+            if (current != null) {
+                current.cancel(false);
             }
         }
     }

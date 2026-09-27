@@ -74,7 +74,7 @@ public final class SessionReducer {
                         snapshot.leafId(), snapshot.runs(), snapshot.inputs(), snapshot.approvals(),
                         snapshot.messages(), upsert(snapshot.tools(),
                                 mapper.treeToValue(event.data(), ToolView.class),
-                                tool -> tool.runId() + ':' + tool.toolCallId(), MAX_TOOLS));
+                                tool -> new ToolKey(tool.runId(), tool.toolCallId()), MAX_TOOLS));
                 case HISTORY_CHANGED -> new SessionSnapshot(snapshot.sessionId(), event.cursor(),
                         mapper.treeToValue(event.data(), HistoryView.class).leafId(),
                         snapshot.runs(), snapshot.inputs(), snapshot.approvals(),
@@ -88,7 +88,7 @@ public final class SessionReducer {
     private static <T> List<T> upsert(
             List<T> current,
             T next,
-            Function<T, String> identity,
+            Function<T, ?> identity,
             int limit
     ) {
         return upsert(current, next, identity, limit, ignored -> true);
@@ -97,7 +97,7 @@ public final class SessionReducer {
     private static <T> List<T> upsert(
             List<T> current,
             T next,
-            Function<T, String> identity,
+            Function<T, ?> identity,
             int limit,
             Predicate<T> evictable
     ) {
@@ -120,4 +120,6 @@ public final class SessionReducer {
         }
         return updated;
     }
+
+    private record ToolKey(String runId, String toolCallId) { }
 }

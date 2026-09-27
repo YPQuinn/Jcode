@@ -18,13 +18,14 @@ public final class SessionSubscription implements AutoCloseable {
     private final SessionFeed feed;
     private final ArrayBlockingQueue<Object> queue = new ArrayBlockingQueue<>(CAPACITY);
     private volatile boolean expired;
-    private volatile boolean closed;
+    private volatile boolean clientClosed;
+    private volatile boolean serverClosed;
 
     SessionSubscription(SessionFeed feed) {
         this.feed = feed;
     }
 
-    /** Wait on the caller's thread, never on the model or event-emission thread. */
+    /** Wait on the caller's thread; an exhausted server-closed stream reports SESSION_CLOSED. */
     public Optional<SessionEvent> next(Duration timeout) throws InterruptedException {
         Objects.requireNonNull(timeout, "timeout must not be null");
         if (timeout.isNegative()) {
@@ -33,14 +34,23 @@ public final class SessionSubscription implements AutoCloseable {
         if (expired) {
             throw new ApiException(ErrorCode.SUBSCRIBER_SLOW, "subscription fell behind; resync required");
         }
-        if (closed) {
+        if (clientClosed) {
             return Optional.empty();
+        }
+        if (serverClosed && queue.isEmpty()) {
+            throw new ApiException(ErrorCode.SESSION_CLOSED, "session stream is closed");
         }
         Object item = queue.poll(timeout.toNanos(), TimeUnit.NANOSECONDS);
         if (item == RESYNC || expired) {
             throw new ApiException(ErrorCode.SUBSCRIBER_SLOW, "subscription fell behind; resync required");
         }
-        if (item == CLOSED || closed || item == null) {
+        if (clientClosed) {
+            return Optional.empty();
+        }
+        if (item == CLOSED || (item == null && serverClosed)) {
+            throw new ApiException(ErrorCode.SESSION_CLOSED, "session stream is closed");
+        }
+        if (item == null) {
             return Optional.empty();
         }
         return Optional.of((SessionEvent) item);
@@ -59,12 +69,14 @@ public final class SessionSubscription implements AutoCloseable {
     @Override
     public void close() {
         feed.unsubscribe(this);
-        finish();
+        clientClosed = true;
+        queue.clear();
+        queue.offer(CLOSED);
     }
 
-    void finish() {
-        closed = true;
-        queue.clear();
+    /** Preserve already accepted events and wake a reader waiting on an empty queue. */
+    void finishFromServer() {
+        serverClosed = true;
         queue.offer(CLOSED);
     }
 }
