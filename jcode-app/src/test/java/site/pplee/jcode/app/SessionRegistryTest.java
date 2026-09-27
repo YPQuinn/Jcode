@@ -97,6 +97,99 @@ class SessionRegistryTest {
     }
 
     @Test
+    void oneWorkspaceAdmitsOnlyOneRunAcrossManagedSessions() throws Exception {
+        var blocked = new BlockingClient();
+        var registry = new SessionRegistry();
+        var first = registry.create(config(blocked, InputDeliveryMode.RUN_SCOPED),
+                directory.resolve("sessions"));
+        var second = registry.create(config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED),
+                directory.resolve("sessions"));
+        try {
+            first.start(new RunCommand("command-1", "run-1", RunKind.PROMPT, "wait", null));
+            await(blocked.started);
+            assertEquals(ErrorCode.SESSION_BUSY, assertThrows(ApiException.class,
+                    () -> second.start(new RunCommand("command-2", "run-2",
+                            RunKind.PROMPT, "blocked", null))).error().code());
+            blocked.complete();
+            first.settled("run-1").toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join();
+            second.start(new RunCommand("command-3", "run-3", RunKind.PROMPT, "ready", null));
+            assertTrue(second.settled("run-3").toCompletableFuture()
+                    .orTimeout(5, TimeUnit.SECONDS).join().status().terminal());
+        } finally {
+            if (!first.isClosed()) {
+                registry.close(first.sessionId());
+            }
+            if (!second.isClosed()) {
+                registry.close(second.sessionId());
+            }
+        }
+    }
+
+    @Test
+    void workspaceAliasesShareTheSameRunReservation() throws Exception {
+        Path workspace = Files.createDirectory(directory.resolve("workspace"));
+        Path alias = Files.createSymbolicLink(directory.resolve("workspace-alias"), workspace);
+        var blocked = new BlockingClient();
+        var registry = new SessionRegistry();
+        var first = registry.create(configAt(workspace, blocked),
+                directory.resolve("sessions"));
+        var second = registry.create(configAt(alias, new ImmediateClient()),
+                directory.resolve("sessions"));
+        try {
+            first.start(new RunCommand("command-1", "run-1", RunKind.PROMPT, "wait", null));
+            await(blocked.started);
+            assertEquals(ErrorCode.SESSION_BUSY, assertThrows(ApiException.class,
+                    () -> second.start(new RunCommand("command-2", "run-2",
+                            RunKind.PROMPT, "blocked", null))).error().code());
+            blocked.complete();
+            first.settled("run-1").toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join();
+            second.start(new RunCommand("command-3", "run-3", RunKind.PROMPT, "ready", null));
+            second.settled("run-3").toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join();
+        } finally {
+            registry.close(first.sessionId());
+            registry.close(second.sessionId());
+        }
+    }
+
+    @Test
+    void idleStopAndNewRunShareOneAdmissionBoundary() throws Exception {
+        var model = new BlockingClient();
+        var registry = new SessionRegistry();
+        var managed = registry.create(config(model, InputDeliveryMode.RUN_SCOPED),
+                directory.resolve("sessions"));
+        var startTogether = new CountDownLatch(1);
+        var run = CompletableFuture.supplyAsync(() -> {
+            await(startTogether);
+            try {
+                managed.start(new RunCommand("command", "run", RunKind.PROMPT, "wait", null));
+                return true;
+            } catch (ApiException rejection) {
+                assertEquals(ErrorCode.SESSION_CLOSED, rejection.error().code());
+                return false;
+            }
+        });
+        var stop = CompletableFuture.supplyAsync(() -> {
+            await(startTogether);
+            return registry.beginShutdownIfIdle();
+        });
+        try {
+            startTogether.countDown();
+            boolean runAccepted = run.orTimeout(5, TimeUnit.SECONDS).join();
+            boolean stopAccepted = stop.orTimeout(5, TimeUnit.SECONDS).join();
+            assertNotEquals(runAccepted, stopAccepted);
+            if (runAccepted) {
+                await(model.started);
+                model.complete();
+                managed.settled("run").toCompletableFuture()
+                        .orTimeout(5, TimeUnit.SECONDS).join();
+            }
+        } finally {
+            startTogether.countDown();
+            registry.close(managed.sessionId());
+        }
+    }
+
+    @Test
     void lateCloseCleanupDoesNotRemoveAReopenedSession() throws Exception {
         var cleanupCalls = new AtomicInteger();
         var firstCleanup = new CountDownLatch(1);
@@ -202,14 +295,16 @@ class SessionRegistryTest {
 
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
+        var waiterSelected = new CountDownLatch(1);
         var registry = new SessionRegistry(() -> { }, () -> {
             entered.countDown();
             await(release);
-        });
+        }, waiterSelected::countDown);
         var opening = CompletableFuture.supplyAsync(() -> openFailure(registry, config, file));
         try {
             await(entered);
             var waiter = CompletableFuture.supplyAsync(() -> openFailure(registry, config, file));
+            await(waiterSelected);
             registry.beginShutdown();
             assertTrue(registry.managedSessions().isEmpty());
             release.countDown();
@@ -269,6 +364,12 @@ class SessionRegistryTest {
 
     private CodingAgentConfig config(ModelClient client, InputDeliveryMode mode) {
         return config(client, mode, null);
+    }
+
+    private CodingAgentConfig configAt(Path workingDirectory, ModelClient client) {
+        return new CodingAgentConfig(workingDirectory, MODEL, client, new ObjectMapper(),
+                null, null, null, null, null, null, null, null,
+                null, null, null, Map.of(), null, InputDeliveryMode.RUN_SCOPED);
     }
 
     private CodingAgentConfig config(

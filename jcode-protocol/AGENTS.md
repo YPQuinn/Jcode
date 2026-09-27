@@ -8,3 +8,4 @@
 - 类型保持不可变，不暴露内部 `AgentMessage`、`Throwable` 或 Provider 私有状态。变更公开字段或枚举时同步更新 JSON 往返测试。
 - `SessionEvent` 的 JSON 数据须防御性复制。客户端按 epoch/seq 去重、检测缺口，再用 `SessionReducer` 更新相同版本的视图；过期游标需要重新取快照。
 - 服务宿主的认证、来源、方法与停机拒绝使用明确的 `ApiError` 代码；网络状态码与连接语义由 `jcode-server` 负责，不反向进入协议 DTO。
+- 工作区、托管会话、磁盘发现与历史页 DTO 只含可跨语言 JSON 值；文件引用是所选工作区 Session 目录下的文件名，不把内核文件对象或历史消息类型序列化给客户端。

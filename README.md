@@ -98,9 +98,9 @@ mvn verify
 mvn -pl coding-agent -am test
 ```
 
-### 启动本机服务（阶段 B1）
+### 启动本机服务（阶段 B2）
 
-服务目前提供受认证的 `GET /v1/capabilities` 和空闲停止 `POST /v1/server/stop`。Session 命令与 SSE 路由将在 B2 加入。
+服务提供受认证的 Session、Run、输入、审批、历史查询与 SSE 路由。请求和重连方式见 [HTTP API v1](docs/api/http-v1.md)。
 
 ```json
 {

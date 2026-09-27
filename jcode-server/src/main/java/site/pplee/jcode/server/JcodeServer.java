@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import site.pplee.jcode.app.ApprovalSettings;
+import site.pplee.jcode.app.ApiException;
 import site.pplee.jcode.app.ManagedSession;
 import site.pplee.jcode.app.SessionRegistry;
 import site.pplee.jcode.codingagent.CodingAgentSessionOptions;
@@ -20,8 +21,10 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,6 +32,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -43,14 +47,17 @@ public final class JcodeServer implements AutoCloseable {
     private final ExecutorService requests;
     private final ObjectMapper mapper;
     private final URI endpoint;
+    private final HttpApi api;
     private final Consumer<HttpExchange> beforeStopResponse;
+    private final UnaryOperator<CodingAgentSessionOptions> optionsDecorator;
     private final AtomicBoolean closing = new AtomicBoolean();
     private final CountDownLatch terminated = new CountDownLatch(1);
 
     private JcodeServer(ServerConfig config, SessionRegistry sessions,
             ServerInstanceFiles instance, HttpServer http,
             ExecutorService requests, ObjectMapper mapper,
-            Consumer<HttpExchange> beforeStopResponse) {
+            Consumer<HttpExchange> beforeStopResponse,
+            UnaryOperator<CodingAgentSessionOptions> optionsDecorator) {
         this.config = config;
         this.sessions = sessions;
         this.instance = instance;
@@ -58,7 +65,9 @@ public final class JcodeServer implements AutoCloseable {
         this.requests = requests;
         this.mapper = mapper;
         this.beforeStopResponse = beforeStopResponse;
+        this.optionsDecorator = optionsDecorator;
         this.endpoint = URI.create("http://127.0.0.1:" + http.getAddress().getPort());
+        this.api = new HttpApi(this, config, sessions, mapper);
     }
 
     public static JcodeServer start(ServerConfig config) throws IOException {
@@ -73,9 +82,17 @@ public final class JcodeServer implements AutoCloseable {
     /** Package-private response boundary for deterministic disconnect tests. */
     static JcodeServer start(ServerConfig config, SessionRegistry sessions,
             Consumer<HttpExchange> beforeStopResponse) throws IOException {
+        return start(config, sessions, beforeStopResponse, UnaryOperator.identity());
+    }
+
+    /** Package-private assembly boundary for controlled HTTP integration tests. */
+    static JcodeServer start(ServerConfig config, SessionRegistry sessions,
+            Consumer<HttpExchange> beforeStopResponse,
+            UnaryOperator<CodingAgentSessionOptions> optionsDecorator) throws IOException {
         Objects.requireNonNull(config);
         Objects.requireNonNull(sessions);
         Objects.requireNonNull(beforeStopResponse);
+        Objects.requireNonNull(optionsDecorator);
         var mapper = new ObjectMapper();
         var instance = ServerInstanceFiles.acquire(config.dataDirectory(), mapper);
         HttpServer http = null;
@@ -86,7 +103,7 @@ public final class JcodeServer implements AutoCloseable {
             requests = Executors.newVirtualThreadPerTaskExecutor();
             http.setExecutor(requests);
             var server = new JcodeServer(config, sessions, instance, http, requests, mapper,
-                    beforeStopResponse);
+                    beforeStopResponse, optionsDecorator);
             http.createContext("/", server::handle);
             http.start();
             instance.publish(server.endpoint.toString());
@@ -136,11 +153,17 @@ public final class JcodeServer implements AutoCloseable {
         if (workspace == null) {
             throw new IllegalArgumentException("unknown workspaceId");
         }
-        return CodingAgentSessionOptions.builder(workspace)
+        var options = CodingAgentSessionOptions.builder(workspace)
                 .userConfigDirectory(config.userConfigDirectory())
                 .systemEnvironment()
                 .inputDeliveryMode(InputDeliveryMode.RUN_SCOPED)
                 .build();
+        var decorated = Objects.requireNonNull(optionsDecorator.apply(options));
+        if (decorated.inputDeliveryMode() != InputDeliveryMode.RUN_SCOPED
+                || !decorated.workingDirectory().equals(workspace)) {
+            throw new IllegalArgumentException("server options must keep the strict workspace");
+        }
+        return decorated;
     }
 
     Path sessionDirectory(String workspaceId) {
@@ -258,7 +281,8 @@ public final class JcodeServer implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         boolean stopAccepted = false;
         try (exchange) {
-            String path = exchange.getRequestURI().getPath();
+            exchange.getResponseHeaders().set("X-Request-Id", UUID.randomUUID().toString());
+            String rawPath = exchange.getRequestURI().getRawPath();
             String origin = exchange.getRequestHeaders().getFirst("Origin");
             if (origin != null && !origin.equals(endpoint.toString())
                     && !config.allowedOrigins().contains(origin)) {
@@ -271,7 +295,7 @@ public final class JcodeServer implements AutoCloseable {
                 exchange.getResponseHeaders().set("Vary", "Origin");
             }
             if ("OPTIONS".equals(exchange.getRequestMethod())) {
-                preflight(exchange, path);
+                preflight(exchange, rawPath);
                 return;
             }
             if (!authorized(exchange)) {
@@ -284,20 +308,32 @@ public final class JcodeServer implements AutoCloseable {
                         "server is stopping"));
                 return;
             }
-            if ("/v1/capabilities".equals(path)) {
-                if (!"GET".equals(exchange.getRequestMethod())) {
-                    methodNotAllowed(exchange, "GET");
-                    return;
-                }
-                json(exchange, 200, new Capabilities(instance.instanceId(),
-                        endpoint.toString(), 1, 1, List.of("capabilities", "idleStop")));
+            ApiRoutes.Route route;
+            try {
+                route = ApiRoutes.match(rawPath);
+            } catch (IllegalArgumentException failure) {
+                json(exchange, 400, new ApiError(ErrorCode.INVALID_ARGUMENT,
+                        "path contains an invalid identifier"));
                 return;
             }
-            if ("/v1/server/stop".equals(path)) {
-                if (!"POST".equals(exchange.getRequestMethod())) {
-                    methodNotAllowed(exchange, "POST");
-                    return;
-                }
+            if (route == null) {
+                json(exchange, 404, new ApiError(ErrorCode.NOT_FOUND, "route was not found"));
+                return;
+            }
+            if (!route.methods().contains(exchange.getRequestMethod())) {
+                methodNotAllowed(exchange, route.allowHeader());
+                return;
+            }
+            if (route.kind() == ApiRoutes.Kind.CAPABILITIES) {
+                json(exchange, 200, new Capabilities(instance.instanceId(),
+                        endpoint.toString(), 1, 1,
+                        List.of("sessions", "runs", "inputs", "approvals", "history", "sse", "idleStop"),
+                        Map.of("managedSessions", SessionRegistry.MAX_MANAGED_SESSIONS,
+                                "jsonBodyBytes", HttpApi.MAX_BODY_BYTES,
+                                "subscriptionsPerSession", 32)));
+                return;
+            }
+            if (route.kind() == ApiRoutes.Kind.STOP) {
                 if (!sessions.beginShutdownIfIdle()) {
                     json(exchange, 409, new ApiError(ErrorCode.SESSION_BUSY,
                             "server has active work or is already stopping"));
@@ -308,7 +344,32 @@ public final class JcodeServer implements AutoCloseable {
                 json(exchange, 202, new StopAccepted("stopping"));
                 return;
             }
-            json(exchange, 404, new ApiError(ErrorCode.NOT_FOUND, "route was not found"));
+            HttpApi.Response response;
+            try {
+                response = api.dispatch(exchange, route);
+            } catch (ApiException rejection) {
+                json(exchange, status(rejection.error().code()), rejection.error());
+                return;
+            } catch (IllegalArgumentException invalid) {
+                json(exchange, 400, new ApiError(ErrorCode.INVALID_ARGUMENT,
+                        "request is invalid"));
+                return;
+            } catch (RuntimeException failure) {
+                LOGGER.warning("HTTP request failed: " + failure.getClass().getSimpleName());
+                if (exchange.getResponseCode() < 0) {
+                    json(exchange, 500, new ApiError(ErrorCode.INTERNAL_ERROR,
+                            "request could not be completed"));
+                    return;
+                }
+                throw failure;
+            }
+            if (response != null) {
+                if (response.status() == 204) {
+                    exchange.sendResponseHeaders(204, -1);
+                } else {
+                    json(exchange, response.status(), response.body());
+                }
+            }
         } finally {
             if (stopAccepted) {
                 Thread.startVirtualThread(this::close);
@@ -316,18 +377,21 @@ public final class JcodeServer implements AutoCloseable {
         }
     }
 
-    private void preflight(HttpExchange exchange, String path) throws IOException {
+    private void preflight(HttpExchange exchange, String rawPath) throws IOException {
         if (exchange.getRequestHeaders().getFirst("Origin") == null) {
             json(exchange, 403, new ApiError(ErrorCode.ORIGIN_FORBIDDEN,
                     "preflight origin is required"));
             return;
         }
-        String allowedMethod = switch (path) {
-            case "/v1/capabilities" -> "GET";
-            case "/v1/server/stop" -> "POST";
-            default -> null;
-        };
-        if (allowedMethod == null) {
+        ApiRoutes.Route route;
+        try {
+            route = ApiRoutes.match(rawPath);
+        } catch (IllegalArgumentException invalid) {
+            json(exchange, 400, new ApiError(ErrorCode.INVALID_ARGUMENT,
+                    "path contains an invalid identifier"));
+            return;
+        }
+        if (route == null) {
             json(exchange, 404, new ApiError(ErrorCode.NOT_FOUND, "route was not found"));
             return;
         }
@@ -335,7 +399,7 @@ public final class JcodeServer implements AutoCloseable {
                 .getFirst("Access-Control-Request-Method");
         String requestedHeaders = exchange.getRequestHeaders()
                 .getFirst("Access-Control-Request-Headers");
-        if (!allowedMethod.equals(requestedMethod)
+        if (!route.methods().contains(requestedMethod)
                 || requestedHeaders == null
                 || !List.of(requestedHeaders.toLowerCase(Locale.ROOT).split(",\\s*"))
                         .stream().allMatch(header -> header.equals("authorization")
@@ -344,7 +408,7 @@ public final class JcodeServer implements AutoCloseable {
                     "preflight is not allowed"));
             return;
         }
-        exchange.getResponseHeaders().set("Access-Control-Allow-Methods", allowedMethod);
+        exchange.getResponseHeaders().set("Access-Control-Allow-Methods", route.allowHeader());
         exchange.getResponseHeaders().set("Access-Control-Allow-Headers",
                 "Authorization, Content-Type");
         exchange.sendResponseHeaders(204, -1);
@@ -376,8 +440,25 @@ public final class JcodeServer implements AutoCloseable {
         exchange.getResponseBody().write(body);
     }
 
+    private static int status(ErrorCode code) {
+        return switch (code) {
+            case UNAUTHORIZED -> 401;
+            case ORIGIN_FORBIDDEN -> 403;
+            case NOT_FOUND -> 404;
+            case METHOD_NOT_ALLOWED -> 405;
+            case PAYLOAD_TOO_LARGE -> 413;
+            case UNSUPPORTED_MEDIA_TYPE -> 415;
+            case CAPACITY_EXCEEDED -> 429;
+            case SERVER_STOPPING -> 503;
+            case INTERNAL_ERROR -> 500;
+            case INVALID_ARGUMENT -> 400;
+            default -> 409;
+        };
+    }
+
     private record Capabilities(String instanceId, String endpoint,
-            int httpMajorVersion, int eventSchemaVersion, List<String> operations) { }
+            int httpMajorVersion, int eventSchemaVersion, List<String> operations,
+            Map<String, Integer> limits) { }
 
     private record StopAccepted(String status) { }
 }

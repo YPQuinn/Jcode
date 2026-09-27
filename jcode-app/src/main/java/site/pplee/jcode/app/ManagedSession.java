@@ -6,6 +6,7 @@ import site.pplee.jcode.ai.message.Content;
 import site.pplee.jcode.codingagent.CodingAgentConfig;
 import site.pplee.jcode.codingagent.CodingAgentRunResult;
 import site.pplee.jcode.codingagent.CodingAgentSession;
+import site.pplee.jcode.codingagent.HistoryDisplayPage;
 import site.pplee.jcode.codingagent.InputRecord;
 import site.pplee.jcode.codingagent.InputRequest;
 import site.pplee.jcode.codingagent.event.CodingAgentDisplayEvent;
@@ -19,6 +20,8 @@ import site.pplee.jcode.protocol.ApprovalView;
 import site.pplee.jcode.protocol.ErrorCode;
 import site.pplee.jcode.protocol.EventCursor;
 import site.pplee.jcode.protocol.HistoryView;
+import site.pplee.jcode.protocol.HistoryEntryView;
+import site.pplee.jcode.protocol.HistoryPage;
 import site.pplee.jcode.protocol.InputCommand;
 import site.pplee.jcode.protocol.InputView;
 import site.pplee.jcode.protocol.MessageView;
@@ -30,6 +33,7 @@ import site.pplee.jcode.protocol.SessionSnapshot;
 import site.pplee.jcode.protocol.ToolStatus;
 import site.pplee.jcode.protocol.ToolView;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -55,6 +59,8 @@ public final class ManagedSession {
     private final Object lock = new Object();
     private final Object admissionLock;
     private final BooleanSupplier stopping;
+    private final SessionRegistry registry;
+    private final Path workspaceKey;
     private final CodingAgentSession core;
     private final String sessionId;
     private final SessionFeed feed;
@@ -69,10 +75,13 @@ public final class ManagedSession {
     private boolean closed;
 
     ManagedSession(CodingAgentSession core, ApprovalSettings approvalSettings,
-            Object admissionLock, BooleanSupplier stopping) {
+            Object admissionLock, BooleanSupplier stopping, SessionRegistry registry)
+            throws IOException {
         this.core = Objects.requireNonNull(core, "core must not be null");
         this.admissionLock = Objects.requireNonNull(admissionLock);
         this.stopping = Objects.requireNonNull(stopping);
+        this.registry = Objects.requireNonNull(registry);
+        this.workspaceKey = core.workingDirectory().toRealPath();
         this.sessionId = core.history().header().id().toString();
         this.feed = new SessionFeed(lock, new ObjectMapper());
         feed.attach(sessionId, core.history().currentEntryId().orElse(null));
@@ -137,6 +146,24 @@ public final class ManagedSession {
         return core.history().currentEntryId();
     }
 
+    /** Read one fixed branch page without moving the live history leaf. */
+    public HistoryPage historyPage(String headEntryId, String beforeEntryId, int limit) {
+        var history = core.history();
+        if (headEntryId != null && history.entry(headEntryId).isEmpty()) {
+            throw error(ErrorCode.NOT_FOUND, "history head does not exist");
+        }
+        HistoryDisplayPage page;
+        try {
+            page = HistoryDisplayPage.from(history, headEntryId, beforeEntryId, limit);
+        } catch (IllegalArgumentException failure) {
+            throw error(ErrorCode.INVALID_ARGUMENT, failure.getMessage());
+        }
+        return new HistoryPage(sessionId, page.headEntryId(), page.nextBeforeEntryId(),
+                page.entries().stream().map(item -> new HistoryEntryView(
+                        item.entryId(), item.parentId(), item.type(), item.role(),
+                        item.text(), item.textTruncated())).toList());
+    }
+
     /** Submit a run command; an accepted command remains queryable even if startup fails. */
     public RunView start(RunCommand command) {
         Objects.requireNonNull(command, "command must not be null");
@@ -168,6 +195,7 @@ public final class ManagedSession {
                     throw error(ErrorCode.STATE_CONFLICT, "session leaf has changed");
                 }
                 makeRoom();
+                registry.claimWorkspace(workspaceKey, sessionId, command.runId());
                 entry = new RunEntry(command, new RunView(
                         sessionId, command.commandId(), command.runId(), RunStatus.ACCEPTED,
                         false, null, null, false, null));
@@ -550,26 +578,30 @@ public final class ManagedSession {
         }
         RunView finalView;
         List<Runnable> cancelledApprovals;
-        synchronized (lock) {
-            if (entry.view.status().terminal()) {
-                return;
-            }
-            entry.view = new RunView(sessionId, entry.command.commandId(), entry.command.runId(),
-                    status, entry.view.cancelRequested(), stopReason, text,
-                    textTruncated, errorMessage);
-            for (var input : settledInputs) {
-                var related = inputs.get(input.inputId());
-                if (related != null) {
-                    related.terminal = input.status() != site.pplee.jcode.codingagent.InputStatus.PENDING;
-                    feed.publish(toInputView(related.command, input));
+        synchronized (admissionLock) {
+            synchronized (lock) {
+                if (entry.view.status().terminal()) {
+                    return;
                 }
+                entry.view = new RunView(sessionId, entry.command.commandId(), entry.command.runId(),
+                        status, entry.view.cancelRequested(), stopReason, text,
+                        textTruncated, errorMessage);
+                if (activeRun == entry) {
+                    activeRun = null;
+                }
+                registry.releaseWorkspace(workspaceKey, sessionId, entry.command.runId());
+                for (var input : settledInputs) {
+                    var related = inputs.get(input.inputId());
+                    if (related != null) {
+                        related.terminal = input.status()
+                                != site.pplee.jcode.codingagent.InputStatus.PENDING;
+                        feed.publish(toInputView(related.command, input));
+                    }
+                }
+                cancelledApprovals = approvals.markCancelled(entry.command.runId());
+                finalView = entry.view;
+                feed.publish(finalView);
             }
-            if (activeRun == entry) {
-                activeRun = null;
-            }
-            cancelledApprovals = approvals.markCancelled(entry.command.runId());
-            finalView = entry.view;
-            feed.publish(finalView);
         }
         cancelledApprovals.forEach(Runnable::run);
         entry.finished.complete(finalView);

@@ -6,11 +6,15 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.Socket;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
+import java.nio.file.StandardWatchEventKinds;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -174,6 +178,89 @@ class ServerProcessIT {
         } finally {
             destroy(successor);
         }
+    }
+
+    @Test
+    void unreadSseSocketDoesNotBlockQueriesOrServiceShutdown() throws Exception {
+        Path workspace = Files.createDirectory(directory.resolve("workspace"));
+        Path data = directory.resolve("data");
+        Path config = writeConfig("timeout.json", data, workspace, 0);
+        Path trigger = directory.resolve("flood.trigger");
+        Path done = directory.resolve("flood.done");
+        Process fixture = launchTimeoutFixture(config, trigger, done);
+        try {
+            String line = firstLine(fixture);
+            assertNotNull(line);
+            assertTrue(line.startsWith("TEST_SERVER_READY "), line);
+            String[] parts = line.split(" ");
+            URI endpoint = URI.create(parts[1].substring("endpoint=".length()));
+            String sessionId = parts[2].substring("sessionId=".length());
+            String after = parts[3].substring("after=".length());
+            String token = Files.readString(data.resolve("service.token")).strip();
+            try (var socket = new Socket("127.0.0.1", endpoint.getPort())) {
+                socket.setReceiveBufferSize(1_024);
+                socket.setSoTimeout(5_000);
+                String request = "GET /v1/sessions/" + sessionId + "/events?after="
+                        + after + " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        + "Authorization: Bearer " + token + "\r\n\r\n";
+                socket.getOutputStream().write(request.getBytes(StandardCharsets.US_ASCII));
+                assertTrue(readHeaders(socket).startsWith("HTTP/1.1 200"));
+
+                try (var watch = FileSystems.getDefault().newWatchService()) {
+                    directory.register(watch, StandardWatchEventKinds.ENTRY_CREATE);
+                    Files.createFile(trigger);
+                    while (!Files.exists(done)) {
+                        var key = watch.poll(20, TimeUnit.SECONDS);
+                        assertNotNull(key, "model flood did not settle");
+                        key.reset();
+                    }
+                }
+                assertEquals(200, capabilities(endpoint, token).statusCode());
+                assertEquals(202, stop(endpoint, token).statusCode());
+                assertTrue(fixture.waitFor(10, TimeUnit.SECONDS),
+                        "service must close a blocked SSE exchange during shutdown");
+                assertEquals(0, fixture.exitValue());
+            }
+        } finally {
+            destroy(fixture);
+        }
+    }
+
+    private static Process launchTimeoutFixture(Path config, Path trigger, Path done)
+            throws Exception {
+        String javaBinary = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        Path classes = Path.of(ServerTimeoutFixture.class.getProtectionDomain()
+                .getCodeSource().getLocation().toURI());
+        String classpath = classes + java.io.File.pathSeparator
+                + System.getProperty("jcode.server.jar");
+        return new ProcessBuilder(javaBinary,
+                "-Dsun.net.httpserver.maxRspTime=1",
+                "-Dsun.net.httpserver.timerMillis=100",
+                "--add-modules", "jdk.httpserver", "-cp", classpath,
+                ServerTimeoutFixture.class.getName(), config.toString(),
+                trigger.toString(), done.toString()).start();
+    }
+
+    private static String readHeaders(Socket socket) throws IOException {
+        var bytes = new java.io.ByteArrayOutputStream();
+        int previous = -1;
+        int beforePrevious = -1;
+        int beforeThat = -1;
+        while (bytes.size() < 8_192) {
+            int current = socket.getInputStream().read();
+            if (current == -1) {
+                throw new IOException("SSE response ended before headers");
+            }
+            bytes.write(current);
+            if (beforeThat == '\r' && beforePrevious == '\n'
+                    && previous == '\r' && current == '\n') {
+                return bytes.toString(StandardCharsets.US_ASCII);
+            }
+            beforeThat = beforePrevious;
+            beforePrevious = previous;
+            previous = current;
+        }
+        throw new IOException("SSE response headers exceed 8 KiB");
     }
 
     private Path writeConfig(String name, Path data, Path workspace, int port)

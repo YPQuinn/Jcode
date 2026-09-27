@@ -26,7 +26,8 @@ class ProtocolJsonTest {
         assertEquals(inputView, roundTrip(inputView, InputView.class));
         assertEquals(error, roundTrip(error, ApiError.class));
         for (var code : List.of(ErrorCode.UNAUTHORIZED, ErrorCode.ORIGIN_FORBIDDEN,
-                ErrorCode.METHOD_NOT_ALLOWED, ErrorCode.SERVER_STOPPING)) {
+                ErrorCode.METHOD_NOT_ALLOWED, ErrorCode.SERVER_STOPPING,
+                ErrorCode.PAYLOAD_TOO_LARGE, ErrorCode.UNSUPPORTED_MEDIA_TYPE)) {
             var hostError = new ApiError(code, "service rejection");
             assertEquals(hostError, roundTrip(hostError, ApiError.class));
         }
@@ -69,6 +70,24 @@ class ProtocolJsonTest {
         var mutated = (com.fasterxml.jackson.databind.node.ObjectNode) event.data();
         mutated.put("toolName", "changed");
         assertEquals("read", event.data().get("toolName").asText());
+    }
+
+    @Test
+    void discoveryAndHistoryPagesRoundTrip() throws Exception {
+        var managed = new ManagedSessionView("session-1", "project", "one.jsonl", "entry-1");
+        var files = new SessionFilesView("project",
+                List.of(new SessionFileView("one.jsonl", "session-1", "Example",
+                        "2026-09-27T00:00:00Z", "2026-09-27T01:00:00Z", 2)),
+                List.of(new SessionFileDiagnosticView("damaged.jsonl", "INVALID_SESSION",
+                        4, 37, "invalid record")));
+        var history = new HistoryPage("session-1", "entry-2", "entry-1",
+                List.of(new HistoryEntryView("entry-2", "entry-1", "message",
+                        "assistant", "answer", false)));
+        assertEquals(managed, roundTrip(managed, ManagedSessionView.class));
+        assertEquals(files, roundTrip(files, SessionFilesView.class));
+        assertEquals(history, roundTrip(history, HistoryPage.class));
+        assertEquals(new WorkspaceView("project", "/tmp/project"),
+                roundTrip(new WorkspaceView("project", "/tmp/project"), WorkspaceView.class));
     }
 
     private <T> T roundTrip(T value, Class<T> type) throws Exception {

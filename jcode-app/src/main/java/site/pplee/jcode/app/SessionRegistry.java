@@ -28,8 +28,10 @@ public final class SessionRegistry {
     private final Map<String, ManagedSession> byId = new LinkedHashMap<>();
     private final Map<Path, CompletableFuture<ManagedSession>> byFile = new LinkedHashMap<>();
     private final Map<String, Path> pathById = new LinkedHashMap<>();
+    private final Map<Path, RunOwner> workspaceRuns = new LinkedHashMap<>();
     private final Runnable beforeCloseCleanup;
     private final Runnable beforeRegistration;
+    private final Runnable beforeOpenWait;
     private int pendingCreations;
     private volatile boolean stopping;
 
@@ -44,8 +46,15 @@ public final class SessionRegistry {
 
     /** Package-private construction boundary for stop/register interleaving tests. */
     SessionRegistry(Runnable beforeCloseCleanup, Runnable beforeRegistration) {
+        this(beforeCloseCleanup, beforeRegistration, () -> { });
+    }
+
+    /** Package-private observer after a caller selects an existing open attempt. */
+    SessionRegistry(Runnable beforeCloseCleanup, Runnable beforeRegistration,
+            Runnable beforeOpenWait) {
         this.beforeCloseCleanup = Objects.requireNonNull(beforeCloseCleanup);
         this.beforeRegistration = Objects.requireNonNull(beforeRegistration);
+        this.beforeOpenWait = Objects.requireNonNull(beforeOpenWait);
     }
 
     /** Create a file-backed strict Session and register its long-lived writer. */
@@ -100,7 +109,7 @@ public final class SessionRegistry {
     ) throws IOException {
         try {
             var managed = new ManagedSession(core, approvals,
-                    admissionLock, () -> stopping);
+                    admissionLock, () -> stopping, this);
             holder.set(managed);
             Path file = core.sessionFile().orElseThrow().toRealPath();
             beforeRegistration.run();
@@ -178,6 +187,7 @@ public final class SessionRegistry {
             }
         }
         if (!owner) {
+            beforeOpenWait.run();
             try {
                 var managed = opening.join();
                 if (managed.isClosed()) {
@@ -207,7 +217,7 @@ public final class SessionRegistry {
             var holder = new AtomicReference<ManagedSession>();
             core = opener.open(file, holder);
             var managed = new ManagedSession(core, approvals,
-                    admissionLock, () -> stopping);
+                    admissionLock, () -> stopping, this);
             holder.set(managed);
             beforeRegistration.run();
             synchronized (lock) {
@@ -253,6 +263,24 @@ public final class SessionRegistry {
     public List<ManagedSession> managedSessions() {
         synchronized (lock) {
             return List.copyOf(byId.values());
+        }
+    }
+
+    /** Reserve one real workspace for the exact product Run being accepted. */
+    void claimWorkspace(Path workspace, String sessionId, String runId) {
+        synchronized (admissionLock) {
+            var previous = workspaceRuns.putIfAbsent(workspace, new RunOwner(sessionId, runId));
+            if (previous != null) {
+                throw new ApiException(ErrorCode.SESSION_BUSY,
+                        "another run is active in this workspace");
+            }
+        }
+    }
+
+    /** Release only the Run that acquired the workspace. */
+    void releaseWorkspace(Path workspace, String sessionId, String runId) {
+        synchronized (admissionLock) {
+            workspaceRuns.remove(workspace, new RunOwner(sessionId, runId));
         }
     }
 
@@ -348,4 +376,6 @@ public final class SessionRegistry {
             throw new IllegalArgumentException("managed sessions require RUN_SCOPED input delivery");
         }
     }
+
+    private record RunOwner(String sessionId, String runId) { }
 }

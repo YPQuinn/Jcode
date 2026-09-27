@@ -17,6 +17,8 @@ public final class ServerMain {
         if (!file.isAbsolute()) {
             throw new IllegalArgumentException("--config must be an absolute path");
         }
+        System.getProperties().putIfAbsent("sun.net.httpserver.maxReqTime", "15");
+        System.getProperties().putIfAbsent("sun.net.httpserver.maxRspTime", "300");
         var config = ServerConfig.load(file, new ObjectMapper());
         try (var server = JcodeServer.start(config)) {
             var shutdownHook = new Thread(

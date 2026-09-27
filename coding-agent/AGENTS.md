@@ -16,6 +16,7 @@ Headless 编码产品内核。组合 `ai`、`agent-core` 与产品 composition r
 | Session 不可变模型、诊断、树查询与分支 context | `session/`（对外使用只读 `SessionSnapshot` / `SessionInfo`） |
 | 上下文估算、截断规划与摘要生成 | `compaction/`；产品生命周期编排仍在 `CodingAgentSession.java` |
 | 显式目录会话发现 | `SessionFiles.java` / `SessionListResult.java` / `SessionFileDiagnostic.java` |
+| 有界只读历史展示 | `HistoryDisplayPage.java`；固定一次快照的父链，保留非消息条目类型 |
 | System Prompt | `prompt/SystemPromptBuilder.java` |
 | 项目指令配置、加载与快照 | `context/ProjectContextConfig.java` / `context/ProjectContextLoader.java` / `context/ProjectContextSnapshot.java` |
 | Skill、模板、SYSTEM 与资源诊断 | `resource/` |
