@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.net.URI;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -215,6 +216,23 @@ class ServerProcessIT {
                         key.reset();
                     }
                 }
+                assertEquals(200, capabilities(endpoint, token).statusCode());
+                // The response deadline must release this connection while the service stays up.
+                boolean ended = false;
+                long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+                byte[] received = new byte[16_384];
+                socket.setSoTimeout(1_000);
+                while (System.nanoTime() < deadline) {
+                    try {
+                        if (socket.getInputStream().read(received) == -1) {
+                            ended = true;
+                            break;
+                        }
+                    } catch (SocketTimeoutException waiting) {
+                        // Keep waiting within the bounded deadline for the peer to close.
+                    }
+                }
+                assertTrue(ended, "unread SSE response must close before service shutdown");
                 assertEquals(200, capabilities(endpoint, token).statusCode());
                 assertEquals(202, stop(endpoint, token).statusCode());
                 assertTrue(fixture.waitFor(10, TimeUnit.SECONDS),

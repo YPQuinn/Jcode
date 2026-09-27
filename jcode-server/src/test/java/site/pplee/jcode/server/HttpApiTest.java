@@ -143,6 +143,39 @@ class HttpApiTest {
     }
 
     @Test
+    void sessionFileOwnerSurvivesWorkspaceAliasesAndReopen() throws Exception {
+        Path workspace = Files.createDirectory(directory.resolve("workspace"));
+        var config = new ServerConfig(0, directory.resolve("data"),
+                directory.resolve("user-config"),
+                Map.of("alpha", workspace, "zeta", workspace),
+                Set.of(), Set.of(), Duration.ofMinutes(5));
+        try (var server = JcodeServer.start(config, new SessionRegistry(),
+                exchange -> { }, base -> borrowed(base, new ReplyProvider()))) {
+            String token = token(server);
+            JsonNode created = json(send(server, "POST", "/v1/sessions", token,
+                    "{\"workspaceId\":\"zeta\"}").body());
+            assertEquals("zeta", created.path("workspaceId").asText());
+            String sessionId = created.path("sessionId").asText();
+            String fileRef = created.path("fileRef").asText();
+
+            JsonNode listed = json(send(server, "GET", "/v1/sessions", token, null).body());
+            assertEquals(1, listed.size());
+            assertEquals("zeta", listed.get(0).path("workspaceId").asText());
+            assertEquals(fileRef, listed.get(0).path("fileRef").asText());
+            assertEquals(204, send(server, "POST", "/v1/sessions/" + sessionId
+                    + "/close", token, null).statusCode());
+
+            JsonNode reopened = json(send(server, "POST", "/v1/sessions/open", token,
+                    "{\"workspaceId\":\"zeta\",\"fileRef\":\"" + fileRef + "\"}").body());
+            assertEquals(sessionId, reopened.path("sessionId").asText());
+            assertEquals("zeta", reopened.path("workspaceId").asText());
+            assertEquals(404, send(server, "POST", "/v1/sessions/open", token,
+                    "{\"workspaceId\":\"alpha\",\"fileRef\":\"" + fileRef + "\"}")
+                    .statusCode());
+        }
+    }
+
+    @Test
     void sseReplaysEventsAndDrainsTerminalBeforeCloseControl() throws Exception {
         try (var server = start(new ReplyProvider())) {
             String token = token(server);
@@ -195,7 +228,8 @@ class HttpApiTest {
     @Test
     void reconnectAfterReadingOnlyAnEventIdReplaysTheWholeEvent() throws Exception {
         var provider = new PausedProvider();
-        try (var server = start(provider)) {
+        String origin = "http://127.0.0.1:3000";
+        try (var server = start(provider, Set.of(), Set.of(origin))) {
             String token = token(server);
             String sessionId = json(send(server, "POST", "/v1/sessions", token,
                     "{\"workspaceId\":\"project\"}").body()).path("sessionId").asText();
@@ -224,9 +258,26 @@ class HttpApiTest {
             provider.completeFirst();
             server.sessions().find(sessionId).orElseThrow().settled("run-1")
                     .toCompletableFuture().orTimeout(5, TimeUnit.SECONDS).join();
+            var preflight = HttpRequest.newBuilder(server.endpoint().resolve(events))
+                    .header("Origin", origin)
+                    .header("Access-Control-Request-Method", "GET")
+                    .header("Access-Control-Request-Headers", "authorization,last-event-id")
+                    .method("OPTIONS", HttpRequest.BodyPublishers.noBody()).build();
+            var allowed = client.send(preflight, HttpResponse.BodyHandlers.discarding());
+            assertEquals(204, allowed.statusCode());
+            assertTrue(allowed.headers().firstValue("Access-Control-Allow-Headers")
+                    .orElseThrow().contains("Last-Event-ID"));
+            var denied = HttpRequest.newBuilder(server.endpoint().resolve(events))
+                    .header("Origin", "https://unlisted.example")
+                    .header("Access-Control-Request-Method", "GET")
+                    .header("Access-Control-Request-Headers", "authorization,last-event-id")
+                    .method("OPTIONS", HttpRequest.BodyPublishers.noBody()).build();
+            assertEquals(403, client.send(denied,
+                    HttpResponse.BodyHandlers.discarding()).statusCode());
             var reconnect = HttpRequest.newBuilder(server.endpoint().resolve(
                             base + "/events?after=outdated"))
                     .header("Authorization", "Bearer " + token)
+                    .header("Origin", origin)
                     .header("Last-Event-ID", cursor).GET().build();
             var replay = client.send(reconnect, HttpResponse.BodyHandlers.ofInputStream());
             assertEquals(200, replay.statusCode());
@@ -388,11 +439,16 @@ class HttpApiTest {
     }
 
     private JcodeServer start(ModelProvider provider, Set<String> approvalTools) throws Exception {
+        return start(provider, approvalTools, Set.of());
+    }
+
+    private JcodeServer start(ModelProvider provider, Set<String> approvalTools,
+            Set<String> allowedOrigins) throws Exception {
         Path workspace = directory.resolve("workspace");
         Files.createDirectories(workspace);
         var config = new ServerConfig(0, directory.resolve("data"),
                 directory.resolve("user-config"), Map.of("project", workspace),
-                Set.of(), approvalTools, Duration.ofMinutes(5));
+                allowedOrigins, approvalTools, Duration.ofMinutes(5));
         return JcodeServer.start(config, new SessionRegistry(), exchange -> { },
                 base -> borrowed(base, provider));
     }

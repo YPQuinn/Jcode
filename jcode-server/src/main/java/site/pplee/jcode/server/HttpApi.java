@@ -171,13 +171,22 @@ final class HttpApi {
     }
 
     private ManagedSessionView view(ManagedSession session) {
-        String workspaceId = config.workspaces().entrySet().stream()
-                .filter(item -> item.getValue().equals(session.workingDirectory()))
-                .map(Map.Entry::getKey).sorted().findFirst()
-                .orElseThrow(() -> new IllegalStateException("managed session has no configured workspace"));
-        String fileRef = session.sessionFile().orElseThrow().getFileName().toString();
-        return new ManagedSessionView(session.sessionId(), workspaceId, fileRef,
-                session.currentLeafId().orElse(null));
+        Path file = session.sessionFile().orElseThrow();
+        try {
+            Path fileDirectory = file.getParent().toRealPath();
+            for (String workspaceId : config.workspaces().keySet()) {
+                Path configuredDirectory = config.dataDirectory().resolve("sessions")
+                        .resolve(workspaceId);
+                if (Files.isDirectory(configuredDirectory)
+                        && fileDirectory.equals(configuredDirectory.toRealPath())) {
+                    return new ManagedSessionView(session.sessionId(), workspaceId,
+                            file.getFileName().toString(), session.currentLeafId().orElse(null));
+                }
+            }
+        } catch (IOException failure) {
+            throw internal("session file ownership could not be resolved", failure);
+        }
+        throw new IllegalStateException("managed session file has no configured workspace");
     }
 
     private String requireWorkspace(String workspaceId) {

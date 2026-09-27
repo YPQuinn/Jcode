@@ -400,17 +400,23 @@ public final class JcodeServer implements AutoCloseable {
         String requestedHeaders = exchange.getRequestHeaders()
                 .getFirst("Access-Control-Request-Headers");
         if (!route.methods().contains(requestedMethod)
-                || requestedHeaders == null
-                || !List.of(requestedHeaders.toLowerCase(Locale.ROOT).split(",\\s*"))
-                        .stream().allMatch(header -> header.equals("authorization")
-                                || header.equals("content-type"))) {
+                || requestedHeaders == null || requestedHeaders.isBlank()
+                || java.util.Arrays.stream(requestedHeaders.toLowerCase(Locale.ROOT)
+                                .split(",", -1))
+                        .map(String::strip)
+                        .anyMatch(header -> !header.equals("authorization")
+                                && !header.equals("content-type")
+                                && !(route.kind() == ApiRoutes.Kind.EVENTS
+                                        && header.equals("last-event-id")))) {
             json(exchange, 403, new ApiError(ErrorCode.INVALID_ARGUMENT,
                     "preflight is not allowed"));
             return;
         }
         exchange.getResponseHeaders().set("Access-Control-Allow-Methods", route.allowHeader());
         exchange.getResponseHeaders().set("Access-Control-Allow-Headers",
-                "Authorization, Content-Type");
+                route.kind() == ApiRoutes.Kind.EVENTS
+                        ? "Authorization, Content-Type, Last-Event-ID"
+                        : "Authorization, Content-Type");
         exchange.sendResponseHeaders(204, -1);
     }
 

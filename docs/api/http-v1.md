@@ -1,6 +1,6 @@
 # Jcode 本机 HTTP API v1
 
-服务只监听 `127.0.0.1`。所有业务请求和 SSE 都携带 `Authorization: Bearer <service-token>`；Token 保存在服务数据目录的 `service.token`，不会出现在 `runtime.json`。有 `Origin` 的请求只接受服务同源或配置中的精确来源。
+服务只监听 `127.0.0.1`。所有业务请求和 SSE 都携带 `Authorization: Bearer <service-token>`；Token 保存在服务数据目录的 `service.token`，不会出现在 `runtime.json`。有 `Origin` 的请求只接受服务同源或配置中的精确来源。跨域 SSE 重连的预检允许 `Authorization` 和 `Last-Event-ID` 请求头。
 
 ## 路由
 
@@ -23,7 +23,7 @@
 | GET | `/sessions/{sessionId}/events` | 200 SSE |
 | POST | `/server/stop` | 202，仅服务空闲时 |
 
-`POST /sessions` 接受 `{"workspaceId":"project"}`。`GET /session-files` 返回该工作区目录中的文件引用；`POST /sessions/open` 接受 `{"workspaceId":"project","fileRef":"…jsonl"}`。文件引用是该目录下的文件名，不能用绝对路径或 `..` 访问其他文件。关闭会话保留历史文件。
+`POST /sessions` 接受 `{"workspaceId":"project"}`。`GET /session-files` 返回该工作区目录中的文件引用；`POST /sessions/open` 接受 `{"workspaceId":"project","fileRef":"…jsonl"}`。文件引用是该目录下的文件名，不能用绝对路径或 `..` 访问其他文件。创建、托管列表和打开响应中的 `workspaceId` 对应历史文件所属目录；即使多个工作区指向同一运行目录，也可用返回的 `workspaceId + fileRef` 重开。关闭会话保留历史文件。
 
 Run、输入和审批命令分别使用现有 `RunCommand`、`InputCommand`、`ApprovalCommand` JSON 字段。客户端在首次发送前生成 `commandId`、`runId`、`inputId`，重试时原样保留。输入请求体的 `targetRunId`、审批请求体的 `approvalId` 必须与路径一致。`202` 只表示命令已接纳，不预测最终 Run 状态；连接断开不会取消 Run。取消返回的 `cancelRequested` 与最终状态分别查询。
 
