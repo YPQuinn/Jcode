@@ -98,9 +98,9 @@ mvn verify
 mvn -pl coding-agent -am test
 ```
 
-### 启动本机服务（阶段 B2）
+### 启动本机服务
 
-服务提供受认证的 Session、Run、输入、审批、历史查询与 SSE 路由。请求和重连方式见 [HTTP API v1](docs/api/http-v1.md)。
+服务提供受认证的 Session、Run、输入、审批、历史查询与 SSE 路由。请求格式见 [HTTP API v1](docs/api/http-v1.md)；客户端退出后接管和浏览器示例见 [本机服务接管指南](docs/api/client-takeover.md)。
 
 ```json
 {
