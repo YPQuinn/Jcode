@@ -142,7 +142,16 @@ class SessionRegistryTest {
 
     @Test
     void failedCloseReportsFailureAndDoesNotCacheClosedSession() throws Exception {
-        var closeFailure = new IllegalStateException("injected shutdown failure");
+        assertFailedCloseDoesNotCache(new IllegalStateException("injected shutdown failure"));
+    }
+
+    @Test
+    void busyErrorFromShutdownStillRemovesClosedSession() throws Exception {
+        assertFailedCloseDoesNotCache(new ApiException(
+                ErrorCode.SESSION_BUSY, "injected shutdown failure"));
+    }
+
+    private void assertFailedCloseDoesNotCache(RuntimeException closeFailure) throws Exception {
         CodingExtension extension = new CodingExtension() {
             @Override
             public String id() {
@@ -162,7 +171,7 @@ class SessionRegistryTest {
         String id = original.sessionId();
         Path file = original.sessionFile().orElseThrow();
 
-        var reported = assertThrows(IllegalStateException.class, () -> registry.close(id));
+        var reported = assertThrows(RuntimeException.class, () -> registry.close(id));
         assertSame(closeFailure, reported);
         assertTrue(registry.find(id).isEmpty());
         var reopened = registry.open(config(new ImmediateClient(), InputDeliveryMode.RUN_SCOPED), file);

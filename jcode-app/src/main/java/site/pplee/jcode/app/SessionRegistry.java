@@ -144,16 +144,10 @@ public final class SessionRegistry {
                 throw new ApiException(ErrorCode.NOT_FOUND, "session is not managed");
             }
         }
-        boolean closeAccepted = true;
         try {
             session.closeIdle();
-        } catch (ApiException rejection) {
-            if (rejection.error().code() == ErrorCode.SESSION_BUSY) {
-                closeAccepted = false;
-            }
-            throw rejection;
         } finally {
-            if (closeAccepted && session.isClosed()) {
+            if (session.isCloseSettled()) {
                 beforeCloseCleanup.run();
                 synchronized (lock) {
                     if (byId.remove(sessionId, session)) {

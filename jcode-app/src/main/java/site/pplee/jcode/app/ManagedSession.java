@@ -283,6 +283,12 @@ public final class ManagedSession {
         }
     }
 
+    boolean isCloseSettled() {
+        synchronized (lock) {
+            return closing != null && closing.isDone();
+        }
+    }
+
     private InputView inputView(InputEntry entry) {
         var record = core.input(entry.command.inputId()).orElseThrow();
         return toInputView(entry.command, record);
