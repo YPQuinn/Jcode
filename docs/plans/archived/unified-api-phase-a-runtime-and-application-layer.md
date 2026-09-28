@@ -2,10 +2,10 @@
 
 | 项目 | 内容 |
 |---|---|
-| 依据 | [总体架构 v0.1](unified-api-and-multi-end-architecture-design_v0.1.md)，重点为 §4.4、§5、§7、§9、§13、§14 |
+| 依据 | [总体架构 v0.1](../unified-api-and-multi-end-architecture-design_v0.1.md)，重点为 §4.4、§5、§7、§9、§13、§14 |
 | 代码基线 | `YPQuinn/Jcode@6db4fd35a3a6cf5b7780fde036f4e80ef82a933c` |
 | 日期 | 2026-09-26 |
-| 状态 | A1–A3 已实现；阶段 B 已完成 |
+| 状态 | A1–A3 已实现；阶段 B 已完成；已归档 |
 | 本轮约束 | 不过度设计，不引入复杂安全机制；优先复用现有代码 |
 
 ## 1. 本阶段只解决什么
