@@ -1,6 +1,6 @@
 # Interactive TUI 设计方案
 
-> 状态：设计讨论中（尚未实施）；已按 `33ac240` 的审阅意见修订。已确认决策见 §11.1，待确认项见 §11.2
+> 状态：设计已确认（尚未实施）；已按 `33ac240` 的审阅意见修订，决策记录见 §11
 >
 > Jcode 基线：`59a73fb`（2026-09-27，统一 API 阶段 A、B 已完成）
 >
@@ -113,7 +113,8 @@
 - `jcode-tui`：禁止依赖任何 Jcode 模块。
 - `jcode-client`：只允许依赖 `jcode-protocol`。
 - `jcode-cli`：只允许依赖 `jcode-client`、`jcode-protocol`、`jcode-tui`；禁止依赖 `coding-agent`、`jcode-app`、`jcode-server`、`agent-core`、`ai`、`ai-providers`。
-- 其余模块禁止依赖上述三个客户端模块。
+- `jcode-dist`：只做打包，允许依赖 `jcode-cli` 与 `jcode-server`，不含 Java 代码。
+- 除 `jcode-dist` 外，其余模块禁止依赖上述三个客户端模块。
 
 **test scope 例外**：`jcode-client` 与 `jcode-cli` 可以在 test scope 依赖 `jcode-server` 及其 test-jar，用于复用现有的测试服务与假模型装配，做进程内或子进程集成测试。`jcode-server` 发布 test-jar 属于 T3.1 的改动。生产代码仍无法绕过服务。
 
@@ -130,7 +131,17 @@ HTTP 与 SSE 使用 JDK `java.net.http.HttpClient`。参数解析手写强类型
 
 - `jcode-cli` 提供 `site.pplee.jcode.cli.Main`；`jcode-server` 仍是独立服务入口。
 - 自动拉起时，客户端使用当前 JVM 可执行文件（`ProcessHandle.current().info().command()`）加服务 classpath；服务 jar 位置由发行目录布局决定，开发时可用环境变量 `JCODE_SERVER_JAR` 指定。
-- 发行形态见 §11.2。
+- 新增纯打包模块 `jcode-dist`（T3.2），产出发行目录或压缩包：
+
+  ```text
+  jcode-<version>/
+  ├── bin/jcode            启动脚本（java -jar lib/jcode-cli.jar）
+  └── lib/
+      ├── jcode-cli.jar
+      └── jcode-server.jar
+  ```
+
+  CLI 按自身 jar 所在目录定位同级的 `jcode-server.jar`；`JCODE_SERVER_JAR` 可以覆盖。native image、系统安装器与包管理器分发不在范围内。
 
 ## 4. `jcode-tui` 模块设计
 
@@ -371,9 +382,9 @@ SessionReducer → 本地快照 → 恢复游标 → 历史合并 → 发布视�
 - `-p --session …` 或 `-p -c` 遇到已有活动 Run 时明确报忙，不会转成对那个 Run 的 steer。
 - SIGINT/SIGTERM 只对本次调用已生成的 `runId` 发出取消请求，不根据“当前活动 Run”重新选择目标；有界等待终态后退出。
 
-**审批：** 首版非交互模式不自动批准，也不从 stdin 读取审批答案。遇到待审批事项时，在 stderr 输出 Session ID、Run ID、待审批工具，以及接管方法（`jcode --session <id>`），然后以退出码 4 结束；任务保留在服务端，由其他客户端接管。“等待其他客户端审批”作为后续的显式选项再设计。
+**审批：** 首版非交互模式不自动批准，也不从 stdin 读取审批答案。遇到待审批事项时，在 stderr 输出 Session ID、Run ID、待审批工具，以及接管方法（`jcode --session <id>`），然后以退出码 4 结束；任务保留在服务端，由其他客户端接管。首版不提供等待审批的选项；以后如有需要，再以显式选项（如 `--wait-approval`）增加，不改变默认行为。
 
-**截断：** `RunView.text` 是终态摘要，可能带 `textTruncated`。遇到截断时仍把已有文本写到 stdout，但在 stderr 明确提示输出不完整，并以退出码 5 结束，不把摘要伪装成完整结果。需要完整输出时再补一个最小的正文读取能力，不必顺带建设完整导出协议。
+**截断：** `RunView.text` 是终态摘要，可能带 `textTruncated`。遇到截断时仍把已有文本写到 stdout，但在 stderr 明确提示输出不完整，并以退出码 5 结束，不把摘要伪装成完整结果。首版不提供完整正文读取；C-Enhanced 阶段视实际需要，再补一个按 `runId` 或 `entryId` 分段读取完整助手正文的只读接口，不顺带建设完整导出协议。
 
 **退出码：**
 
@@ -408,7 +419,19 @@ SessionReducer → 本地快照 → 恢复游标 → 历史合并 → 发布视�
 | 显示 | `--use-theme <dark\|light\|auto>`、`--verbose` | 本次运行的主题 / 完整启动信息 | — | T4.2 |
 | 其他 | `--config-dir <dir>`、`-h`、`-v` | — | — | T3.3 |
 
-待确认参数见 §11.2。
+**服务管理子命令**（T3.2）：
+
+| 命令 | 行为 |
+|---|---|
+| `jcode server status` | 读取实例描述并校验，显示是否运行、endpoint、instanceId、版本、托管会话数与运行中 Run 数 |
+| `jcode server start` | 复用自动拉起逻辑，只启动不连接；已在运行则直接报告 |
+| `jcode server stop` | 调用现有 `/v1/server/stop`；服务只在空闲时接受。有运行中任务时列出任务并以非零码退出，不强制取消 |
+
+**不提供的参数：**
+
+- 会话装配参数 `-t/-xt/-nt`、`--system-prompt`、`--append-system-prompt`、`--skill`、`--prompt-template`、`--no-default-resources`、`-nc`、`-a/-na`：需要 S5，延后到 T6 与 S5 一起设计。首版会话一律按用户设置与项目设置装配。
+- `--no-session`：服务不支持内存会话，删除。
+- `--session-dir`：会话目录由服务拥有，删除；需要隔离存储时用 `--config-dir` 使用另一个配置目录与服务实例。
 
 ### 5.10 斜杠命令清单（首版）
 
@@ -476,7 +499,7 @@ SessionReducer → 本地快照 → 恢复游标 → 历史合并 → 发布视�
 | S2 | 模型目录、资源列表与诊断、上下文占用与 usage、会话信息、JSONL 导出、settings 读写、信任查询与保存 | 只读查询 / 用户配置写入 | `/model` `/session` `/export` `/settings` `/trust`、补全、header 与 footer 详情 | T5 |
 | S3 | 协议粒度（见 §6.3） | 协议扩展 | 富渲染、footer | T4 |
 | S4 | 工作区注册（契约见 §5.2） | 服务配置 | 任意目录启动 | T3 |
-| S5 | 创建会话时由客户端指定装配参数 | 待定 | §11.2 中待确认的参数 | 待定 |
+| S5 | 创建会话时由客户端指定装配参数（需先定义信任边界、多端可见性与持久化） | 待定 | §5.9 中延后的会话装配参数 | T6 |
 
 ### 6.3 S3 字段与兼容方式
 
@@ -574,7 +597,7 @@ S3 只增加以下字段，客户端专用渲染只使用这些实际提供的�
 | 任务 | 内容 | 前置 |
 |---|---|---|
 | T3.1 协议客户端与显式连接 | 创建 `jcode-client`；`jcode-server` 发布 test-jar；`connect(dataDirectory)`、鉴权、命令身份与重试、错误映射；SSE 解析；`ObservedSession`（快照、游标、连接代次、串行 executor、读取线程背压、回执不回退、实例变化不重提） | — |
-| T3.2 自动拉起与工作区注册 | 客户端：启动协调锁、默认 `server.json`、三路标准流重定向、脱离终端会话、就绪等待、cwd 工作区解析；服务端 S4（显式配置路径、可变注册表、幂等、串行、先持久化后发布） | T3.1、T3.3 |
+| T3.2 自动拉起与工作区注册 | 客户端：启动协调锁、默认 `server.json`、三路标准流重定向、脱离终端会话、就绪等待、cwd 工作区解析；服务端 S4（显式配置路径、可变注册表、幂等、串行、先持久化后发布）；`jcode server start|stop|status`；`jcode-dist` 打包 | T3.1、T3.3 |
 | T3.3 jcode-cli 骨架与 print 模式 | 创建 `jcode-cli`；`Main`、参数框架、`--config-dir`、`--no-start`；新建/`-c`/`--session`；§5.8 的全部规则；stdin、`@文件` | T3.1 |
 | T3.4 事件接入与 UI 线程 | UI executor 接入 `ObservedSession`、线程断言；纯文本消息、通用工具视图、运行状态、基础 header 与 footer | T1.5、T3.3 |
 | T3.5 交互主循环 | 布局（header、转录、待处理输入、状态行、Editor、footer）；提交路由（prompt / steer / follow-up）；焦点优先级下的 Esc 取消；输入状态展示与 `NOT_APPLIED` 恢复草稿；退出与后台提示 | T2.4、T3.4 |
@@ -675,11 +698,15 @@ tui 主线     T1.1 → T1.2 → T1.3 → T1.4 → T1.5
 17. **里程碑**：C-MVP 与 C-Enhanced（§8.2）；C-MVP 必须包含审批。
 18. **测试依赖**：Enforcer 约束生产依赖；客户端模块可在 test scope 依赖 `jcode-server` 及其 test-jar。
 
+**2026-09-27 待确认项结论（均按建议）：**
+
+19. **会话装配参数**：首版不做，延后到 T6 与 S5 一起设计。
+20. **`--no-session`、`--session-dir`**：删除。
+21. **服务管理子命令**：提供 `jcode server start|stop|status`，放在 T3.2；`stop` 不强制取消运行中任务。
+22. **发行形态**：新增纯打包模块 `jcode-dist`，产出 `bin/` + `lib/` 发行目录；开发期用 `JCODE_SERVER_JAR`。
+23. **print 等待审批**：首版不做，遇到审批按退出码 4 结束。
+24. **完整输出读取**：首版不做，C-Enhanced 阶段视需要再定；截断按退出码 5 结束。
+
 ### 11.2 待确认
 
-1. **会话装配参数**：`-t/-xt/-nt`、`--system-prompt`、`--append-system-prompt`、`--skill`、`--prompt-template`、`--no-default-resources`、`-nc`、`-a/-na` 在服务模式下需要 S5。建议：首版不做，延后到 T6 与 S5 一起设计。
-2. **`--no-session` 与 `--session-dir`**：服务不支持内存会话，会话目录由服务拥有。建议：删除这两个参数。
-3. **服务管理子命令**：是否提供 `jcode server start|stop|status`。建议：提供，放在 T3.2。
-4. **发行形态**：建议新增聚合模块 `jcode-dist`，产出含 `jcode-cli`、`jcode-server` 与启动脚本的发行目录；开发期用 `JCODE_SERVER_JAR`。
-5. **print 模式等待审批**：是否增加显式选项（如 `--wait-approval`），让 `-p` 在需要审批时等待其他客户端决定，而不是以退出码 4 结束。建议：首版不做。
-6. **完整输出读取**：是否为 print 模式补一个最小的正文读取能力，避免截断时只能以退出码 5 结束。建议：C-Enhanced 阶段视实际需要再定。
+暂无。
